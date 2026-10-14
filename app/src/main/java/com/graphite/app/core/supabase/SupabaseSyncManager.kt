@@ -1,0 +1,92 @@
+package com.graphite.app.core.supabase
+
+import com.graphite.app.data.model.NotebookItem
+import com.graphite.app.data.repository.GraphiteRepository
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+
+sealed interface SupabaseSyncStatus {
+    data object Idle : SupabaseSyncStatus
+    data object Syncing : SupabaseSyncStatus
+    data class Success(val syncedCount: Int, val timestampMillis: Long = System.currentTimeMillis()) : SupabaseSyncStatus
+    data class Error(val message: String) : SupabaseSyncStatus
+    data object Unauthenticated : SupabaseSyncStatus
+}
+
+class SupabaseSyncManager(
+    private val authManager: SupabaseAuthManager,
+    private val notesRepository: SupabaseNotesRepository,
+    private val graphiteRepository: GraphiteRepository = GraphiteRepository,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+) {
+
+    private val _syncStatus = MutableStateFlow<SupabaseSyncStatus>(SupabaseSyncStatus.Idle)
+    val syncStatus: StateFlow<SupabaseSyncStatus> = _syncStatus.asStateFlow()
+
+    /**
+     * Executes two-way cross-device synchronization between local repository and Supabase.
+     *
+     * SECURITY INVARIANTS & POLICIES:
+     * 1. Requires active authentication under Postgres Row Level Security (RLS).
+     * 2. Notes are strictly partitioned by authenticated Supabase user ID.
+     * 3. Deterministic conflict handling (Last-Write-Wins based on updatedAtMillis).
+     * 4. Deletions are propagated safely across devices using tombstone reconciliation.
+     * 5. Offline-first: works offline and reconciles when connectivity resumes.
+     * 6. Completely isolated from Google Drive: NEVER invokes Google Drive API or creates Drive files.
+     */
+    suspend fun syncNotes(): Result<Int> = withContext(ioDispatcher) {
+        if (!authManager.isAuthenticated()) {
+            _syncStatus.value = SupabaseSyncStatus.Unauthenticated
+            return@withContext Result.failure(
+                SecurityException("Authentication required: Please sign in to sync notes with Supabase.")
+            )
+        }
+
+        _syncStatus.value = SupabaseSyncStatus.Syncing
+
+        try {
+            // 1. Fetch remote notes from Supabase for this user first
+            val remoteNotesResult = notesRepository.fetchNotes()
+            if (remoteNotesResult.isFailure) {
+                val ex = remoteNotesResult.exceptionOrNull()
+                _syncStatus.value = SupabaseSyncStatus.Error(ex?.message ?: "Failed to fetch remote notes")
+                return@withContext Result.failure(ex ?: Exception("Fetch failed"))
+            }
+
+            val remoteNotes = remoteNotesResult.getOrThrow()
+            val remoteMap = remoteNotes.associateBy { it.id }
+
+            // 2. Identify local notes that are genuinely newer than remote or local-only
+            val localNotes = graphiteRepository.getAllNotesForActiveUser()
+            val pendingLocalNotesToUpload = localNotes.filter { local ->
+                val remote = remoteMap[local.id]
+                remote == null || local.updatedAtMillis > remote.updatedAtMillis
+            }
+
+            // 3. Upload only newer/dirty local notes to Supabase via idempotent upsert
+            // (Avoids blindly overwriting newer remote edits with stale local versions)
+            if (pendingLocalNotesToUpload.isNotEmpty()) {
+                notesRepository.upsertNotes(pendingLocalNotesToUpload).getOrThrow()
+            }
+
+            // 4. Reconcile remote changes into local workspace (Last-Write-Wins and Tombstones)
+            graphiteRepository.reconcileRemoteNotes(remoteNotes)
+
+            val totalSynced = maxOf(localNotes.size, remoteNotes.size)
+            _syncStatus.value = SupabaseSyncStatus.Success(totalSynced)
+            Result.success(totalSynced)
+        } catch (e: Exception) {
+            val msg = e.message ?: "Failed to sync notes with Supabase"
+            _syncStatus.value = SupabaseSyncStatus.Error(msg)
+            Result.failure(e)
+        }
+    }
+
+    fun resetStatus() {
+        _syncStatus.value = SupabaseSyncStatus.Idle
+    }
+}
