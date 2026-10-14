@@ -48,6 +48,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.layout.ContentScale
@@ -121,7 +124,6 @@ fun CanvasEditorScreen(
 
     // Tool & Mode state
     var isReadOnlyMode by remember { mutableStateOf(false) } // ⊘ button
-    var allowFingerDrawing by remember { mutableStateOf(false) } // Hand drawing toggle
     var selectedStudioTool by remember { mutableStateOf(StudioTool.PEN) }
 
     // UI Drawer & Menu toggles
@@ -146,16 +148,6 @@ fun CanvasEditorScreen(
     var panX by remember { mutableFloatStateOf(0f) }
     var pageRotation by remember { mutableFloatStateOf(0f) }
     var scrollingMode by remember { mutableStateOf("Vertical") }
-    
-    // Dedicated two-finger gesture tracking (pinch vs two-finger scroll)
-    var pinchStartDist by remember { mutableFloatStateOf(0f) }
-    var lastPinchDist by remember { mutableFloatStateOf(0f) }
-    var twoFingerStartY by remember { mutableFloatStateOf(0f) }
-    var lastTwoFingerY by remember { mutableFloatStateOf(0f) }
-    var twoFingerStartX by remember { mutableFloatStateOf(0f) }
-    var lastTwoFingerX by remember { mutableFloatStateOf(0f) }
-    var isTwoFingerActive by remember { mutableStateOf(false) }
-    var twoFingerGestureMode by remember { mutableIntStateOf(0) } // 0=Undecided, 1=Zooming, 2=Scrolling
 
     // Drawer state (Image 4)
     var selectedDrawerTab by remember { mutableIntStateOf(0) } // 0=Grid, 1=Bookmarks, 2=Outline
@@ -379,10 +371,91 @@ fun CanvasEditorScreen(
         }
 
         Box(
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        var gestureMode = 0 // 0=undecided, 1=zoom, 2=scroll
+                        var startDist = 0f
+                        var startCenterY = 0f
+                        var lastDist = 0f
+                        var lastCenterY = 0f
+                        var lastCenterX = 0f
+
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val pressed = event.changes.filter { it.pressed }
+
+                            // If a hardware stylus or eraser is on screen, NEVER intercept or scroll!
+                            val hasStylus = pressed.any {
+                                it.type == PointerType.Stylus || it.type == PointerType.Eraser
+                            }
+
+                            if (!hasStylus && pressed.size >= 2) {
+                                val p0 = pressed[0].position
+                                val p1 = pressed[1].position
+                                val curDist = (p0 - p1).getDistance()
+                                val curCenterY = (p0.y + p1.y) / 2f
+                                val curCenterX = (p0.x + p1.x) / 2f
+
+                                if (gestureMode == 0) {
+                                    if (startDist == 0f) {
+                                        startDist = curDist
+                                        startCenterY = curCenterY
+                                        lastDist = curDist
+                                        lastCenterY = curCenterY
+                                        lastCenterX = curCenterX
+                                    } else {
+                                        val distDelta = kotlin.math.abs(curDist - startDist)
+                                        val yDelta = kotlin.math.abs(curCenterY - startCenterY)
+                                        if (distDelta > 16f) {
+                                            gestureMode = 1 // Pinch-to-zoom
+                                        } else if (yDelta > 12f) {
+                                            gestureMode = 2 // Two-finger scroll
+                                        }
+                                    }
+                                }
+
+                                if (gestureMode == 1) {
+                                    // ZOOMING: only change zoom scale, NEVER scroll!
+                                    if (lastDist > 10f && curDist > 10f) {
+                                        val factor = curDist / lastDist
+                                        if (factor in 0.6f..1.6f) {
+                                            zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
+                                        }
+                                    }
+                                } else if (gestureMode == 2) {
+                                    // TWO-FINGER SCROLL: vertical scrolling
+                                    val dy = curCenterY - lastCenterY
+                                    listState.dispatchRawDelta(dy)
+
+                                    val dx = curCenterX - lastCenterX
+                                    if (zoomScale > 1f) {
+                                        panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                    }
+                                }
+
+                                lastDist = curDist
+                                lastCenterY = curCenterY
+                                lastCenterX = curCenterX
+
+                                // Consume touch events so child canvases don't receive two-finger events
+                                pressed.forEach { it.consume() }
+                            } else if (pressed.size < 2) {
+                                gestureMode = 0
+                                startDist = 0f
+                                startCenterY = 0f
+                                lastDist = 0f
+                                lastCenterY = 0f
+                                lastCenterX = 0f
+                            }
+                        } while (pressed.isNotEmpty())
+                    }
+                }
         ) {
             LazyColumn(
                 state = listState,
+                userScrollEnabled = false,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(top = 58.dp, bottom = 16.dp),
@@ -476,129 +549,42 @@ fun CanvasEditorScreen(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .pointerInteropFilter { motionEvent ->
-                                        val pointerCount = motionEvent.pointerCount
-                                        val action = motionEvent.actionMasked
-
-                                        // Check if a hardware stylus is in contact
-                                        val hasHardwareStylus = (0 until pointerCount).any { idx ->
-                                            val t = motionEvent.getToolType(idx)
-                                            t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
-                                        }
-
-                                        // ================================================================
-                                        // CASE A: TWO (OR MORE) FINGERS -> ZOOM OR TWO-FINGER SCROLL ONLY
-                                        // Page scrolling ONLY works with two finger swipe.
-                                        // When zooming in or out, pages will NEVER scroll!
-                                        // ================================================================
-                                        if (pointerCount >= 2 && !hasHardwareStylus) {
-                                            activePoints = emptyList()
-                                            lassoPoints = emptyList()
-                                            activeEraserCenter = null
-
-                                            val p0x = motionEvent.getX(0)
-                                            val p0y = motionEvent.getY(0)
-                                            val p1x = motionEvent.getX(1)
-                                            val p1y = motionEvent.getY(1)
-                                            val curDist = kotlin.math.hypot((p1x - p0x).toDouble(), (p1y - p0y).toDouble()).toFloat()
-                                            val curCenterY = (p0y + p1y) / 2f
-                                            val curCenterX = (p0x + p1x) / 2f
-
-                                            when (action) {
-                                                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_DOWN -> {
-                                                    isTwoFingerActive = true
-                                                    twoFingerGestureMode = 0 // Undecided
-                                                    pinchStartDist = curDist
-                                                    lastPinchDist = curDist
-                                                    twoFingerStartY = curCenterY
-                                                    lastTwoFingerY = curCenterY
-                                                    twoFingerStartX = curCenterX
-                                                    lastTwoFingerX = curCenterX
-                                                }
-                                                MotionEvent.ACTION_MOVE -> {
-                                                    isTwoFingerActive = true
-                                                    val distDelta = kotlin.math.abs(curDist - pinchStartDist)
-                                                    val yDelta = kotlin.math.abs(curCenterY - twoFingerStartY)
-
-                                                    if (twoFingerGestureMode == 0) {
-                                                        if (distDelta > 18f) {
-                                                            twoFingerGestureMode = 1 // PINCH ZOOM
-                                                        } else if (yDelta > 14f) {
-                                                            twoFingerGestureMode = 2 // TWO-FINGER SCROLL
-                                                        }
-                                                    }
-
-                                                    if (twoFingerGestureMode == 1) {
-                                                        // ZOOMING: do NOT scroll listState while zooming!
-                                                        if (lastPinchDist > 10f && curDist > 10f) {
-                                                            val factor = curDist / lastPinchDist
-                                                            if (factor in 0.6f..1.6f) {
-                                                                zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
-                                                            }
-                                                        }
-                                                        lastPinchDist = curDist
-                                                    } else if (twoFingerGestureMode == 2) {
-                                                        // SCROLLING: Two finger vertical swipe
-                                                        val dy = curCenterY - lastTwoFingerY
-                                                        lastTwoFingerY = curCenterY
-                                                        listState.dispatchRawDelta(dy)
-
-                                                        val dx = curCenterX - lastTwoFingerX
-                                                        lastTwoFingerX = curCenterX
-                                                        if (zoomScale > 1f) {
-                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                                        }
-                                                    }
-                                                }
-                                                MotionEvent.ACTION_POINTER_UP -> {}
-                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                    isTwoFingerActive = false
-                                                    twoFingerGestureMode = 0
-                                                }
-                                            }
-                                            return@pointerInteropFilter true
-                                        }
-
-                                        // Ignore trailing finger release after a two-finger gesture
-                                        if (isTwoFingerActive) {
-                                            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                                                isTwoFingerActive = false
-                                                twoFingerGestureMode = 0
-                                            }
-                                            return@pointerInteropFilter true
-                                        }
-
-                                        // ================================================================
-                                        // CASE B: SINGLE TOUCH (Stylus OR Single Finger)
-                                        // Single touch NEVER scrolls the page! Pages never move while drawing!
-                                        // ================================================================
                                         if (isReadOnlyMode) {
                                             return@pointerInteropFilter true
                                         }
 
-                                        val isStylus = hasHardwareStylus ||
-                                                motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS ||
-                                                motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
+                                        val pointerCount = motionEvent.pointerCount
 
-                                        // If finger drawing is OFF and this is NOT a stylus: do not draw and do not scroll
-                                        if (!allowFingerDrawing && !isStylus) {
+                                        // Ignore any two-finger touches (handled by the viewport)
+                                        val hasHardwareStylus = (0 until pointerCount).any { idx ->
+                                            val t = motionEvent.getToolType(idx)
+                                            t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+                                        }
+                                        if (pointerCount >= 2 && !hasHardwareStylus) {
+                                            activePoints = emptyList()
+                                            lassoPoints = emptyList()
+                                            activeEraserCenter = null
                                             return@pointerInteropFilter true
                                         }
 
-                                        val targetPointerIdx = if (hasHardwareStylus) {
-                                            (0 until pointerCount).firstOrNull { idx ->
-                                                val t = motionEvent.getToolType(idx)
-                                                t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
-                                            } ?: 0
-                                        } else 0
+                                        val packet = StylusEventParser.parse(motionEvent, 0)
+                                        val accepted = palmFilter.shouldAcceptEvent(packet)
 
-                                        val packet = StylusEventParser.parse(motionEvent, targetPointerIdx)
-                                        activePageForStroke = pageIdx
+                                        workspaceViewModel.setStylusActive(
+                                            packet.toolType == StylusToolType.STYLUS || packet.toolType == StylusToolType.ERASER
+                                        )
+
+                                        // Reject finger touches & palm contact: STYLUS ONLY DRAWS!
+                                        if (!accepted) {
+                                            return@pointerInteropFilter true
+                                        }
 
                                         val isHardwareEraser = packet.isEraser || packet.isPrimaryButtonPressed
                                         val isEffectiveEraser = isHardwareEraser || selectedStudioTool == StudioTool.ERASER
 
                                         when (packet.action) {
                                             MotionActionType.DOWN -> {
+                                                activePageForStroke = pageIdx
                                                 if (selectedStudioTool == StudioTool.LASSO) {
                                                     lassoPoints = listOf(Offset(packet.x, packet.y))
                                                     selectedStrokeIndices = emptySet()
@@ -619,30 +605,26 @@ fun CanvasEditorScreen(
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(packet.x, packet.y)
                                                     for (h in 0 until motionEvent.historySize) {
-                                                        if (targetPointerIdx < motionEvent.pointerCount) {
-                                                            workspaceViewModel.eraseAt(
-                                                                motionEvent.getHistoricalX(targetPointerIdx, h),
-                                                                motionEvent.getHistoricalY(targetPointerIdx, h),
-                                                                32f,
-                                                                pageIndex = pageIdx
-                                                            )
-                                                        }
+                                                        workspaceViewModel.eraseAt(
+                                                            motionEvent.getHistoricalX(0, h),
+                                                            motionEvent.getHistoricalY(0, h),
+                                                            32f,
+                                                            pageIndex = pageIdx
+                                                        )
                                                     }
                                                     workspaceViewModel.eraseAt(packet.x, packet.y, 32f, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     val batch = ArrayList<InkPoint>(motionEvent.historySize + 1)
                                                     for (h in 0 until motionEvent.historySize) {
-                                                        if (targetPointerIdx < motionEvent.pointerCount) {
-                                                            batch.add(
-                                                                InkPoint(
-                                                                    motionEvent.getHistoricalX(targetPointerIdx, h),
-                                                                    motionEvent.getHistoricalY(targetPointerIdx, h),
-                                                                    motionEvent.getHistoricalPressure(targetPointerIdx, h).coerceIn(0.05f, 1f),
-                                                                    motionEvent.getHistoricalEventTime(h)
-                                                                )
+                                                        batch.add(
+                                                            InkPoint(
+                                                                motionEvent.getHistoricalX(0, h),
+                                                                motionEvent.getHistoricalY(0, h),
+                                                                motionEvent.getHistoricalPressure(0, h).coerceIn(0.05f, 1f),
+                                                                motionEvent.getHistoricalEventTime(h)
                                                             )
-                                                        }
+                                                        )
                                                     }
                                                     batch.add(
                                                         InkPoint(packet.x, packet.y, packet.normalizedPressure, packet.timestamp)
@@ -703,15 +685,20 @@ fun CanvasEditorScreen(
 
                                 // Committed ink strokes for this specific page only
                                 uiState.strokes.forEachIndexed { idx, stroke ->
-                                    if (stroke.pageIndex == pageIdx && stroke.points.size >= 2) {
+                                    if (stroke.pageIndex == pageIdx && stroke.points.isNotEmpty()) {
                                         val path = BezierSplineInterpolator.createSplinePath(stroke.points)
                                         val isSelectedByLasso = selectedStrokeIndices.contains(idx)
                                         val strokeColor = if (isSelectedByLasso) Color(0xFF00BCD4) else stroke.color
+                                        val avgPressure = stroke.points.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                        val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
+                                            stroke.baseWidth * d,
+                                            avgPressure
+                                        )
                                         drawPath(
                                             path = path,
                                             color = strokeColor,
                                             style = Stroke(
-                                                width = stroke.baseWidth * d,
+                                                width = effectiveWidth,
                                                 cap = StrokeCap.Round,
                                                 join = StrokeJoin.Round
                                             )
@@ -720,13 +707,21 @@ fun CanvasEditorScreen(
                                 }
 
                                 // Live in-progress stroke
-                                if (activePoints.size >= 2 && activePageForStroke == pageIdx) {
+                                if (activePoints.isNotEmpty() && activePageForStroke == pageIdx) {
                                     val activePath = BezierSplineInterpolator.createSplinePath(activePoints)
+                                    val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
+                                    val baseW = if (selectedStudioTool == StudioTool.HIGHLIGHTER) {
+                                        uiState.selectedStrokeWidth * 3.5f
+                                    } else uiState.selectedStrokeWidth
+                                    val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
+                                        baseW * d,
+                                        currentPressure
+                                    )
                                     drawPath(
                                         path = activePath,
                                         color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
                                         style = Stroke(
-                                            width = uiState.selectedStrokeWidth * d,
+                                            width = effectiveWidth,
                                             cap = StrokeCap.Round,
                                             join = StrokeJoin.Round
                                         )
@@ -1012,25 +1007,6 @@ fun CanvasEditorScreen(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Finger Drawing Toggle Button
-                    IconButton(
-                        onClick = {
-                            allowFingerDrawing = !allowFingerDrawing
-                            Toast.makeText(
-                                context,
-                                if (allowFingerDrawing) "Finger Drawing ON: You can draw using your hand" else "Finger Drawing OFF: Fingers scroll/zoom pages, Stylus draws",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.TouchApp,
-                            contentDescription = "Hand/Finger Drawing Toggle",
-                            tint = if (allowFingerDrawing) Color(0xFF00BCD4) else Color(0xFF888888),
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
 
                     // Plus (+) button -> Opens Add Menu (Image 2)
                     IconButton(

@@ -22,7 +22,7 @@ data class WorkspaceUiState(
     val selectedColor: Color = WorkspaceColors.CoralOrange,
     val selectedStrokeWidth: Float = 4.0f,
     val paperStyle: PaperStyle = PaperStyle.RULED,
-    val inputPolicy: InputModePolicy = InputModePolicy.ACTIVE_PALM_GUARD,
+    val inputPolicy: InputModePolicy = InputModePolicy.STYLUS_ONLY_FOR_INK,
     val showClearDialog: Boolean = false,
     val isStylusActive: Boolean = false
 )
