@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
@@ -394,60 +395,43 @@ fun CanvasEditorScreen(
                             if (!hasStylus && pressed.size >= 2) {
                                 val p0 = pressed[0].position
                                 val p1 = pressed[1].position
+                                val prev0 = pressed[0].previousPosition
+                                val prev1 = pressed[1].previousPosition
+
                                 val curDist = (p0 - p1).getDistance()
-                                val curCenterY = (p0.y + p1.y) / 2f
-                                val curCenterX = (p0.x + p1.x) / 2f
+                                val prevDist = (prev0 - prev1).getDistance()
+                                val pinchChange = kotlin.math.abs(curDist - prevDist)
 
-                                if (gestureMode == 0) {
-                                    if (startDist == 0f) {
-                                        startDist = curDist
-                                        startCenterY = curCenterY
-                                        lastDist = curDist
-                                        lastCenterY = curCenterY
-                                        lastCenterX = curCenterX
-                                    } else {
-                                        val distDelta = kotlin.math.abs(curDist - startDist)
-                                        val yDelta = kotlin.math.abs(curCenterY - startCenterY)
-                                        if (distDelta > 16f) {
-                                            gestureMode = 1 // Pinch-to-zoom
-                                        } else if (yDelta > 12f) {
-                                            gestureMode = 2 // Two-finger scroll
-                                        }
+                                val dy0 = p0.y - prev0.y
+                                val dy1 = p1.y - prev1.y
+                                val avgDy = (dy0 + dy1) / 2f
+
+                                val dx0 = p0.x - prev0.x
+                                val dx1 = p1.x - prev1.x
+                                val avgDx = (dx0 + dx1) / 2f
+
+                                // Pinch-to-zoom when fingers move apart or together
+                                if (prevDist > 10f && curDist > 10f && pinchChange > 1.2f) {
+                                    val factor = curDist / prevDist
+                                    if (factor in 0.7f..1.4f) {
+                                        zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
                                     }
                                 }
 
-                                if (gestureMode == 1) {
-                                    // ZOOMING: only change zoom scale, NEVER scroll!
-                                    if (lastDist > 10f && curDist > 10f) {
-                                        val factor = curDist / lastDist
-                                        if (factor in 0.6f..1.6f) {
-                                            zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
-                                        }
-                                    }
-                                } else if (gestureMode == 2) {
-                                    // TWO-FINGER SCROLL: vertical scrolling
-                                    val dy = curCenterY - lastCenterY
-                                    listState.dispatchRawDelta(dy)
-
-                                    val dx = curCenterX - lastCenterX
-                                    if (zoomScale > 1f) {
-                                        panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                    }
+                                // Two-finger scroll: swipe up/down
+                                if (kotlin.math.abs(avgDy) > 0.5f) {
+                                    // In Compose LazyList: negative delta is upward swipe (scrolls downward to reveal later pages)
+                                    // dispatchRawDelta(-avgDy) correctly scrolls the list in the direction of the swipe
+                                    listState.dispatchRawDelta(-avgDy)
                                 }
 
-                                lastDist = curDist
-                                lastCenterY = curCenterY
-                                lastCenterX = curCenterX
+                                // Horizontal pan when zoomed in
+                                if (zoomScale > 1f && kotlin.math.abs(avgDx) > 0.5f) {
+                                    panX = (panX + avgDx).coerceIn(-maxPanX, maxPanX)
+                                }
 
                                 // Consume touch events so child canvases don't receive two-finger events
                                 pressed.forEach { it.consume() }
-                            } else if (pressed.size < 2) {
-                                gestureMode = 0
-                                startDist = 0f
-                                startCenterY = 0f
-                                lastDist = 0f
-                                lastCenterY = 0f
-                                lastCenterX = 0f
                             }
                         } while (pressed.isNotEmpty())
                     }
@@ -585,49 +569,53 @@ fun CanvasEditorScreen(
                                         when (packet.action) {
                                             MotionActionType.DOWN -> {
                                                 activePageForStroke = pageIdx
+                                                val baseX = packet.x / zoomScale
+                                                val baseY = packet.y / zoomScale
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    lassoPoints = listOf(Offset(packet.x, packet.y))
+                                                    lassoPoints = listOf(Offset(baseX, baseY))
                                                     selectedStrokeIndices = emptySet()
                                                     lassoBounds = null
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(packet.x, packet.y)
-                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f, pageIndex = pageIdx)
+                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / zoomScale, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     activePoints = listOf(
-                                                        InkPoint(packet.x, packet.y, packet.normalizedPressure, packet.timestamp)
+                                                        InkPoint(baseX, baseY, packet.normalizedPressure, packet.timestamp)
                                                     )
                                                 }
                                             }
                                             MotionActionType.MOVE -> {
+                                                val baseX = packet.x / zoomScale
+                                                val baseY = packet.y / zoomScale
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    lassoPoints = lassoPoints + Offset(packet.x, packet.y)
+                                                    lassoPoints = lassoPoints + Offset(baseX, baseY)
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(packet.x, packet.y)
                                                     for (h in 0 until motionEvent.historySize) {
                                                         workspaceViewModel.eraseAt(
-                                                            motionEvent.getHistoricalX(0, h),
-                                                            motionEvent.getHistoricalY(0, h),
-                                                            32f,
+                                                            motionEvent.getHistoricalX(0, h) / zoomScale,
+                                                            motionEvent.getHistoricalY(0, h) / zoomScale,
+                                                            32f / zoomScale,
                                                             pageIndex = pageIdx
                                                         )
                                                     }
-                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f, pageIndex = pageIdx)
+                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / zoomScale, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     val batch = ArrayList<InkPoint>(motionEvent.historySize + 1)
                                                     for (h in 0 until motionEvent.historySize) {
                                                         batch.add(
                                                             InkPoint(
-                                                                motionEvent.getHistoricalX(0, h),
-                                                                motionEvent.getHistoricalY(0, h),
+                                                                motionEvent.getHistoricalX(0, h) / zoomScale,
+                                                                motionEvent.getHistoricalY(0, h) / zoomScale,
                                                                 motionEvent.getHistoricalPressure(0, h).coerceIn(0.05f, 1f),
                                                                 motionEvent.getHistoricalEventTime(h)
                                                             )
                                                         )
                                                     }
                                                     batch.add(
-                                                        InkPoint(packet.x, packet.y, packet.normalizedPressure, packet.timestamp)
+                                                        InkPoint(baseX, baseY, packet.normalizedPressure, packet.timestamp)
                                                     )
                                                     activePoints = activePoints + batch
                                                 }
@@ -683,20 +671,47 @@ fun CanvasEditorScreen(
                             ) {
                                 val d = this.density
 
-                                // Committed ink strokes for this specific page only
-                                uiState.strokes.forEachIndexed { idx, stroke ->
-                                    if (stroke.pageIndex == pageIdx && stroke.points.isNotEmpty()) {
-                                        val path = BezierSplineInterpolator.createSplinePath(stroke.points)
-                                        val isSelectedByLasso = selectedStrokeIndices.contains(idx)
-                                        val strokeColor = if (isSelectedByLasso) Color(0xFF00BCD4) else stroke.color
-                                        val avgPressure = stroke.points.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                // Scale all ink strokes directly with the page zoom so strokes stick to the PDF
+                                withTransform({
+                                    scale(scaleX = zoomScale, scaleY = zoomScale, pivot = Offset.Zero)
+                                }) {
+                                    // Committed ink strokes for this specific page only
+                                    uiState.strokes.forEachIndexed { idx, stroke ->
+                                        if (stroke.pageIndex == pageIdx && stroke.points.isNotEmpty()) {
+                                            val path = BezierSplineInterpolator.createSplinePath(stroke.points)
+                                            val isSelectedByLasso = selectedStrokeIndices.contains(idx)
+                                            val strokeColor = if (isSelectedByLasso) Color(0xFF00BCD4) else stroke.color
+                                            val avgPressure = stroke.points.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                            val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
+                                                stroke.baseWidth * d,
+                                                avgPressure
+                                            )
+                                            drawPath(
+                                                path = path,
+                                                color = strokeColor,
+                                                style = Stroke(
+                                                    width = effectiveWidth,
+                                                    cap = StrokeCap.Round,
+                                                    join = StrokeJoin.Round
+                                                )
+                                            )
+                                        }
+                                    }
+
+                                    // Live in-progress stroke
+                                    if (activePoints.isNotEmpty() && activePageForStroke == pageIdx) {
+                                        val activePath = BezierSplineInterpolator.createSplinePath(activePoints)
+                                        val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
+                                        val baseW = if (selectedStudioTool == StudioTool.HIGHLIGHTER) {
+                                            uiState.selectedStrokeWidth * 3.5f
+                                        } else uiState.selectedStrokeWidth
                                         val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                            stroke.baseWidth * d,
-                                            avgPressure
+                                            baseW * d,
+                                            currentPressure
                                         )
                                         drawPath(
-                                            path = path,
-                                            color = strokeColor,
+                                            path = activePath,
+                                            color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
                                             style = Stroke(
                                                 width = effectiveWidth,
                                                 cap = StrokeCap.Round,
@@ -704,69 +719,47 @@ fun CanvasEditorScreen(
                                             )
                                         )
                                     }
-                                }
 
-                                // Live in-progress stroke
-                                if (activePoints.isNotEmpty() && activePageForStroke == pageIdx) {
-                                    val activePath = BezierSplineInterpolator.createSplinePath(activePoints)
-                                    val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
-                                    val baseW = if (selectedStudioTool == StudioTool.HIGHLIGHTER) {
-                                        uiState.selectedStrokeWidth * 3.5f
-                                    } else uiState.selectedStrokeWidth
-                                    val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                        baseW * d,
-                                        currentPressure
-                                    )
-                                    drawPath(
-                                        path = activePath,
-                                        color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
-                                        style = Stroke(
-                                            width = effectiveWidth,
-                                            cap = StrokeCap.Round,
-                                            join = StrokeJoin.Round
-                                        )
-                                    )
-                                }
-
-                                // Live Lasso selection loop
-                                if (lassoPoints.size >= 2 && activePageForStroke == pageIdx) {
-                                    val lassoPath = androidx.compose.ui.graphics.Path().apply {
-                                        moveTo(lassoPoints[0].x, lassoPoints[0].y)
-                                        for (i in 1 until lassoPoints.size) {
-                                            lineTo(lassoPoints[i].x, lassoPoints[i].y)
+                                    // Live Lasso selection loop
+                                    if (lassoPoints.size >= 2 && activePageForStroke == pageIdx) {
+                                        val lassoPath = androidx.compose.ui.graphics.Path().apply {
+                                            moveTo(lassoPoints[0].x, lassoPoints[0].y)
+                                            for (i in 1 until lassoPoints.size) {
+                                                lineTo(lassoPoints[i].x, lassoPoints[i].y)
+                                            }
                                         }
-                                    }
-                                    drawPath(
-                                        path = lassoPath,
-                                        color = Color(0xFF00BCD4),
-                                        style = Stroke(
-                                            width = 2.dp.toPx(),
-                                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
-                                        )
-                                    )
-                                }
-
-                                // Lasso Bounding Box
-                                lassoBounds?.let { b ->
-                                    if (activePageForStroke == pageIdx && selectedStrokeIndices.isNotEmpty()) {
-                                        drawRect(
-                                            color = Color(0xFF00BCD4).copy(alpha = 0.1f),
-                                            topLeft = Offset(b.left, b.top),
-                                            size = androidx.compose.ui.geometry.Size(b.width, b.height)
-                                        )
-                                        drawRect(
+                                        drawPath(
+                                            path = lassoPath,
                                             color = Color(0xFF00BCD4),
-                                            topLeft = Offset(b.left, b.top),
-                                            size = androidx.compose.ui.geometry.Size(b.width, b.height),
                                             style = Stroke(
-                                                width = 1.5.dp.toPx(),
-                                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                                                width = 2.dp.toPx() / zoomScale,
+                                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f / zoomScale, 8f / zoomScale), 0f)
                                             )
                                         )
                                     }
+
+                                    // Lasso Bounding Box
+                                    lassoBounds?.let { b ->
+                                        if (activePageForStroke == pageIdx && selectedStrokeIndices.isNotEmpty()) {
+                                            drawRect(
+                                                color = Color(0xFF00BCD4).copy(alpha = 0.1f),
+                                                topLeft = Offset(b.left, b.top),
+                                                size = androidx.compose.ui.geometry.Size(b.width, b.height)
+                                            )
+                                            drawRect(
+                                                color = Color(0xFF00BCD4),
+                                                topLeft = Offset(b.left, b.top),
+                                                size = androidx.compose.ui.geometry.Size(b.width, b.height),
+                                                style = Stroke(
+                                                    width = 1.5.dp.toPx() / zoomScale,
+                                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f / zoomScale, 6f / zoomScale), 0f)
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
 
-                                // Eraser reticle
+                                // Eraser reticle (drawn in unscaled screen coordinates so reticle circle stays consistent size)
                                 activeEraserCenter?.let { center ->
                                     drawCircle(
                                         color = Color(0xFFFF5252).copy(alpha = 0.35f),
@@ -787,7 +780,7 @@ fun CanvasEditorScreen(
                                 Card(
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
-                                        .padding(top = (lassoBounds!!.top - 46f).coerceAtLeast(10f).dp),
+                                        .padding(top = ((lassoBounds!!.top * zoomScale) - 46f).coerceAtLeast(10f).dp),
                                     shape = RoundedCornerShape(8.dp),
                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22)),
                                     border = BorderStroke(1.dp, Color(0xFF00BCD4))
