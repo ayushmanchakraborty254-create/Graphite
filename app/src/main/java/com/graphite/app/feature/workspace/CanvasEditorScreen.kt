@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -56,9 +57,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import com.graphite.app.GraphiteApplication
 import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.core.importer.ParsedDocument
@@ -139,8 +143,15 @@ fun CanvasEditorScreen(
 
     // Zoom & Pan state
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
+    var panX by remember { mutableFloatStateOf(0f) }
     var pageRotation by remember { mutableFloatStateOf(0f) }
     var scrollingMode by remember { mutableStateOf("Vertical") }
+    var lastTouchX by remember { mutableFloatStateOf(0f) }
+    var lastTouchY by remember { mutableFloatStateOf(0f) }
+    var isMultiTouchGesture by remember { mutableStateOf(false) }
+    var lastPinchDistance by remember { mutableFloatStateOf(0f) }
+    var lastPinchCenterX by remember { mutableFloatStateOf(0f) }
+    var lastPinchCenterY by remember { mutableFloatStateOf(0f) }
 
     // Drawer state (Image 4)
     var selectedDrawerTab by remember { mutableIntStateOf(0) } // 0=Grid, 1=Bookmarks, 2=Outline
@@ -245,9 +256,9 @@ fun CanvasEditorScreen(
                             // Pre-render small thumbnails for all pages in Page Drawer
                             for (p in 0 until count) {
                                 val page = renderer.openPage(p)
-                                val thumbW = 140
-                                val thumbH = ((thumbW.toFloat() / page.width) * page.height).toInt().coerceIn(160, 220)
-                                val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.RGB_565)
+                                val thumbW = 160
+                                val thumbH = ((thumbW.toFloat() / page.width) * page.height).toInt().coerceIn(180, 240)
+                                val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.ARGB_8888)
                                 val canvas = android.graphics.Canvas(thumbBmp)
                                 canvas.drawColor(android.graphics.Color.WHITE)
                                 page.render(thumbBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
@@ -306,6 +317,38 @@ fun CanvasEditorScreen(
         }
     }
 
+    // Ensure thumbnails are rendered whenever Page Drawer is opened
+    LaunchedEffect(showPageDrawer) {
+        if (showPageDrawer && pageThumbnails.isEmpty() && !notebook?.filePath.isNullOrBlank()) {
+            val path = notebook?.filePath ?: return@LaunchedEffect
+            val file = File(path)
+            if (file.exists() && file.extension.equals("pdf", ignoreCase = true)) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                        val renderer = PdfRenderer(pfd)
+                        val count = renderer.pageCount
+                        for (p in 0 until count) {
+                            val page = renderer.openPage(p)
+                            val thumbW = 160
+                            val thumbH = ((thumbW.toFloat() / page.width) * page.height).toInt().coerceIn(180, 240)
+                            val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.ARGB_8888)
+                            val canvas = android.graphics.Canvas(thumbBmp)
+                            canvas.drawColor(android.graphics.Color.WHITE)
+                            page.render(thumbBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            page.close()
+                            withContext(Dispatchers.Main) {
+                                pageThumbnails[p] = thumbBmp
+                            }
+                        }
+                        renderer.close()
+                        pfd.close()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             pdfBitmaps.values.forEach { it.recycle() }
@@ -327,15 +370,12 @@ fun CanvasEditorScreen(
         val basePageWidth = (screenWidth - 24.dp).coerceAtLeast(320.dp)
         val scaledPageWidth = basePageWidth * zoomScale
         val scaledPageHeight = scaledPageWidth * pdfAspectRatio
+        val maxPanX = with(density) {
+            ((scaledPageWidth - screenWidth).toPx() / 2f).coerceAtLeast(0f)
+        }
 
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, _, zoom, _ ->
-                        zoomScale = (zoomScale * zoom).coerceIn(1.0f, 3.5f)
-                    }
-                }
+            modifier = Modifier.fillMaxSize()
         ) {
             LazyColumn(
                 state = listState,
@@ -350,6 +390,7 @@ fun CanvasEditorScreen(
                     // A single page sheet inside the vertical continuous document
                     Card(
                         modifier = Modifier
+                            .offset { IntOffset(panX.roundToInt(), 0) }
                             .width(scaledPageWidth)
                             .height(scaledPageHeight)
                             .shadow(6.dp, RoundedCornerShape(3.dp)),
@@ -431,17 +472,211 @@ fun CanvasEditorScreen(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .pointerInteropFilter { motionEvent ->
-                                        if (isReadOnlyMode) return@pointerInteropFilter false
+                                        if (isReadOnlyMode) {
+                                            when (motionEvent.actionMasked) {
+                                                MotionEvent.ACTION_DOWN -> {
+                                                    lastTouchX = motionEvent.x
+                                                    lastTouchY = motionEvent.y
+                                                    isMultiTouchGesture = false
+                                                }
+                                                MotionEvent.ACTION_POINTER_DOWN -> {
+                                                    isMultiTouchGesture = true
+                                                    if (motionEvent.pointerCount >= 2) {
+                                                        lastPinchDistance = kotlin.math.hypot(
+                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                        ).toFloat()
+                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_MOVE -> {
+                                                    if (isMultiTouchGesture || motionEvent.pointerCount >= 2) {
+                                                        if (motionEvent.pointerCount >= 2) {
+                                                            val curDist = kotlin.math.hypot(
+                                                                (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                                (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                            ).toFloat()
+                                                            if (lastPinchDistance > 10f && curDist > 10f) {
+                                                                val factor = curDist / lastPinchDistance
+                                                                if (factor in 0.7f..1.4f) {
+                                                                    zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
+                                                                }
+                                                            }
+                                                            lastPinchDistance = curDist
 
-                                        val packet = StylusEventParser.parse(motionEvent)
-                                        val isStylus = packet.toolType == StylusToolType.STYLUS || packet.toolType == StylusToolType.ERASER
+                                                            val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                            val dy = curCenterY - lastPinchCenterY
+                                                            lastPinchCenterY = curCenterY
+                                                            listState.dispatchRawDelta(dy)
 
-                                        // If finger drawing is OFF and this is a finger touch: DO NOT DRAW!
-                                        // Let finger touches scroll and zoom naturally!
-                                        if (!allowFingerDrawing && !isStylus) {
-                                            return@pointerInteropFilter false
+                                                            val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                            val dx = curCenterX - lastPinchCenterX
+                                                            lastPinchCenterX = curCenterX
+                                                            if (zoomScale > 1f) {
+                                                                panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                                            }
+                                                        }
+                                                    } else {
+                                                        val dy = motionEvent.y - lastTouchY
+                                                        val dx = motionEvent.x - lastTouchX
+                                                        lastTouchY = motionEvent.y
+                                                        lastTouchX = motionEvent.x
+                                                        listState.dispatchRawDelta(dy)
+                                                        if (zoomScale > 1f) {
+                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                                        }
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                    isMultiTouchGesture = false
+                                                    lastPinchDistance = 0f
+                                                }
+                                            }
+                                            return@pointerInteropFilter true
                                         }
 
+                                        // Check if any pointer is a stylus
+                                        val hasStylus = (0 until motionEvent.pointerCount).any { idx ->
+                                            val t = motionEvent.getToolType(idx)
+                                            t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+                                        }
+
+                                        // ----------------------------------------------------
+                                        // 1. FINGER DRAWING IS OFF (!allowFingerDrawing)
+                                        // Stylus writes/erases. Fingers scroll (1 finger) and pinch-to-zoom (2 fingers).
+                                        // ----------------------------------------------------
+                                        if (!allowFingerDrawing && !hasStylus) {
+                                            when (motionEvent.actionMasked) {
+                                                MotionEvent.ACTION_DOWN -> {
+                                                    lastTouchX = motionEvent.x
+                                                    lastTouchY = motionEvent.y
+                                                    isMultiTouchGesture = false
+                                                }
+                                                MotionEvent.ACTION_POINTER_DOWN -> {
+                                                    isMultiTouchGesture = true
+                                                    if (motionEvent.pointerCount >= 2) {
+                                                        lastPinchDistance = kotlin.math.hypot(
+                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                        ).toFloat()
+                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_MOVE -> {
+                                                    if (isMultiTouchGesture || motionEvent.pointerCount >= 2) {
+                                                        if (motionEvent.pointerCount >= 2) {
+                                                            val curDist = kotlin.math.hypot(
+                                                                (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                                (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                            ).toFloat()
+                                                            if (lastPinchDistance > 10f && curDist > 10f) {
+                                                                val factor = curDist / lastPinchDistance
+                                                                if (factor in 0.7f..1.4f) {
+                                                                    zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
+                                                                }
+                                                            }
+                                                            lastPinchDistance = curDist
+
+                                                            val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                            val dy = curCenterY - lastPinchCenterY
+                                                            lastPinchCenterY = curCenterY
+                                                            listState.dispatchRawDelta(dy)
+
+                                                            val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                            val dx = curCenterX - lastPinchCenterX
+                                                            lastPinchCenterX = curCenterX
+                                                            if (zoomScale > 1f) {
+                                                                panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                                            }
+                                                        }
+                                                    } else {
+                                                        val dy = motionEvent.y - lastTouchY
+                                                        val dx = motionEvent.x - lastTouchX
+                                                        lastTouchY = motionEvent.y
+                                                        lastTouchX = motionEvent.x
+                                                        listState.dispatchRawDelta(dy)
+                                                        if (zoomScale > 1f) {
+                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                                        }
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                    isMultiTouchGesture = false
+                                                    lastPinchDistance = 0f
+                                                }
+                                            }
+                                            return@pointerInteropFilter true
+                                        }
+
+                                        // ----------------------------------------------------
+                                        // 2. FINGER DRAWING IS ON (allowFingerDrawing)
+                                        // 1 finger draws. Double finger touch (2 fingers) scrolls & zooms!
+                                        // ----------------------------------------------------
+                                        if (allowFingerDrawing && !hasStylus && (motionEvent.pointerCount >= 2 || isMultiTouchGesture)) {
+                                            activePoints = emptyList()
+                                            lassoPoints = emptyList()
+                                            activeEraserCenter = null
+
+                                            when (motionEvent.actionMasked) {
+                                                MotionEvent.ACTION_POINTER_DOWN -> {
+                                                    isMultiTouchGesture = true
+                                                    if (motionEvent.pointerCount >= 2) {
+                                                        lastPinchDistance = kotlin.math.hypot(
+                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                        ).toFloat()
+                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_MOVE -> {
+                                                    if (motionEvent.pointerCount >= 2) {
+                                                        val curDist = kotlin.math.hypot(
+                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
+                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
+                                                        ).toFloat()
+                                                        if (lastPinchDistance > 10f && curDist > 10f) {
+                                                            val factor = curDist / lastPinchDistance
+                                                            if (factor in 0.7f..1.4f) {
+                                                                zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
+                                                            }
+                                                        }
+                                                        lastPinchDistance = curDist
+
+                                                        val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
+                                                        val dy = curCenterY - lastPinchCenterY
+                                                        lastPinchCenterY = curCenterY
+                                                        listState.dispatchRawDelta(dy)
+
+                                                        val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
+                                                        val dx = curCenterX - lastPinchCenterX
+                                                        lastPinchCenterX = curCenterX
+                                                        if (zoomScale > 1f) {
+                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                                        }
+                                                    }
+                                                }
+                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                    isMultiTouchGesture = false
+                                                    lastPinchDistance = 0f
+                                                }
+                                            }
+                                            return@pointerInteropFilter true
+                                        }
+
+                                        // ----------------------------------------------------
+                                        // 3. DRAWING (Stylus, or 1 finger when finger drawing is enabled)
+                                        // ----------------------------------------------------
+                                        val targetPointerIdx = if (hasStylus) {
+                                            (0 until motionEvent.pointerCount).firstOrNull { idx ->
+                                                val t = motionEvent.getToolType(idx)
+                                                t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+                                            } ?: 0
+                                        } else 0
+
+                                        val packet = StylusEventParser.parse(motionEvent, targetPointerIdx)
                                         activePageForStroke = pageIdx
 
                                         val isHardwareEraser = packet.isEraser || packet.isPrimaryButtonPressed
@@ -449,6 +684,7 @@ fun CanvasEditorScreen(
 
                                         when (packet.action) {
                                             MotionActionType.DOWN -> {
+                                                isMultiTouchGesture = false
                                                 if (selectedStudioTool == StudioTool.LASSO) {
                                                     lassoPoints = listOf(Offset(packet.x, packet.y))
                                                     selectedStrokeIndices = emptySet()
@@ -469,25 +705,29 @@ fun CanvasEditorScreen(
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(packet.x, packet.y)
                                                     for (h in 0 until motionEvent.historySize) {
-                                                        workspaceViewModel.eraseAt(
-                                                            motionEvent.getHistoricalX(0, h),
-                                                            motionEvent.getHistoricalY(0, h),
-                                                            32f
-                                                        )
+                                                        if (targetPointerIdx < motionEvent.pointerCount) {
+                                                            workspaceViewModel.eraseAt(
+                                                                motionEvent.getHistoricalX(targetPointerIdx, h),
+                                                                motionEvent.getHistoricalY(targetPointerIdx, h),
+                                                                32f
+                                                            )
+                                                        }
                                                     }
                                                     workspaceViewModel.eraseAt(packet.x, packet.y, 32f)
                                                 } else {
                                                     activeEraserCenter = null
                                                     val batch = mutableListOf<InkPoint>()
                                                     for (h in 0 until motionEvent.historySize) {
-                                                        batch.add(
-                                                            InkPoint(
-                                                                motionEvent.getHistoricalX(0, h),
-                                                                motionEvent.getHistoricalY(0, h),
-                                                                motionEvent.getHistoricalPressure(0, h).coerceIn(0.05f, 1f),
-                                                                motionEvent.getHistoricalEventTime(h)
+                                                        if (targetPointerIdx < motionEvent.pointerCount) {
+                                                            batch.add(
+                                                                InkPoint(
+                                                                    motionEvent.getHistoricalX(targetPointerIdx, h),
+                                                                    motionEvent.getHistoricalY(targetPointerIdx, h),
+                                                                    motionEvent.getHistoricalPressure(targetPointerIdx, h).coerceIn(0.05f, 1f),
+                                                                    motionEvent.getHistoricalEventTime(h)
+                                                                )
                                                             )
-                                                        )
+                                                        }
                                                     }
                                                     batch.add(
                                                         InkPoint(packet.x, packet.y, packet.normalizedPressure, packet.timestamp)
@@ -663,6 +903,54 @@ fun CanvasEditorScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Floating Zoom Control Pill (Bottom Right)
+            Card(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 24.dp)
+                    .shadow(6.dp, RoundedCornerShape(20.dp)),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22).copy(alpha = 0.92f)),
+                border = BorderStroke(1.dp, Color(0xFF2E2E34))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            zoomScale = (zoomScale - 0.25f).coerceIn(0.75f, 3.5f)
+                            if (zoomScale <= 1.0f) panX = 0f
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "Zoom Out", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                    }
+
+                    Text(
+                        text = "${(zoomScale * 100).toInt()}%",
+                        color = Color(0xFF00BCD4),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable {
+                                zoomScale = if (zoomScale == 1.0f) 1.5f else 1.0f
+                                panX = 0f
+                            }
+                            .padding(horizontal = 4.dp)
+                    )
+
+                    IconButton(
+                        onClick = {
+                            zoomScale = (zoomScale + 0.25f).coerceIn(0.75f, 3.5f)
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Zoom In", tint = Color.LightGray, modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -943,7 +1231,7 @@ fun CanvasEditorScreen(
                             .size(24.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF2A2A2E))
-                            .clickable { showStrokeWidthDialog = true },
+                            .clickable { showStrokeWidthDialog = !showStrokeWidthDialog },
                         contentAlignment = Alignment.Center
                     ) {
                         Box(
@@ -961,50 +1249,72 @@ fun CanvasEditorScreen(
         // 4. STROKE THICKNESS SLIDER POPOVER
         // ==========================================
         if (showStrokeWidthDialog) {
-            Card(
+            Box(
                 modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 64.dp)
-                    .width(220.dp)
-                    .shadow(12.dp, RoundedCornerShape(14.dp)),
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22)),
-                border = BorderStroke(1.dp, Color(0xFF2E2E34))
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showStrokeWidthDialog = false }
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Stroke Width", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        Text("${uiState.selectedStrokeWidth.toInt()} pt", color = Color(0xFF00BCD4), fontSize = 12.sp)
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Slider(
-                        value = uiState.selectedStrokeWidth,
-                        onValueChange = { workspaceViewModel.selectStrokeWidth(it) },
-                        valueRange = 1f..35f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color(0xFF00BCD4),
-                            activeTrackColor = Color(0xFF00BCD4),
-                            inactiveTrackColor = Color(0xFF333333)
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        listOf(2f, 5f, 10f, 18f, 28f).forEach { pt ->
-                            Text(
-                                text = "${pt.toInt()}",
-                                color = if (uiState.selectedStrokeWidth == pt) Color(0xFF00BCD4) else Color.Gray,
-                                fontSize = 11.sp,
-                                modifier = Modifier
-                                    .clickable { workspaceViewModel.selectStrokeWidth(pt) }
-                                    .padding(4.dp)
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = 64.dp)
+                        .width(230.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { /* prevent dismiss on click inside */ }
+                        .shadow(12.dp, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22)),
+                    border = BorderStroke(1.dp, Color(0xFF2E2E34))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Stroke Width", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("${uiState.selectedStrokeWidth.toInt()} pt", color = Color(0xFF00BCD4), fontSize = 12.sp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                IconButton(
+                                    onClick = { showStrokeWidthDialog = false },
+                                    modifier = Modifier.size(22.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.LightGray, modifier = Modifier.size(15.dp))
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Slider(
+                            value = uiState.selectedStrokeWidth,
+                            onValueChange = { workspaceViewModel.selectStrokeWidth(it) },
+                            valueRange = 1f..35f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFF00BCD4),
+                                activeTrackColor = Color(0xFF00BCD4),
+                                inactiveTrackColor = Color(0xFF333333)
                             )
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            listOf(2f, 5f, 10f, 18f, 28f).forEach { pt ->
+                                Text(
+                                    text = "${pt.toInt()}",
+                                    color = if (uiState.selectedStrokeWidth == pt) Color(0xFF00BCD4) else Color.Gray,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier
+                                        .clickable { workspaceViewModel.selectStrokeWidth(pt) }
+                                        .padding(4.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1507,7 +1817,7 @@ fun CanvasEditorScreen(
                                             Card(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .height(130.dp)
+                                                    .height(140.dp)
                                                     .clickable {
                                                         scope.launch { listState.animateScrollToItem(pageIdx) }
                                                         showPageDrawer = false
@@ -1516,7 +1826,7 @@ fun CanvasEditorScreen(
                                                 colors = CardDefaults.cardColors(containerColor = Color.White),
                                                 border = BorderStroke(
                                                     width = if (isCurrent) 2.5.dp else 1.dp,
-                                                    color = if (isCurrent) Color(0xFF00BCD4) else Color(0xFFD0D0D0)
+                                                    color = if (isCurrent) Color(0xFF00BCD4) else Color(0xFF333338)
                                                 )
                                             ) {
                                                 Box(modifier = Modifier.fillMaxSize()) {
@@ -1528,29 +1838,73 @@ fun CanvasEditorScreen(
                                                             contentScale = ContentScale.Fit
                                                         )
                                                     } else {
-                                                        // Fallback miniature lines representation
-                                                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                            Box(modifier = Modifier.fillMaxWidth(0.7f).height(3.dp).background(Color(0xFFCCCCCC)))
-                                                            Box(modifier = Modifier.fillMaxWidth(0.9f).height(2.dp).background(Color(0xFFE0E0E0)))
-                                                            Box(modifier = Modifier.fillMaxWidth(0.85f).height(2.dp).background(Color(0xFFE0E0E0)))
-                                                            Box(modifier = Modifier.fillMaxWidth(0.6f).height(2.dp).background(Color(0xFFE0E0E0)))
+                                                        // Paper template + live thumbnail miniature strokes
+                                                        Box(modifier = Modifier.fillMaxSize()) {
+                                                            PaperTemplateCanvas(paperStyle = uiState.paperStyle)
+                                                            if (pageIdx == 0 && notebook?.previewLines?.isNotEmpty() == true) {
+                                                                Column(
+                                                                    modifier = Modifier.fillMaxSize().padding(8.dp),
+                                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                                ) {
+                                                                    notebook.previewLines.take(5).forEach { line ->
+                                                                        Text(line, color = Color(0xFF222222), fontSize = 7.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                Canvas(modifier = Modifier.fillMaxSize()) {
+                                                                    val scale = size.width / (scaledPageWidth.toPx().coerceAtLeast(1f))
+                                                                    uiState.strokes.forEach { stroke ->
+                                                                        if (stroke.points.size >= 2) {
+                                                                            val miniPoints = stroke.points.map {
+                                                                                InkPoint(it.x * scale, it.y * scale, it.pressure, it.timestamp)
+                                                                            }
+                                                                            val path = BezierSplineInterpolator.createSplinePath(miniPoints)
+                                                                            drawPath(
+                                                                                path = path,
+                                                                                color = stroke.color,
+                                                                                style = Stroke(width = (stroke.baseWidth * scale).coerceAtLeast(1f))
+                                                                            )
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
 
+                                                    // Miniature page number pill inside thumbnail
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .align(Alignment.BottomEnd)
+                                                            .padding(4.dp)
+                                                            .clip(RoundedCornerShape(4.dp))
+                                                            .background(Color.Black.copy(alpha = 0.65f))
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "${pageIdx + 1}",
+                                                            color = Color.White,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+
                                                     // Bookmark ribbon
-                                                    Icon(
-                                                        imageVector = Icons.Default.Bookmark,
-                                                        contentDescription = "Bookmark",
-                                                        tint = if (notebook?.isBookmarked == true && pageIdx == 0) Color(0xFF00BCD4) else Color(0xFFCCCCCC),
-                                                        modifier = Modifier.size(16.dp).align(Alignment.TopEnd).padding(end = 4.dp, top = 2.dp)
-                                                    )
+                                                    if (notebook?.isBookmarked == true && pageIdx == 0) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Bookmark,
+                                                            contentDescription = "Bookmark",
+                                                            tint = Color(0xFF00BCD4),
+                                                            modifier = Modifier.size(16.dp).align(Alignment.TopEnd).padding(end = 4.dp, top = 2.dp)
+                                                        )
+                                                    }
                                                 }
                                             }
                                             Spacer(modifier = Modifier.height(4.dp))
                                             Text(
-                                                text = "${pageIdx + 1}",
-                                                color = Color.Gray,
-                                                fontSize = 12.sp,
+                                                text = "Page ${pageIdx + 1}",
+                                                color = if (isCurrent) Color(0xFF00BCD4) else Color.LightGray,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
                                                 modifier = Modifier.padding(start = 2.dp)
                                             )
                                         }
