@@ -50,6 +50,8 @@ class GraphiteApplication : Application() {
             supabaseAuthManager = supabaseAuthManager,
             supabaseSyncManager = supabaseSyncManager
         )
+
+        com.graphite.app.data.repository.GraphiteRepository.initStorage(this)
     }
 
     companion object {

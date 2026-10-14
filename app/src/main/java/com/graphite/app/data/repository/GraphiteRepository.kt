@@ -1,15 +1,23 @@
 package com.graphite.app.data.repository
 
+import android.content.Context
+import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.data.model.*
 import com.graphite.app.feature.workspace.model.InkPoint
 import com.graphite.app.feature.workspace.model.InkStroke
 import com.graphite.app.feature.workspace.model.InkToolType
 import com.graphite.app.feature.workspace.model.PaperStyle
 import com.graphite.app.feature.workspace.model.WorkspaceColors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -137,15 +145,39 @@ object GraphiteRepository {
             ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
             else -> BookCoverType.CUSTOM
         }
+
+        var parsedContent: String? = null
+        var totalPages = maxOf(1, note.pageCount)
+
+        if (!note.filePath.isNullOrBlank()) {
+            val file = File(note.filePath)
+            if (file.exists()) {
+                try {
+                    val bytes = file.readBytes()
+                    val parsed = DocumentContentParser.parse(bytes, file.name, note.mimeType)
+                    if (parsed.extractedText.isNotBlank()) {
+                        parsedContent = parsed.extractedText
+                    }
+                    if (parsed.pageOrSlideCount > 0) {
+                        totalPages = parsed.pageOrSlideCount
+                    }
+                } catch (_: Exception) {
+                    // Fall back to note.previewLines
+                }
+            }
+        }
+
+        val resolvedContent = parsedContent ?: note.previewLines.joinToString("\n\n")
+
         return Book(
             id = note.id,
             title = note.title,
             author = if (note.mimeType == "application/pdf" || ext == "pdf") "PDF Document" else "Imported Document",
             progressPercent = 0,
             coverType = coverType,
-            totalChapters = maxOf(1, note.pageCount),
+            totalChapters = totalPages,
             currentChapter = 1,
-            content = note.previewLines.joinToString("\n"),
+            content = resolvedContent,
             filePath = note.filePath,
             mimeType = note.mimeType ?: if (ext == "pdf") "application/pdf" else "text/plain",
             isBookmarked = note.isBookmarked
@@ -171,6 +203,7 @@ object GraphiteRepository {
     fun deleteBook(id: String) {
         _books.update { list -> list.filter { it.id != id } }
         _stats.update { it.copy(totalBooks = _books.value.size) }
+        saveToDisk()
     }
 
     fun updateBookProgress(id: String, progress: Int) {
@@ -180,6 +213,7 @@ object GraphiteRepository {
                 else it
             }
         }
+        saveToDisk()
     }
 
     fun addBook(title: String, author: String, content: String) {
@@ -201,6 +235,7 @@ object GraphiteRepository {
         }
         _books.update { listOf(disambiguatedBook) + it }
         _stats.update { it.copy(totalBooks = _books.value.size) }
+        saveToDisk()
     }
 
     fun disambiguateNoteTitle(baseTitle: String): String {
@@ -247,6 +282,7 @@ object GraphiteRepository {
         userList.add(0, finalNote)
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        saveToDisk()
         return finalNote
     }
 
@@ -278,6 +314,7 @@ object GraphiteRepository {
         userList.add(0, newNotebook)
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        saveToDisk()
         return newNotebook
     }
 
@@ -298,6 +335,7 @@ object GraphiteRepository {
             )
             userList[index] = updated
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -318,6 +356,7 @@ object GraphiteRepository {
             )
             userList[index] = updated
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -337,6 +376,7 @@ object GraphiteRepository {
             )
             _notebooks.value = userList.filter { !it.isDeleted }
             _stats.update { it.copy(notesCount = _notebooks.value.size) }
+            saveToDisk()
         }
     }
 
@@ -348,6 +388,7 @@ object GraphiteRepository {
             val existing = userList[idx]
             userList[idx] = existing.copy(isStarred = !existing.isStarred, updatedAtMillis = System.currentTimeMillis())
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -359,6 +400,7 @@ object GraphiteRepository {
             val existing = userList[idx]
             userList[idx] = existing.copy(isBookmarked = !existing.isBookmarked, updatedAtMillis = System.currentTimeMillis())
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -371,6 +413,7 @@ object GraphiteRepository {
             val existing = userList[idx]
             userList[idx] = existing.copy(title = newTitle.trim(), updatedAtMillis = System.currentTimeMillis())
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -382,6 +425,7 @@ object GraphiteRepository {
             val existing = userList[idx]
             userList[idx] = existing.copy(folderId = targetFolderId, updatedAtMillis = System.currentTimeMillis())
             _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
         }
     }
 
@@ -394,6 +438,7 @@ object GraphiteRepository {
             userList[idx] = existing.copy(isDeleted = false, updatedAtMillis = System.currentTimeMillis())
             _notebooks.value = userList.filter { !it.isDeleted }
             _stats.update { it.copy(notesCount = _notebooks.value.size) }
+            saveToDisk()
         }
     }
 
@@ -403,6 +448,7 @@ object GraphiteRepository {
         userList.removeAll { it.id == id }
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        saveToDisk()
     }
 
     fun emptyTrash() {
@@ -411,6 +457,7 @@ object GraphiteRepository {
         userList.removeAll { it.isDeleted }
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        saveToDisk()
     }
 
     fun getAllNotesIncludingDeleted(): List<NotebookItem> {
@@ -454,6 +501,7 @@ object GraphiteRepository {
         userList.addAll(localMap.values.sortedByDescending { it.updatedAtMillis })
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        saveToDisk()
     }
 
     fun addFolder(name: String) {
@@ -513,5 +561,197 @@ object GraphiteRepository {
                 initialStrokes = sampleStrokes
             )
         }
+    }
+
+    private var appContext: Context? = null
+
+    fun initStorage(context: Context) {
+        appContext = context.applicationContext
+        loadFromDisk(context)
+    }
+
+    private fun loadFromDisk(context: Context) {
+        try {
+            val notesFile = File(context.filesDir, "graphite_notes_storage.json")
+            if (notesFile.exists()) {
+                val jsonStr = notesFile.readText(Charsets.UTF_8)
+                val rootObj = JSONObject(jsonStr)
+                val keys = rootObj.keys()
+                while (keys.hasNext()) {
+                    val uid = keys.next()
+                    val arr = rootObj.getJSONArray(uid)
+                    val list = mutableListOf<NotebookItem>()
+                    for (i in 0 until arr.length()) {
+                        list.add(notebookFromJson(arr.getJSONObject(i)))
+                    }
+                    if (list.isNotEmpty()) {
+                        userNotebooksMap[uid] = list
+                    }
+                }
+                val currentUid = activeUserId ?: "default"
+                _notebooks.value = (userNotebooksMap[currentUid] ?: emptyList()).filter { !it.isDeleted }
+                _stats.update { it.copy(notesCount = _notebooks.value.size) }
+            }
+
+            val booksFile = File(context.filesDir, "graphite_books_storage.json")
+            if (booksFile.exists()) {
+                val jsonStr = booksFile.readText(Charsets.UTF_8)
+                val arr = JSONArray(jsonStr)
+                val list = mutableListOf<Book>()
+                for (i in 0 until arr.length()) {
+                    list.add(bookFromJson(arr.getJSONObject(i)))
+                }
+                if (list.isNotEmpty()) {
+                    val existingIds = list.map { it.id }.toSet()
+                    val defaultsToAdd = _books.value.filter { it.id !in existingIds }
+                    _books.value = list + defaultsToAdd
+                    _stats.update { it.copy(totalBooks = _books.value.size) }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GraphiteRepository", "Failed to load storage from disk", e)
+        }
+    }
+
+    fun saveToDisk() {
+        val context = appContext ?: return
+        try {
+            val notesFile = File(context.filesDir, "graphite_notes_storage.json")
+            val rootObj = JSONObject()
+            for ((uid, list) in userNotebooksMap) {
+                val arr = JSONArray()
+                for (item in list) {
+                    arr.put(notebookToJson(item))
+                }
+                rootObj.put(uid, arr)
+            }
+            notesFile.writeText(rootObj.toString(), Charsets.UTF_8)
+
+            val booksFile = File(context.filesDir, "graphite_books_storage.json")
+            val booksArr = JSONArray()
+            for (b in _books.value) {
+                booksArr.put(bookToJson(b))
+            }
+            booksFile.writeText(booksArr.toString(), Charsets.UTF_8)
+        } catch (e: Exception) {
+            android.util.Log.e("GraphiteRepository", "Failed to save storage to disk", e)
+        }
+    }
+
+    fun exportNotesAsJson(userId: String? = null): String {
+        val uid = userId ?: activeUserId ?: "default"
+        val notes = userNotebooksMap[uid] ?: emptyList()
+        val arr = JSONArray()
+        for (item in notes) {
+            arr.put(notebookToJson(item))
+        }
+        return arr.toString(2)
+    }
+
+    fun importNotesFromJson(jsonString: String, userId: String? = null): Int {
+        val uid = userId ?: activeUserId ?: "default"
+        val arr = JSONArray(jsonString)
+        val importedList = mutableListOf<NotebookItem>()
+        for (i in 0 until arr.length()) {
+            importedList.add(notebookFromJson(arr.getJSONObject(i)))
+        }
+        reconcileRemoteNotes(importedList)
+        saveToDisk()
+        return importedList.size
+    }
+
+    fun notebookToJson(item: NotebookItem): JSONObject {
+        return JSONObject().apply {
+            put("id", item.id)
+            put("title", item.title)
+            put("folderId", item.folderId)
+            put("pageCount", item.pageCount)
+            put("createdAtMillis", item.createdAtMillis)
+            put("updatedAtMillis", item.updatedAtMillis)
+            put("updatedAtFormatted", item.updatedAtFormatted)
+            put("paperStyle", item.paperStyle.name)
+            put("isStarred", item.isStarred)
+            put("isDeleted", item.isDeleted)
+            put("isBookmarked", item.isBookmarked)
+            put("hasPhotos", item.hasPhotos)
+            put("hasRecordings", item.hasRecordings)
+            put("isLocked", item.isLocked)
+            put("version", item.version)
+            put("userId", item.userId)
+            val arr = JSONArray()
+            item.previewLines.forEach { arr.put(it) }
+            put("previewLines", arr)
+            put("filePath", item.filePath)
+            put("mimeType", item.mimeType)
+            put("originalFileName", item.originalFileName)
+        }
+    }
+
+    fun notebookFromJson(json: JSONObject): NotebookItem {
+        val previewArr = json.optJSONArray("previewLines")
+        val preview = mutableListOf<String>()
+        if (previewArr != null) {
+            for (i in 0 until previewArr.length()) {
+                preview.add(previewArr.optString(i))
+            }
+        }
+        return NotebookItem(
+            id = json.optString("id", UUID.randomUUID().toString()),
+            title = json.optString("title", "Untitled Note"),
+            folderId = json.optString("folderId", "my_notes"),
+            pageCount = json.optInt("pageCount", 1),
+            createdAtMillis = json.optLong("createdAtMillis", System.currentTimeMillis()),
+            updatedAtMillis = json.optLong("updatedAtMillis", System.currentTimeMillis()),
+            updatedAtFormatted = json.optString("updatedAtFormatted", "12/10/26 12:35 pm"),
+            paperStyle = try { PaperStyle.valueOf(json.optString("paperStyle", "RULED")) } catch (_: Exception) { PaperStyle.RULED },
+            isStarred = json.optBoolean("isStarred", false),
+            isDeleted = json.optBoolean("isDeleted", false),
+            isBookmarked = json.optBoolean("isBookmarked", false),
+            hasPhotos = json.optBoolean("hasPhotos", false),
+            hasRecordings = json.optBoolean("hasRecordings", false),
+            isLocked = json.optBoolean("isLocked", false),
+            version = json.optLong("version", 1L),
+            userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null,
+            previewLines = preview,
+            filePath = if (json.has("filePath") && !json.isNull("filePath")) json.getString("filePath") else null,
+            mimeType = if (json.has("mimeType") && !json.isNull("mimeType")) json.getString("mimeType") else null,
+            originalFileName = if (json.has("originalFileName") && !json.isNull("originalFileName")) json.getString("originalFileName") else null
+        )
+    }
+
+    fun bookToJson(book: Book): JSONObject {
+        return JSONObject().apply {
+            put("id", book.id)
+            put("title", book.title)
+            put("author", book.author)
+            put("progressPercent", book.progressPercent)
+            put("coverType", book.coverType.name)
+            put("lastReadTimeMillis", book.lastReadTimeMillis)
+            put("totalChapters", book.totalChapters)
+            put("currentChapter", book.currentChapter)
+            put("content", book.content)
+            put("filePath", book.filePath)
+            put("mimeType", book.mimeType)
+            put("isBookmarked", book.isBookmarked)
+            put("isFavorite", book.isFavorite)
+        }
+    }
+
+    fun bookFromJson(json: JSONObject): Book {
+        return Book(
+            id = json.optString("id", UUID.randomUUID().toString()),
+            title = json.optString("title", "Untitled Book"),
+            author = json.optString("author", "Unknown Author"),
+            progressPercent = json.optInt("progressPercent", 0),
+            coverType = try { BookCoverType.valueOf(json.optString("coverType", "TREASURE_ISLAND")) } catch (_: Exception) { BookCoverType.CUSTOM },
+            lastReadTimeMillis = json.optLong("lastReadTimeMillis", System.currentTimeMillis()),
+            totalChapters = json.optInt("totalChapters", 1),
+            currentChapter = json.optInt("currentChapter", 1),
+            content = json.optString("content", ""),
+            filePath = if (json.has("filePath") && !json.isNull("filePath")) json.getString("filePath") else null,
+            mimeType = json.optString("mimeType", "text/plain"),
+            isBookmarked = json.optBoolean("isBookmarked", false),
+            isFavorite = json.optBoolean("isFavorite", false)
+        )
     }
 }

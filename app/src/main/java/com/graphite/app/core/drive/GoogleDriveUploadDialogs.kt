@@ -652,7 +652,7 @@ private fun NoteFallbackPreview(notebook: NotebookItem) {
  * - Displays selected folder name upon returning to upload dialog.
  */
 @Composable
-private fun DriveFolderBrowserDialog(
+fun DriveFolderBrowserDialog(
     driveManager: GoogleDriveManager,
     initialFolder: DriveFolder? = null,
     onFolderSelected: (DriveFolder) -> Unit,

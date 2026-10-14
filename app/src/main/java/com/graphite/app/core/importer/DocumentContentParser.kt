@@ -67,10 +67,12 @@ object DocumentContentParser {
             val zip = ZipInputStream(ByteArrayInputStream(bytes))
             var entry = zip.nextEntry
             while (entry != null) {
-                if (entry.name == "word/document.xml") {
+                val cleanName = entry.name.replace('\\', '/')
+                if (cleanName.endsWith("word/document.xml", ignoreCase = true) ||
+                    cleanName.endsWith("word/document2.xml", ignoreCase = true)
+                ) {
                     val xmlContent = zip.readBytes().toString(Charsets.UTF_8)
                     paragraphs.addAll(extractDocxParagraphs(xmlContent))
-                    break
                 }
                 entry = zip.nextEntry
             }
@@ -88,71 +90,87 @@ object DocumentContentParser {
                 )
             }
         } catch (_: Exception) {
-            // Fallback if ZIP parsing encounters non-standard structure
+            // Fallback to binary extraction or plain text
         }
+
+        // Handle binary legacy .doc format (Word 97-2003)
+        val binaryLines = extractBinaryDocText(bytes)
+        if (binaryLines.isNotEmpty()) {
+            val fullText = binaryLines.joinToString("\n\n")
+            return ParsedDocument(
+                title = baseTitle,
+                pageOrSlideCount = maxOf(1, binaryLines.size / 20),
+                extractedText = fullText,
+                paragraphs = binaryLines
+            )
+        }
+
         val fallbackText = parsePlainText(bytes, baseTitle)
         return fallbackText.copy(title = baseTitle)
     }
 
     private fun extractDocxParagraphs(xmlContent: String): List<String> {
         val paragraphs = mutableListOf<String>()
-        try {
-            val factory = XmlPullParserFactory.newInstance()
-            val parser = factory.newPullParser()
-            parser.setInput(xmlContent.reader())
 
-            var eventType = parser.eventType
-            val currentParagraph = StringBuilder()
-            var inParagraph = false
+        // Match all paragraph elements <w:p>...</w:p> regardless of namespace prefix or attributes
+        val pPattern = Regex("<(?:[a-zA-Z0-9_-]+:)?p(?:\\s[^>]*)?>(.*?)</(?:[a-zA-Z0-9_-]+:)?p>", RegexOption.DOT_MATCHES_ALL)
+        val tPattern = Regex("<(?:[a-zA-Z0-9_-]+:)?t(?:\\s[^>]*)?>(.*?)</(?:[a-zA-Z0-9_-]+:)?t>", RegexOption.DOT_MATCHES_ALL)
 
-            while (eventType != XmlPullParser.END_DOCUMENT) {
-                when (eventType) {
-                    XmlPullParser.START_TAG -> {
-                        val name = parser.name?.substringAfterLast(':') ?: ""
-                        if (name == "p") {
-                            inParagraph = true
-                            currentParagraph.clear()
-                        } else if (name == "t" && inParagraph) {
-                            val text = parser.nextText()
-                            if (!text.isNullOrEmpty()) {
-                                currentParagraph.append(text)
-                            }
-                        } else if (name == "tab" && inParagraph) {
-                            currentParagraph.append("\t")
-                        } else if (name == "br" && inParagraph) {
-                            currentParagraph.append("\n")
-                        }
-                    }
-                    XmlPullParser.END_TAG -> {
-                        val name = parser.name?.substringAfterLast(':') ?: ""
-                        if (name == "p") {
-                            val text = currentParagraph.toString().trim()
-                            if (text.isNotEmpty()) {
-                                paragraphs.add(text)
-                            }
-                            inParagraph = false
-                            currentParagraph.clear()
-                        }
-                    }
-                }
-                eventType = parser.next()
+        for (pMatch in pPattern.findAll(xmlContent)) {
+            val pBody = pMatch.groupValues[1]
+            val paraBuilder = StringBuilder()
+            for (tMatch in tPattern.findAll(pBody)) {
+                val text = tMatch.groupValues[1]
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                paraBuilder.append(text)
             }
-        } catch (_: Exception) {
-            // Robust regex fallback if XML parser fails on malformed input
-            val pRegex = Regex("<w:p[ >](.*?)</w:p>", RegexOption.DOT_MATCHES_ALL)
-            val tRegex = Regex("<w:t[ >](.*?)</w:t>", RegexOption.DOT_MATCHES_ALL)
-            for (pMatch in pRegex.findAll(xmlContent)) {
-                val pText = StringBuilder()
-                for (tMatch in tRegex.findAll(pMatch.value)) {
-                    pText.append(tMatch.groupValues[1])
-                }
-                val clean = pText.toString().trim()
-                if (clean.isNotEmpty()) {
-                    paragraphs.add(clean)
-                }
+            val cleanPara = paraBuilder.toString().trim()
+            if (cleanPara.isNotEmpty()) {
+                paragraphs.add(cleanPara)
             }
         }
-        return paragraphs
+
+        if (paragraphs.isNotEmpty()) return paragraphs
+
+        // Fallback: extract all text runs <w:t> directly
+        val allTMatches = tPattern.findAll(xmlContent).map { match ->
+            match.groupValues[1]
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+        }.filter { it.isNotBlank() }.toList()
+
+        return allTMatches
+    }
+
+    private fun extractBinaryDocText(bytes: ByteArray): List<String> {
+        val textBuilder = StringBuilder()
+        var i = 0
+        while (i < bytes.size - 1) {
+            val b1 = bytes[i]
+            val b2 = bytes[i + 1]
+            if (b2 == 0.toByte() && b1 in 32..126) {
+                textBuilder.append(b1.toInt().toChar())
+                i += 2
+            } else if (b1 in 32..126) {
+                textBuilder.append(b1.toInt().toChar())
+                i++
+            } else {
+                if (textBuilder.isNotEmpty() && textBuilder.last() != '\n') {
+                    textBuilder.append('\n')
+                }
+                i++
+            }
+        }
+        return textBuilder.split('\n')
+            .map { it.trim() }
+            .filter { it.length > 3 && !it.startsWith("WordDocument") && !it.startsWith("Root Entry") && !it.startsWith("Data") }
     }
 
     /**
@@ -164,10 +182,10 @@ object DocumentContentParser {
             val zip = ZipInputStream(ByteArrayInputStream(bytes))
             var entry = zip.nextEntry
             while (entry != null) {
-                val name = entry.name
-                val match = Regex("ppt/slides/slide(\\d+)\\.xml").matchEntire(name)
+                val cleanName = entry.name.replace('\\', '/')
+                val match = Regex(".*ppt/slides/slide(\\d+)\\.xml", RegexOption.IGNORE_CASE).matchEntire(cleanName)
                 if (match != null) {
-                    val slideNum = match.groupValues[1].toIntOrNull() ?: 1
+                    val slideNum = match.groupValues[1].toIntOrNull() ?: (slideEntries.size + 1)
                     slideEntries[slideNum] = zip.readBytes().toString(Charsets.UTF_8)
                 }
                 entry = zip.nextEntry
@@ -206,50 +224,40 @@ object DocumentContentParser {
 
     private fun extractPptxTexts(xmlContent: String): List<String> {
         val texts = mutableListOf<String>()
-        try {
-            val factory = XmlPullParserFactory.newInstance()
-            val parser = factory.newPullParser()
-            parser.setInput(xmlContent.reader())
+        val pPattern = Regex("<(?:[a-zA-Z0-9_-]+:)?p(?:\\s[^>]*)?>(.*?)</(?:[a-zA-Z0-9_-]+:)?p>", RegexOption.DOT_MATCHES_ALL)
+        val tPattern = Regex("<(?:[a-zA-Z0-9_-]+:)?t(?:\\s[^>]*)?>(.*?)</(?:[a-zA-Z0-9_-]+:)?t>", RegexOption.DOT_MATCHES_ALL)
 
-            var eventType = parser.eventType
-            val currentPara = StringBuilder()
-            var inPara = false
-
-            while (eventType != XmlPullParser.END_DOCUMENT) {
-                when (eventType) {
-                    XmlPullParser.START_TAG -> {
-                        val name = parser.name?.substringAfterLast(':') ?: ""
-                        if (name == "p") {
-                            inPara = true
-                            currentPara.clear()
-                        } else if (name == "t" && inPara) {
-                            val t = parser.nextText()
-                            if (!t.isNullOrEmpty()) {
-                                currentPara.append(t)
-                            }
-                        }
-                    }
-                    XmlPullParser.END_TAG -> {
-                        val name = parser.name?.substringAfterLast(':') ?: ""
-                        if (name == "p") {
-                            val line = currentPara.toString().trim()
-                            if (line.isNotEmpty()) {
-                                texts.add(line)
-                            }
-                            inPara = false
-                            currentPara.clear()
-                        }
-                    }
-                }
-                eventType = parser.next()
+        for (pMatch in pPattern.findAll(xmlContent)) {
+            val pBody = pMatch.groupValues[1]
+            val builder = StringBuilder()
+            for (tMatch in tPattern.findAll(pBody)) {
+                val text = tMatch.groupValues[1]
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                builder.append(text)
             }
-        } catch (_: Exception) {
-            val tRegex = Regex("<a:t>(.*?)</a:t>", RegexOption.DOT_MATCHES_ALL)
-            for (match in tRegex.findAll(xmlContent)) {
-                val clean = match.groupValues[1].trim()
+            val clean = builder.toString().trim()
+            if (clean.isNotEmpty()) {
+                texts.add(clean)
+            }
+        }
+
+        if (texts.isEmpty()) {
+            for (tMatch in tPattern.findAll(xmlContent)) {
+                val clean = tMatch.groupValues[1]
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .trim()
                 if (clean.isNotEmpty()) texts.add(clean)
             }
         }
+
         return texts
     }
 

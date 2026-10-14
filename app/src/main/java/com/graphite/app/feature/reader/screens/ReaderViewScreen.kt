@@ -33,10 +33,14 @@ import com.graphite.app.data.repository.GraphiteRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.core.importer.ParsedDocument
 import com.graphite.app.core.importer.SlideContent
@@ -67,8 +71,9 @@ fun ReaderViewScreen(
 
     val ext = book.filePath?.substringAfterLast('.', "")?.lowercase() ?: ""
     val isPdf = (book.filePath != null && ext == "pdf") || book.mimeType.contains("pdf", ignoreCase = true)
-    val isPptx = ext in listOf("pptx", "ppt") || book.coverType == BookCoverType.CE_PPT
-    val isDocx = ext in listOf("docx", "doc")
+    val isPptx = ext in listOf("pptx", "ppt") || book.coverType == BookCoverType.CE_PPT || book.mimeType.contains("presentation", ignoreCase = true)
+    val isDocx = ext in listOf("docx", "doc") || book.mimeType.contains("word", ignoreCase = true)
+    val isXlsx = ext in listOf("xlsx", "xls", "csv") || book.mimeType.contains("spreadsheet", ignoreCase = true) || book.mimeType.contains("sheet", ignoreCase = true)
 
     var pdfTotalPages by remember { mutableIntStateOf(book.totalChapters) }
     var pdfCurrentPage by remember { mutableIntStateOf(0) }
@@ -77,17 +82,31 @@ fun ReaderViewScreen(
     var pptxSlides by remember { mutableStateOf<List<SlideContent>>(emptyList()) }
     var pptxCurrentSlide by remember { mutableIntStateOf(0) }
 
+    var parsedDoc by remember { mutableStateOf<ParsedDocument?>(null) }
+    var isLoadingDoc by remember { mutableStateOf(false) }
+
     LaunchedEffect(book.filePath) {
-        if (isPptx && book.filePath != null) {
+        if (!book.filePath.isNullOrBlank()) {
             val file = File(book.filePath)
             if (file.exists()) {
+                isLoadingDoc = true
                 withContext(Dispatchers.IO) {
-                    val bytes = file.readBytes()
-                    val parsed = DocumentContentParser.parse(bytes, file.name, book.mimeType)
-                    withContext(Dispatchers.Main) {
-                        if (parsed.slides.isNotEmpty()) {
-                            pptxSlides = parsed.slides
-                            pdfTotalPages = parsed.slides.size
+                    try {
+                        val bytes = file.readBytes()
+                        val parsed = DocumentContentParser.parse(bytes, file.name, book.mimeType)
+                        withContext(Dispatchers.Main) {
+                            parsedDoc = parsed
+                            if (parsed.slides.isNotEmpty()) {
+                                pptxSlides = parsed.slides
+                                pdfTotalPages = parsed.slides.size
+                            } else if (parsed.pageOrSlideCount > 0) {
+                                pdfTotalPages = parsed.pageOrSlideCount
+                            }
+                            isLoadingDoc = false
+                        }
+                    } catch (_: Exception) {
+                        withContext(Dispatchers.Main) {
+                            isLoadingDoc = false
                         }
                     }
                 }
@@ -98,7 +117,8 @@ fun ReaderViewScreen(
     val subtitle = when {
         isPdf -> "PDF Document • Page ${pdfCurrentPage + 1} of ${maxOf(1, pdfTotalPages)}"
         isPptx -> "PowerPoint Presentation • Slide ${pptxCurrentSlide + 1} of ${maxOf(1, pptxSlides.size.ifZero(book.totalChapters))}"
-        isDocx -> "Word Document • ${book.author}"
+        isDocx -> "Word Document • ${maxOf(1, parsedDoc?.pageOrSlideCount ?: book.totalChapters)} pages"
+        isXlsx -> "Spreadsheet Workbook • ${book.title}"
         else -> book.author
     }
 
@@ -293,9 +313,15 @@ fun ReaderViewScreen(
             }
             isPptx -> {
                 PptxPresentationViewer(
-                    slides = pptxSlides,
-                    fallbackContent = book.content,
+                    slides = if (pptxSlides.isNotEmpty()) pptxSlides else (parsedDoc?.slides ?: emptyList()),
+                    fallbackContent = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
                     currentSlideIndex = pptxCurrentSlide,
+                    onSlideSelected = { idx ->
+                        pptxCurrentSlide = idx
+                        val total = maxOf(1, pptxSlides.size.ifZero(book.totalChapters))
+                        val progress = ((pptxCurrentSlide + 1) * 100 / total)
+                        GraphiteRepository.updateBookProgress(book.id, progress)
+                    },
                     onNextSlide = {
                         val maxSlide = maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1)
                         if (pptxCurrentSlide < maxSlide) {
@@ -312,15 +338,41 @@ fun ReaderViewScreen(
                             GraphiteRepository.updateBookProgress(book.id, progress)
                         }
                     },
+                    documentFile = book.filePath?.let { File(it) },
+                    mimeType = book.mimeType,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
                 )
             }
             isDocx -> {
+                val docParagraphs = remember(parsedDoc, book.content) {
+                    if (parsedDoc?.paragraphs?.isNotEmpty() == true) {
+                        parsedDoc!!.paragraphs
+                    } else if (book.content.isNotBlank()) {
+                        book.content.split("\n\n").filter { it.isNotBlank() }
+                    } else {
+                        listOf("Document: ${book.title}")
+                    }
+                }
                 DocxDocumentViewer(
-                    content = book.content,
+                    title = book.title,
+                    paragraphs = docParagraphs,
                     fontSize = fontSize,
+                    onFontSizeChange = { fontSize = it },
+                    documentFile = book.filePath?.let { File(it) },
+                    mimeType = book.mimeType,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                )
+            }
+            isXlsx -> {
+                XlsxSpreadsheetViewer(
+                    title = book.title,
+                    content = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
+                    documentFile = book.filePath?.let { File(it) },
+                    mimeType = book.mimeType,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
@@ -550,221 +602,688 @@ private fun PdfDocumentViewer(
     }
 }
 
+enum class SlideTheme(
+    val label: String,
+    val canvasBg: Color,
+    val titleColor: Color,
+    val textColor: Color,
+    val cardBg: Color,
+    val accentColor: Color
+) {
+    MODERN_DARK("Dark", Color(0xFF16181E), Color(0xFFFFFFFF), Color(0xFFE2E8F0), Color(0xFF222631), Color(0xFFFF7043)),
+    LIGHT_DECK("Light", Color(0xFFFFFFFF), Color(0xFF0F172A), Color(0xFF334155), Color(0xFFF1F5F9), Color(0xFFD24726)),
+    NAVY("Navy", Color(0xFF0B132B), Color(0xFFFFFFFF), Color(0xFFCAD2C5), Color(0xFF1C2541), Color(0xFF00B4D8))
+}
+
 @Composable
 private fun PptxPresentationViewer(
     slides: List<SlideContent>,
     fallbackContent: String,
     currentSlideIndex: Int,
+    onSlideSelected: (Int) -> Unit,
     onNextSlide: () -> Unit,
     onPreviousSlide: () -> Unit,
+    documentFile: File?,
+    mimeType: String,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    var selectedTheme by remember { mutableStateOf(SlideTheme.MODERN_DARK) }
     val totalSlides = maxOf(1, slides.size)
     val safeIndex = currentSlideIndex.coerceIn(0, totalSlides - 1)
     val activeSlide = slides.getOrNull(safeIndex)
 
-    Box(
+    Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0D0D0D))
-            .padding(16.dp),
-        contentAlignment = Alignment.Center
+            .background(Color(0xFF090A0D))
     ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .fillMaxHeight(0.85f),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
-            shape = RoundedCornerShape(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        // Presentation Top Bar
+        Surface(
+            color = Color(0xFF14161C),
+            modifier = Modifier.fillMaxWidth(),
+            shadowElevation = 2.dp
         ) {
-            Column(
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // Slide Header
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Slideshow,
-                            contentDescription = null,
-                            tint = GraphiteOrange,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Slide ${safeIndex + 1} of $totalSlides",
-                            color = Color.Gray,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFFD32F2F))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .background(Color(0xFFD24726)) // PowerPoint red
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
-                        Text("PPTX", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text("PPTX", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+
+                    SlideTheme.entries.forEach { theme ->
+                        val isSelected = selectedTheme == theme
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (isSelected) selectedTheme.accentColor else Color(0xFF222631))
+                                .clickable { selectedTheme = theme }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = theme.label,
+                                color = if (isSelected) Color.White else Color.LightGray,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
                     }
                 }
 
-                HorizontalDivider(color = Color(0xFF2E2E2E))
-
-                if (activeSlide != null) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(
-                        text = activeSlide.title,
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
+                        text = "Slide ${safeIndex + 1} of $totalSlides",
+                        color = Color.LightGray,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    if (documentFile != null) {
+                        FilledTonalButton(
+                            onClick = {
+                                DocumentContentParser.openWithExternalApp(context, documentFile, mimeType)
+                            },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = Color(0xFFD24726),
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Slideshow, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Open in PowerPoint", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        }
 
-                    if (activeSlide.bullets.isNotEmpty()) {
-                        activeSlide.bullets.forEach { bullet ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.Top
+        // 16:9 Slide Presentation Canvas
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.96f)
+                    .aspectRatio(16f / 9f)
+                    .widthIn(max = 840.dp),
+                colors = CardDefaults.cardColors(containerColor = selectedTheme.canvasBg),
+                shape = RoundedCornerShape(12.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(28.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Slide Title with Accent underline
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = activeSlide?.title ?: "Presentation Slide ${safeIndex + 1}",
+                            color = selectedTheme.titleColor,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Serif,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(56.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(selectedTheme.accentColor)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    if (activeSlide != null && activeSlide.bullets.isNotEmpty()) {
+                        activeSlide.bullets.forEachIndexed { bIdx, bullet ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = selectedTheme.cardBg),
+                                shape = RoundedCornerShape(8.dp)
                             ) {
-                                Text("•  ", color = GraphiteOrange, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                                Text(
-                                    text = bullet,
-                                    color = Color(0xFFDEDEDE),
-                                    fontSize = 15.sp,
-                                    lineHeight = 22.sp
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .background(selectedTheme.accentColor.copy(alpha = 0.2f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "${bIdx + 1}",
+                                            color = selectedTheme.accentColor,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = bullet,
+                                        color = selectedTheme.textColor,
+                                        fontSize = 15.sp,
+                                        lineHeight = 22.sp,
+                                        fontWeight = FontWeight.Normal
+                                    )
+                                }
                             }
                         }
-                    } else if (activeSlide.fullText.isNotBlank()) {
+                    } else if (activeSlide != null && activeSlide.fullText.isNotBlank()) {
                         Text(
                             text = activeSlide.fullText,
-                            color = Color(0xFFDEDEDE),
+                            color = selectedTheme.textColor,
+                            fontSize = 16.sp,
+                            lineHeight = 24.sp
+                        )
+                    } else {
+                        Text(
+                            text = fallbackContent,
+                            color = selectedTheme.textColor,
                             fontSize = 15.sp,
                             lineHeight = 22.sp
                         )
                     }
-                } else {
-                    // Fallback to text lines
-                    Text(
-                        text = fallbackContent,
-                        color = Color(0xFFDEDEDE),
-                        fontSize = 15.sp,
-                        lineHeight = 22.sp
+                }
+            }
+
+            // Left / Right Circular Navigation Targets on Slide Canvas
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onPreviousSlide,
+                    enabled = safeIndex > 0,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = if (safeIndex > 0) 0.7f else 0.2f))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Previous Slide",
+                        tint = if (safeIndex > 0) Color.White else Color.Gray
+                    )
+                }
+
+                IconButton(
+                    onClick = onNextSlide,
+                    enabled = safeIndex < totalSlides - 1,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = if (safeIndex < totalSlides - 1) 0.7f else 0.2f))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = "Next Slide",
+                        tint = if (safeIndex < totalSlides - 1) Color.White else Color.Gray
                     )
                 }
             }
         }
 
-        // Overlay Navigation Controls
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(
-                onClick = onPreviousSlide,
-                enabled = safeIndex > 0,
+        // Horizontal Slide Filmstrip / Thumbnail Strip (Bottom)
+        if (slides.isNotEmpty()) {
+            Surface(
+                color = Color(0xFF101217),
                 modifier = Modifier
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = if (safeIndex > 0) 0.65f else 0.2f))
+                    .fillMaxWidth()
+                    .height(90.dp),
+                shadowElevation = 4.dp
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Previous Slide",
-                    tint = if (safeIndex > 0) Color.White else Color.Gray
-                )
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    itemsIndexed(slides) { idx, slide ->
+                        val isCurrent = idx == safeIndex
+                        Card(
+                            modifier = Modifier
+                                .width(110.dp)
+                                .fillMaxHeight()
+                                .clickable { onSlideSelected(idx) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isCurrent) Color(0xFF262C38) else Color(0xFF181A20)
+                            ),
+                            shape = RoundedCornerShape(6.dp),
+                            border = if (isCurrent) androidx.compose.foundation.BorderStroke(2.dp, selectedTheme.accentColor) else null
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(6.dp),
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "${idx + 1}",
+                                        color = if (isCurrent) selectedTheme.accentColor else Color.Gray,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (isCurrent) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(selectedTheme.accentColor)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = slide.title,
+                                    color = if (isCurrent) Color.White else Color.LightGray,
+                                    fontSize = 10.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
             }
+        }
+    }
+}
 
-            IconButton(
-                onClick = onNextSlide,
-                enabled = safeIndex < totalSlides - 1,
+enum class DocTheme(
+    val label: String,
+    val pageBackground: Color,
+    val textColor: Color,
+    val secondaryColor: Color,
+    val borderColor: Color,
+    val deskBackground: Color
+) {
+    PAPER("Paper", Color(0xFFFFFFFF), Color(0xFF1E2022), Color(0xFF6B7280), Color(0xFFE5E7EB), Color(0xFF121316)),
+    SEPIA("Sepia", Color(0xFFFAF3E0), Color(0xFF382918), Color(0xFF7D654C), Color(0xFFE8D7B8), Color(0xFF161412)),
+    SLATE("Slate", Color(0xFF1E2530), Color(0xFFF1F5F9), Color(0xFF94A3B8), Color(0xFF334155), Color(0xFF0F1115)),
+    DARK("Dark", Color(0xFF18181B), Color(0xFFF4F4F5), Color(0xFFA1A1AA), Color(0xFF27272A), Color(0xFF09090B))
+}
+
+@Composable
+private fun DocxDocumentViewer(
+    title: String,
+    paragraphs: List<String>,
+    fontSize: Float,
+    onFontSizeChange: (Float) -> Unit,
+    documentFile: File?,
+    mimeType: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var selectedTheme by remember { mutableStateOf(DocTheme.PAPER) }
+    val totalWords = remember(paragraphs) {
+        paragraphs.sumOf { it.split(Regex("\\s+")).filter { w -> w.isNotBlank() }.size }
+    }
+    val estimatedPages = maxOf(1, totalWords / 250)
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(selectedTheme.deskBackground)
+    ) {
+        // Document Top Toolbar (Word blue header banner)
+        Surface(
+            color = Color(0xFF1A1C22),
+            modifier = Modifier.fillMaxWidth(),
+            shadowElevation = 2.dp
+        ) {
+            Row(
                 modifier = Modifier
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = if (safeIndex < totalSlides - 1) 0.65f else 0.2f))
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                    contentDescription = "Next Slide",
-                    tint = if (safeIndex < totalSlides - 1) Color.White else Color.Gray
-                )
+                // Word badge & Theme chips
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF2B579A)) // Microsoft Word blue
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("DOCX", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+
+                    // Theme selector chips
+                    DocTheme.entries.forEach { theme ->
+                        val isSelected = selectedTheme == theme
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (isSelected) GraphiteOrange else Color(0xFF282C35))
+                                .clickable { selectedTheme = theme }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = theme.label,
+                                color = if (isSelected) Color.White else Color.LightGray,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
+                // Font size controls & Open in Word button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    IconButton(
+                        onClick = { onFontSizeChange((fontSize - 1f).coerceAtLeast(12f)) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Text("A-", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    Text(
+                        text = "${fontSize.toInt()}",
+                        color = Color.LightGray,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    IconButton(
+                        onClick = { onFontSizeChange((fontSize + 1f).coerceAtMost(28f)) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Text("A+", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+
+                    if (documentFile != null) {
+                        FilledTonalButton(
+                            onClick = {
+                                DocumentContentParser.openWithExternalApp(context, documentFile, mimeType)
+                            },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = Color(0xFF2B579A),
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Open in Word", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Central Document Sheet
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 20.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Card(
+                modifier = Modifier
+                    .widthIn(max = 760.dp)
+                    .fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = selectedTheme.pageBackground),
+                shape = RoundedCornerShape(10.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 36.dp, vertical = 44.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Document Header inside the sheet
+                    Text(
+                        text = title,
+                        color = selectedTheme.textColor,
+                        fontSize = (fontSize * 1.5f).sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Serif,
+                        lineHeight = (fontSize * 1.8f).sp
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${paragraphs.size} paragraphs • $totalWords words • ~$estimatedPages pages",
+                            color = selectedTheme.secondaryColor,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(selectedTheme.borderColor)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("DOCX Format", color = selectedTheme.textColor, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    HorizontalDivider(color = selectedTheme.borderColor, thickness = 1.dp)
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Formatted Paragraphs
+                    paragraphs.forEachIndexed { index, rawPara ->
+                        val trimmed = rawPara.trim()
+                        val isHeading = trimmed.length < 80 && (
+                            trimmed.all { it.isUpperCase() || !it.isLetter() } ||
+                            trimmed.startsWith("Chapter", ignoreCase = true) ||
+                            trimmed.startsWith("Part", ignoreCase = true) ||
+                            trimmed.startsWith("Section", ignoreCase = true) ||
+                            trimmed.endsWith(":")
+                        )
+
+                        if (isHeading) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = trimmed,
+                                color = selectedTheme.textColor,
+                                fontSize = (fontSize * 1.25f).sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Serif,
+                                lineHeight = (fontSize * 1.5f).sp
+                            )
+                        } else if (trimmed.startsWith("•") || trimmed.startsWith("-") || trimmed.matches(Regex("^\\d+[.)].*"))) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text("•  ", color = GraphiteOrange, fontSize = fontSize.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = trimmed.replace(Regex("^[•\\-]\\s*"), ""),
+                                    color = selectedTheme.textColor,
+                                    fontSize = fontSize.sp,
+                                    lineHeight = (fontSize * 1.6f).sp,
+                                    fontFamily = FontFamily.Serif
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = trimmed,
+                                color = selectedTheme.textColor,
+                                fontSize = fontSize.sp,
+                                lineHeight = (fontSize * 1.65f).sp,
+                                fontFamily = FontFamily.Serif
+                            )
+                        }
+
+                        // Subtle page break indicator every 8 paragraphs
+                        if (index > 0 && index % 8 == 0 && index < paragraphs.size - 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                HorizontalDivider(modifier = Modifier.weight(1f), color = selectedTheme.borderColor)
+                                Text(
+                                    text = "  Page ${(index / 8) + 1}  ",
+                                    color = selectedTheme.secondaryColor,
+                                    fontSize = 10.sp
+                                )
+                                HorizontalDivider(modifier = Modifier.weight(1f), color = selectedTheme.borderColor)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun DocxDocumentViewer(
+private fun XlsxSpreadsheetViewer(
+    title: String,
     content: String,
-    fontSize: Float,
+    documentFile: File?,
+    mimeType: String,
     modifier: Modifier = Modifier
 ) {
-    val paragraphs = remember(content) {
-        content.split("\n\n").filter { it.isNotBlank() }
+    val context = LocalContext.current
+    val rows = remember(content) {
+        content.lines().filter { it.isNotBlank() }
     }
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0D0D0D))
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .background(Color(0xFF0D0F12))
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            color = Color(0xFF161920),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.Description,
-                    contentDescription = null,
-                    tint = Color(0xFF42A5F5),
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Word Document (${paragraphs.size} paragraphs)",
-                    color = Color.Gray,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-            Box(
+            Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF1976D2))
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("DOCX", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF107C41)) // Excel green
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("XLSX", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+                    Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                }
+
+                if (documentFile != null) {
+                    FilledTonalButton(
+                        onClick = {
+                            DocumentContentParser.openWithExternalApp(context, documentFile, mimeType)
+                        },
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = Color(0xFF107C41),
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.GridOn, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Open in Excel", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         }
 
-        HorizontalDivider(color = Color(0xFF2E2E2E))
-
-        paragraphs.forEach { para ->
-            Text(
-                text = para.trim(),
-                color = Color(0xFFE2E2E2),
-                fontSize = fontSize.sp,
-                lineHeight = (fontSize * 1.6f).sp,
-                fontFamily = FontFamily.Serif
-            )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            itemsIndexed(rows) { index, rowText ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (index == 0) Color(0xFF1E2430) else if (index % 2 == 0) Color(0xFF15181F) else Color(0xFF1A1E26)
+                    ),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${index + 1}",
+                            color = Color(0xFF107C41),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.width(36.dp)
+                        )
+                        Text(
+                            text = rowText,
+                            color = if (index == 0) Color.White else Color(0xFFE2E8F0),
+                            fontSize = 13.sp,
+                            fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Normal,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
         }
     }
 }

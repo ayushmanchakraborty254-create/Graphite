@@ -114,10 +114,10 @@ class GoogleAccountManager(
                                 }
                             }
                         } catch (_: Exception) {
-                            // If remote network id_token exchange fails, maintain local session
+                            // If remote network id_token exchange fails, maintain session with publishable key
                             supabaseAuthManager.setSession(
                                 SupabaseSession(
-                                    accessToken = idToken,
+                                    accessToken = GraphiteConfig.supabasePublishableKey,
                                     user = SupabaseUser(id = email, email = email)
                                 )
                             )
@@ -126,10 +126,19 @@ class GoogleAccountManager(
                 } else {
                     supabaseAuthManager.setSession(
                         SupabaseSession(
-                            accessToken = "google_auth_${System.currentTimeMillis()}",
+                            accessToken = GraphiteConfig.supabasePublishableKey,
                             user = SupabaseUser(id = email, email = email)
                         )
                     )
+                }
+            }
+
+            // Restore any notes previously backed up to Google Drive
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    com.graphite.app.GraphiteApplication.instance.googleDriveManager.restoreNotesFromDrive(com.graphite.app.GraphiteApplication.instance)
+                } catch (_: Exception) {
+                    // Ignore restore errors on sign in
                 }
             }
 

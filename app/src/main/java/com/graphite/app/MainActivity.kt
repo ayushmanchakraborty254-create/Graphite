@@ -98,10 +98,13 @@ class MainActivity : ComponentActivity() {
                                             NoteshelfScreen(
                                                 onOpenNotebook = { notebookId ->
                                                     val note = GraphiteRepository.getNotebook(notebookId)
-                                                    val isDoc = note?.mimeType?.contains("pdf", ignoreCase = true) == true
-                                                        || note?.filePath?.endsWith(".pdf", ignoreCase = true) == true
-                                                        || note?.filePath?.endsWith(".docx", ignoreCase = true) == true
-                                                        || note?.filePath?.endsWith(".pptx", ignoreCase = true) == true
+                                                    val ext = note?.filePath?.substringAfterLast('.', "")?.lowercase() ?: ""
+                                                    val isDoc = !note?.filePath.isNullOrBlank()
+                                                        || note?.mimeType?.contains("pdf", ignoreCase = true) == true
+                                                        || note?.mimeType?.contains("word", ignoreCase = true) == true
+                                                        || note?.mimeType?.contains("presentation", ignoreCase = true) == true
+                                                        || note?.mimeType?.contains("sheet", ignoreCase = true) == true
+                                                        || ext in listOf("pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "txt", "csv")
                                                     if (isDoc) {
                                                         currentDestination = ActiveDestination.ReaderView(notebookId)
                                                     } else {

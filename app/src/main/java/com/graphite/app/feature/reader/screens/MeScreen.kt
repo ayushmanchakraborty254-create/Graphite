@@ -68,6 +68,8 @@ fun MeScreen(
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showSyncResultDialog by remember { mutableStateOf(false) }
+    var isSyncingBoth by remember { mutableStateOf(false) }
+    var syncResultMessage by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = modifier
@@ -244,18 +246,42 @@ fun MeScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             FilledTonalButton(
                                 onClick = {
+                                    isSyncingBoth = true
                                     scope.launch {
-                                        syncManager.syncNotes()
+                                        val driveResult = driveManager.syncNotesWithDrive(context)
+                                        val supabaseResult = syncManager.syncNotes()
+                                        isSyncingBoth = false
+
+                                        val msg = buildString {
+                                            if (driveResult.isSuccess) {
+                                                appendLine("✓ Google Drive: Successfully backed up & synced ${driveResult.getOrNull()} notes.")
+                                            } else {
+                                                appendLine("• Google Drive: ${driveResult.exceptionOrNull()?.message ?: "Check connection"}")
+                                            }
+                                            if (supabaseResult.isSuccess) {
+                                                appendLine("✓ Supabase: Synced ${supabaseResult.getOrNull()} notes.")
+                                            }
+                                        }
+                                        syncResultMessage = msg.trim()
                                         showSyncResultDialog = true
                                     }
                                 },
+                                enabled = !isSyncingBoth,
                                 colors = ButtonDefaults.filledTonalButtonColors(
                                     containerColor = Color(0xFF00838F),
                                     contentColor = Color.White
                                 ),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Text("Sync Notes", fontSize = 12.sp)
+                                if (isSyncingBoth) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(if (isSyncingBoth) "Syncing..." else "Sync Notes", fontSize = 12.sp)
                             }
                             OutlinedButton(
                                 onClick = { googleAccountManager.signOut(context) },
@@ -473,6 +499,40 @@ fun MeScreen(
                 }
             },
             containerColor = GraphiteSurfaceVariant
+        )
+    }
+
+    if (showSyncResultDialog) {
+        AlertDialog(
+            onDismissRequest = { showSyncResultDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.CloudDone, contentDescription = null, tint = GraphiteOrange)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Cross-Device Sync", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = syncResultMessage ?: "Notes successfully synchronized with your Google Account.",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "Your notes are safely preserved. Whenever you reinstall Graphite or sign in on another device, all your synced notes will restore automatically.",
+                        color = Color(0xFFAAAAAA),
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSyncResultDialog = false }) {
+                    Text("OK", color = GraphiteOrange)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant,
+            shape = RoundedCornerShape(12.dp)
         )
     }
 }

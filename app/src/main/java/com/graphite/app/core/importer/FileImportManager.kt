@@ -230,10 +230,17 @@ class FileImportManager(
             val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateNoteTitle(rawTitle)
 
-            val previewLines = if (isPdf) {
-                listOf(displayName, "PDF Document • $pageCount pages")
-            } else {
-                listOf(displayName, "${ext.uppercase()} • $pageCount ${if (ext.contains("ppt", true)) "slides" else "pages"}")
+            val previewLines = when {
+                isPdf -> listOf(displayName, "PDF Document • $pageCount pages") + parsed.paragraphs.take(8)
+                ext.lowercase() in listOf("docx", "doc") -> {
+                    listOf(displayName, "DOCX • $pageCount pages") + (if (parsed.paragraphs.isNotEmpty()) parsed.paragraphs.take(15) else emptyList())
+                }
+                ext.lowercase() in listOf("pptx", "ppt") -> {
+                    listOf(displayName, "PPTX • $pageCount slides") + (if (parsed.slides.isNotEmpty()) parsed.slides.take(15).map { "Slide ${it.slideNumber}: ${it.title}" } else emptyList())
+                }
+                else -> {
+                    listOf(displayName, "${ext.uppercase()} • $pageCount pages") + (if (parsed.paragraphs.isNotEmpty()) parsed.paragraphs.take(15) else emptyList())
+                }
             }
 
             val importedNote = NotebookItem(

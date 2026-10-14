@@ -31,6 +31,7 @@ import com.graphite.app.GraphiteApplication
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
 import com.graphite.app.core.drive.BookshelfSyncReport
 import com.graphite.app.core.drive.DriveFolder
+import com.graphite.app.core.drive.DriveFolderBrowserDialog
 import com.graphite.app.core.drive.DriveUploadResult
 import com.graphite.app.core.importer.ImportResult
 import com.graphite.app.core.theme.GraphiteBlack
@@ -489,9 +490,9 @@ private fun BookshelfDriveSyncDialog(
     val isSyncing by driveManager.isSyncingBookshelf.collectAsState()
     val syncStatusMsg by driveManager.bookshelfSyncStatus.collectAsState()
 
-    var showFolderSelector by remember { mutableStateOf(false) }
-    var availableFolders by remember { mutableStateOf<List<DriveFolder>>(emptyList()) }
-    var isLoadingFolders by remember { mutableStateOf(false) }
+    var showDriveFolderBrowser by remember { mutableStateOf(false) }
+    var showCustomFolderDialog by remember { mutableStateOf(false) }
+    var customFolderInput by remember { mutableStateOf("") }
 
     val lastSyncMillis = driveManager.getLastBookshelfSyncTimeMillis()
     val lastSyncFormatted = if (lastSyncMillis > 0) {
@@ -558,53 +559,48 @@ private fun BookshelfDriveSyncDialog(
                     }
                 }
 
-                // Choose folder action
-                OutlinedButton(
-                    onClick = {
-                        isLoadingFolders = true
-                        scope.launch {
-                            val res = driveManager.fetchSubfolders(context, "root")
-                            availableFolders = res.getOrDefault(emptyList())
-                            isLoadingFolders = false
-                            showFolderSelector = true
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                ) {
-                    Icon(Icons.Default.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Choose Particular Drive Folder")
-                }
+                // Folder action buttons: Browse Any Folder or Enter Custom Folder
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { showDriveFolderBrowser = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2C3E50))
+                    ) {
+                        Icon(Icons.Default.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF64B5F6))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Browse & Select Any Drive Folder", color = Color.White)
+                    }
 
-                if (showFolderSelector) {
-                    Text("Select a folder to sync:", color = Color.Gray, fontSize = 12.sp)
-                    if (isLoadingFolders) {
-                        CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(20.dp))
-                    } else {
-                        LazyColumn(modifier = Modifier.heightIn(max = 160.dp)) {
-                            item {
-                                TextButton(
-                                    onClick = {
-                                        driveManager.setBookshelfSyncedFolder(null)
-                                        showFolderSelector = false
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("• Default: Graphite Bookshelf", color = GraphiteOrange)
-                                }
-                            }
-                            items(availableFolders) { folder ->
-                                TextButton(
-                                    onClick = {
-                                        driveManager.setBookshelfSyncedFolder(folder)
-                                        showFolderSelector = false
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text("• ${folder.name}", color = Color.White)
-                                }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                customFolderInput = syncedFolder?.name ?: ""
+                                showCustomFolderDialog = true
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Enter Folder Name", fontSize = 12.sp)
+                        }
+
+                        if (syncedFolder != null) {
+                            OutlinedButton(
+                                onClick = {
+                                    driveManager.setBookshelfSyncedFolder(null)
+                                    Toast.makeText(context, "Reset to default Graphite Bookshelf folder", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
+                            ) {
+                                Text("Reset to Default", fontSize = 12.sp)
                             }
                         }
                     }
@@ -634,6 +630,71 @@ private fun BookshelfDriveSyncDialog(
         containerColor = GraphiteSurfaceVariant,
         shape = RoundedCornerShape(16.dp)
     )
+
+    if (showDriveFolderBrowser) {
+        DriveFolderBrowserDialog(
+            driveManager = driveManager,
+            initialFolder = syncedFolder ?: DriveFolder.ROOT,
+            onFolderSelected = { chosen ->
+                driveManager.setBookshelfSyncedFolder(chosen)
+                showDriveFolderBrowser = false
+                Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
+            },
+            onLaunchPicker = { /* optional external picker */ },
+            isAuthorizingPicker = false,
+            onDismiss = { showDriveFolderBrowser = false }
+        )
+    }
+
+    if (showCustomFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showCustomFolderDialog = false },
+            title = { Text("Custom Drive Folder", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter any folder name in your Google Drive. Graphite will search for or create this folder and sync books inside it.",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = customFolderInput,
+                        onValueChange = { customFolderInput = it },
+                        label = { Text("Folder Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = GraphiteOrange,
+                            unfocusedBorderColor = Color.Gray
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = customFolderInput.trim()
+                        if (trimmed.isNotBlank()) {
+                            driveManager.setBookshelfSyncedFolder(DriveFolder("custom_$trimmed", trimmed))
+                            Toast.makeText(context, "Folder set to: $trimmed", Toast.LENGTH_SHORT).show()
+                            showCustomFolderDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                ) {
+                    Text("Save Folder", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCustomFolderDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
 }
 
 @Composable

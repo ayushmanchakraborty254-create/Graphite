@@ -23,6 +23,7 @@ import com.graphite.app.core.config.GraphiteConfig
 import com.graphite.app.core.security.SecureStorage
 import com.graphite.app.core.supabase.InkSerialization
 import com.graphite.app.data.model.NotebookItem
+import com.graphite.app.data.repository.GraphiteRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,7 +41,6 @@ import java.io.IOException
 
 import com.graphite.app.data.model.Book
 import com.graphite.app.data.model.BookCoverType
-import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.core.importer.DocumentContentParser
 import java.io.File
 
@@ -133,6 +133,19 @@ interface DriveApiV3Uploader {
         accountEmail: String,
         fileId: String
     ): Result<ByteArray> = Result.success(ByteArray(0))
+
+    suspend fun updateFile(
+        accountEmail: String,
+        fileId: String,
+        mimeType: String,
+        bytes: ByteArray
+    ): Result<Unit> = Result.success(Unit)
+
+    suspend fun findFileByName(
+        accountEmail: String,
+        fileName: String,
+        parentFolderId: String? = null
+    ): Result<DriveRemoteFile?> = Result.success(null)
 }
 
 class DefaultDriveApiV3Uploader(
@@ -319,6 +332,53 @@ class DefaultDriveApiV3Uploader(
                 .executeMediaAsInputStream()
             val bytes = inputStream.use { it.readBytes() }
             Result.success(bytes)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun updateFile(
+        accountEmail: String,
+        fileId: String,
+        mimeType: String,
+        bytes: ByteArray
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            val mediaContent = ByteArrayContent(mimeType, bytes)
+            driveService.files().update(fileId, null, mediaContent)
+                .setSupportsAllDrives(true)
+                .execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun findFileByName(
+        accountEmail: String,
+        fileName: String,
+        parentFolderId: String?
+    ): Result<DriveRemoteFile?> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            var q = "name = '$fileName' and trashed = false"
+            if (!parentFolderId.isNullOrBlank()) {
+                q += " and '$parentFolderId' in parents"
+            }
+            val result = driveService.files().list()
+                .setQ(q)
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setFields("files(id, name, mimeType, size)")
+                .setPageSize(1)
+                .execute()
+            val first = result.files?.firstOrNull()
+            if (first != null) {
+                Result.success(DriveRemoteFile(first.id ?: "", first.name ?: fileName, first.mimeType ?: "", first.getSize() ?: 0L))
+            } else {
+                Result.success(null)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -1173,6 +1233,113 @@ class GoogleDriveManager(
             Triple(book.content.toByteArray(Charsets.UTF_8), safeName, "text/plain")
         }
         uploader.upload(accountEmail, fileName, mimeType, bytes, syncedFolder.id)
+    }
+
+    private val _isSyncingNotes = MutableStateFlow(false)
+    val isSyncingNotes: StateFlow<Boolean> = _isSyncingNotes.asStateFlow()
+
+    private val _notesSyncStatus = MutableStateFlow<String?>(null)
+    val notesSyncStatus: StateFlow<String?> = _notesSyncStatus.asStateFlow()
+
+    suspend fun syncNotesWithDrive(context: Context): Result<Int> = withContext(ioDispatcher) {
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+            ?: getAuthorizedAccountEmail()
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.email
+        if (accountEmail.isNullOrBlank()) {
+            return@withContext Result.failure(IllegalStateException("Google account authorization required to sync notes."))
+        }
+
+        _isSyncingNotes.value = true
+        _notesSyncStatus.value = "Backing up notes to Google Drive..."
+
+        try {
+            val uploader = uploaderProvider(context)
+            val fileName = "graphite_notes_backup.json"
+            val mimeType = "application/json"
+
+            // 1. Check if backup file already exists in Drive
+            val existingRemote = uploader.findFileByName(accountEmail, fileName).getOrNull()
+
+            // 2. If existing, download and reconcile first (so notes from previous sessions/devices are not overwritten)
+            if (existingRemote != null) {
+                _notesSyncStatus.value = "Fetching existing remote notes..."
+                val downloadRes = uploader.downloadFile(accountEmail, existingRemote.id)
+                if (downloadRes.isSuccess) {
+                    val remoteBytes = downloadRes.getOrThrow()
+                    if (remoteBytes.isNotEmpty()) {
+                        val remoteJson = remoteBytes.toString(Charsets.UTF_8)
+                        GraphiteRepository.importNotesFromJson(remoteJson)
+                    }
+                }
+            }
+
+            // 3. Serialize all local notes (including any reconciled notes)
+            val mergedJson = GraphiteRepository.exportNotesAsJson()
+            val uploadBytes = mergedJson.toByteArray(Charsets.UTF_8)
+
+            if (existingRemote != null) {
+                _notesSyncStatus.value = "Updating notes backup in Google Drive..."
+                uploader.updateFile(accountEmail, existingRemote.id, mimeType, uploadBytes)
+            } else {
+                _notesSyncStatus.value = "Creating notes backup in Google Drive..."
+                uploader.upload(accountEmail, fileName, mimeType, uploadBytes, "root")
+            }
+
+            val totalNotes = GraphiteRepository.getAllNotesForActiveUser().filter { !it.isDeleted }.size
+            _notesSyncStatus.value = "Synced $totalNotes notes to Google Drive"
+            _isSyncingNotes.value = false
+            Result.success(totalNotes)
+        } catch (e: Exception) {
+            _isSyncingNotes.value = false
+            _notesSyncStatus.value = "Notes sync failed: ${e.message}"
+            Result.failure(e)
+        }
+    }
+
+    suspend fun restoreNotesFromDrive(context: Context): Result<Int> = withContext(ioDispatcher) {
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+            ?: getAuthorizedAccountEmail()
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.email
+        if (accountEmail.isNullOrBlank()) {
+            return@withContext Result.failure(IllegalStateException("Google account authorization required."))
+        }
+
+        _isSyncingNotes.value = true
+        _notesSyncStatus.value = "Restoring notes from Google Drive..."
+
+        try {
+            val uploader = uploaderProvider(context)
+            val fileName = "graphite_notes_backup.json"
+
+            val existingRemote = uploader.findFileByName(accountEmail, fileName).getOrNull()
+            if (existingRemote == null) {
+                _isSyncingNotes.value = false
+                _notesSyncStatus.value = "No existing Drive notes backup found"
+                return@withContext Result.success(0)
+            }
+
+            val downloadRes = uploader.downloadFile(accountEmail, existingRemote.id)
+            if (downloadRes.isFailure) {
+                _isSyncingNotes.value = false
+                return@withContext Result.failure(downloadRes.exceptionOrNull() ?: Exception("Download failed"))
+            }
+
+            val remoteBytes = downloadRes.getOrThrow()
+            if (remoteBytes.isEmpty()) {
+                _isSyncingNotes.value = false
+                return@withContext Result.success(0)
+            }
+
+            val remoteJson = remoteBytes.toString(Charsets.UTF_8)
+            val count = GraphiteRepository.importNotesFromJson(remoteJson)
+            _isSyncingNotes.value = false
+            _notesSyncStatus.value = "Restored $count notes from Google Drive"
+            Result.success(count)
+        } catch (e: Exception) {
+            _isSyncingNotes.value = false
+            _notesSyncStatus.value = "Restore failed: ${e.message}"
+            Result.failure(e)
+        }
     }
 
     companion object {
