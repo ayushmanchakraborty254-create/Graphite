@@ -98,7 +98,7 @@ fun CanvasEditorScreen(
     notebookId: String,
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier,
-    workspaceViewModel: WorkspaceViewModel = viewModel()
+    workspaceViewModel: WorkspaceViewModel = viewModel(key = "canvas_editor_$notebookId")
 ) {
     val notebook = remember(notebookId) { GraphiteRepository.getNotebook(notebookId) }
     val uiState by workspaceViewModel.uiState.collectAsState()
@@ -204,14 +204,12 @@ fun CanvasEditorScreen(
         }
     }
 
-    // Initial strokes load
+    // Initial strokes load - isolated per notebook document
     LaunchedEffect(notebookId) {
-        notebook?.let { nb ->
-            if (uiState.strokes.isEmpty() && nb.initialStrokes.isNotEmpty()) {
-                nb.initialStrokes.forEach { stroke -> workspaceViewModel.addStroke(stroke) }
-            }
-            workspaceViewModel.selectPaperStyle(nb.paperStyle)
-        }
+        val currentNote = notebook ?: GraphiteRepository.getNotebook(notebookId)
+        val initialStrokes = currentNote?.initialStrokes ?: emptyList()
+        workspaceViewModel.loadNotebook(notebookId, initialStrokes)
+        currentNote?.paperStyle?.let { workspaceViewModel.selectPaperStyle(it) }
     }
 
     // Load PDF / Word / PPTX document page if filePath exists
@@ -658,9 +656,6 @@ fun CanvasEditorScreen(
                                                         pageIndex = pageIdx
                                                     )
                                                     workspaceViewModel.addStroke(newStroke)
-                                                    notebook?.let { nb ->
-                                                        GraphiteRepository.updateNotebookStrokes(nb.id, uiState.strokes + newStroke)
-                                                    }
                                                     activePoints = emptyList()
                                                 }
                                             }
@@ -790,9 +785,7 @@ fun CanvasEditorScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         IconButton(onClick = {
-                                            val remaining = uiState.strokes.filterIndexed { i, _ -> !selectedStrokeIndices.contains(i) }
-                                            workspaceViewModel.confirmClearPage()
-                                            remaining.forEach { workspaceViewModel.addStroke(it) }
+                                            workspaceViewModel.deleteStrokes(selectedStrokeIndices)
                                             selectedStrokeIndices = emptySet()
                                             lassoBounds = null
                                             Toast.makeText(context, "Deleted selected strokes", Toast.LENGTH_SHORT).show()

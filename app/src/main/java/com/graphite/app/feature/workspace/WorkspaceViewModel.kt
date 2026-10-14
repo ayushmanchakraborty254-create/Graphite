@@ -2,6 +2,7 @@ package com.graphite.app.feature.workspace
 
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.ViewModel
+import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.feature.diagnostic.InputModePolicy
 import com.graphite.app.feature.workspace.history.IndexedStroke
 import com.graphite.app.feature.workspace.history.StrokeHistoryManager
@@ -34,15 +35,34 @@ class WorkspaceViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(WorkspaceUiState())
     val uiState: StateFlow<WorkspaceUiState> = _uiState.asStateFlow()
 
+    private var currentNotebookId: String? = null
+
+    fun loadNotebook(id: String, initialStrokes: List<InkStroke> = emptyList()) {
+        currentNotebookId = id
+        historyManager.clear()
+        _uiState.update { current ->
+            current.copy(
+                strokes = initialStrokes,
+                canUndo = false,
+                canRedo = false,
+                showClearDialog = false
+            )
+        }
+    }
+
     fun addStroke(stroke: InkStroke) {
         if (stroke.points.isEmpty()) return
         historyManager.recordAddStroke(stroke)
+        val updatedStrokes = _uiState.value.strokes + stroke
         _uiState.update { current ->
             current.copy(
-                strokes = current.strokes + stroke,
+                strokes = updatedStrokes,
                 canUndo = historyManager.canUndo,
                 canRedo = historyManager.canRedo
             )
+        }
+        currentNotebookId?.let { id ->
+            GraphiteRepository.updateNotebookStrokes(id, updatedStrokes)
         }
     }
 
@@ -70,6 +90,39 @@ class WorkspaceViewModel : ViewModel() {
                     canRedo = historyManager.canRedo
                 )
             }
+            currentNotebookId?.let { id ->
+                GraphiteRepository.updateNotebookStrokes(id, remainingStrokes)
+            }
+        }
+    }
+
+    fun deleteStrokes(indices: Set<Int>) {
+        if (indices.isEmpty()) return
+        val currentStrokes = _uiState.value.strokes
+        val erasedItems = mutableListOf<IndexedStroke>()
+        val remainingStrokes = mutableListOf<InkStroke>()
+
+        for (i in currentStrokes.indices) {
+            val stroke = currentStrokes[i]
+            if (indices.contains(i)) {
+                erasedItems.add(IndexedStroke(i, stroke))
+            } else {
+                remainingStrokes.add(stroke)
+            }
+        }
+
+        if (erasedItems.isNotEmpty()) {
+            historyManager.recordEraseStrokes(erasedItems)
+            _uiState.update { current ->
+                current.copy(
+                    strokes = remainingStrokes,
+                    canUndo = historyManager.canUndo,
+                    canRedo = historyManager.canRedo
+                )
+            }
+            currentNotebookId?.let { id ->
+                GraphiteRepository.updateNotebookStrokes(id, remainingStrokes)
+            }
         }
     }
 
@@ -83,6 +136,9 @@ class WorkspaceViewModel : ViewModel() {
                 canRedo = historyManager.canRedo
             )
         }
+        currentNotebookId?.let { id ->
+            GraphiteRepository.updateNotebookStrokes(id, updated)
+        }
     }
 
     fun redo() {
@@ -94,6 +150,9 @@ class WorkspaceViewModel : ViewModel() {
                 canUndo = historyManager.canUndo,
                 canRedo = historyManager.canRedo
             )
+        }
+        currentNotebookId?.let { id ->
+            GraphiteRepository.updateNotebookStrokes(id, updated)
         }
     }
 
@@ -117,6 +176,9 @@ class WorkspaceViewModel : ViewModel() {
                     canRedo = historyManager.canRedo,
                     showClearDialog = false
                 )
+            }
+            currentNotebookId?.let { id ->
+                GraphiteRepository.updateNotebookStrokes(id, emptyList())
             }
         } else {
             _uiState.update { it.copy(showClearDialog = false) }
