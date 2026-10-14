@@ -146,12 +146,16 @@ fun CanvasEditorScreen(
     var panX by remember { mutableFloatStateOf(0f) }
     var pageRotation by remember { mutableFloatStateOf(0f) }
     var scrollingMode by remember { mutableStateOf("Vertical") }
-    var lastTouchX by remember { mutableFloatStateOf(0f) }
-    var lastTouchY by remember { mutableFloatStateOf(0f) }
-    var isMultiTouchGesture by remember { mutableStateOf(false) }
-    var lastPinchDistance by remember { mutableFloatStateOf(0f) }
-    var lastPinchCenterX by remember { mutableFloatStateOf(0f) }
-    var lastPinchCenterY by remember { mutableFloatStateOf(0f) }
+    
+    // Dedicated two-finger gesture tracking (pinch vs two-finger scroll)
+    var pinchStartDist by remember { mutableFloatStateOf(0f) }
+    var lastPinchDist by remember { mutableFloatStateOf(0f) }
+    var twoFingerStartY by remember { mutableFloatStateOf(0f) }
+    var lastTwoFingerY by remember { mutableFloatStateOf(0f) }
+    var twoFingerStartX by remember { mutableFloatStateOf(0f) }
+    var lastTwoFingerX by remember { mutableFloatStateOf(0f) }
+    var isTwoFingerActive by remember { mutableStateOf(false) }
+    var twoFingerGestureMode by remember { mutableIntStateOf(0) } // 0=Undecided, 1=Zooming, 2=Scrolling
 
     // Drawer state (Image 4)
     var selectedDrawerTab by remember { mutableIntStateOf(0) } // 0=Grid, 1=Bookmarks, 2=Outline
@@ -472,205 +476,116 @@ fun CanvasEditorScreen(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .pointerInteropFilter { motionEvent ->
-                                        if (isReadOnlyMode) {
-                                            when (motionEvent.actionMasked) {
-                                                MotionEvent.ACTION_DOWN -> {
-                                                    lastTouchX = motionEvent.x
-                                                    lastTouchY = motionEvent.y
-                                                    isMultiTouchGesture = false
-                                                }
-                                                MotionEvent.ACTION_POINTER_DOWN -> {
-                                                    isMultiTouchGesture = true
-                                                    if (motionEvent.pointerCount >= 2) {
-                                                        lastPinchDistance = kotlin.math.hypot(
-                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                        ).toFloat()
-                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                    }
-                                                }
-                                                MotionEvent.ACTION_MOVE -> {
-                                                    if (isMultiTouchGesture || motionEvent.pointerCount >= 2) {
-                                                        if (motionEvent.pointerCount >= 2) {
-                                                            val curDist = kotlin.math.hypot(
-                                                                (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                                (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                            ).toFloat()
-                                                            if (lastPinchDistance > 10f && curDist > 10f) {
-                                                                val factor = curDist / lastPinchDistance
-                                                                if (factor in 0.7f..1.4f) {
-                                                                    zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
-                                                                }
-                                                            }
-                                                            lastPinchDistance = curDist
+                                        val pointerCount = motionEvent.pointerCount
+                                        val action = motionEvent.actionMasked
 
-                                                            val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                            val dy = curCenterY - lastPinchCenterY
-                                                            lastPinchCenterY = curCenterY
-                                                            listState.dispatchRawDelta(dy)
-
-                                                            val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                            val dx = curCenterX - lastPinchCenterX
-                                                            lastPinchCenterX = curCenterX
-                                                            if (zoomScale > 1f) {
-                                                                panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                                            }
-                                                        }
-                                                    } else {
-                                                        val dy = motionEvent.y - lastTouchY
-                                                        val dx = motionEvent.x - lastTouchX
-                                                        lastTouchY = motionEvent.y
-                                                        lastTouchX = motionEvent.x
-                                                        listState.dispatchRawDelta(dy)
-                                                        if (zoomScale > 1f) {
-                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                                        }
-                                                    }
-                                                }
-                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                    isMultiTouchGesture = false
-                                                    lastPinchDistance = 0f
-                                                }
-                                            }
-                                            return@pointerInteropFilter true
-                                        }
-
-                                        // Check if any pointer is a stylus
-                                        val hasStylus = (0 until motionEvent.pointerCount).any { idx ->
+                                        // Check if a hardware stylus is in contact
+                                        val hasHardwareStylus = (0 until pointerCount).any { idx ->
                                             val t = motionEvent.getToolType(idx)
                                             t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
                                         }
 
-                                        // ----------------------------------------------------
-                                        // 1. FINGER DRAWING IS OFF (!allowFingerDrawing)
-                                        // Stylus writes/erases. Fingers scroll (1 finger) and pinch-to-zoom (2 fingers).
-                                        // ----------------------------------------------------
-                                        if (!allowFingerDrawing && !hasStylus) {
-                                            when (motionEvent.actionMasked) {
-                                                MotionEvent.ACTION_DOWN -> {
-                                                    lastTouchX = motionEvent.x
-                                                    lastTouchY = motionEvent.y
-                                                    isMultiTouchGesture = false
-                                                }
-                                                MotionEvent.ACTION_POINTER_DOWN -> {
-                                                    isMultiTouchGesture = true
-                                                    if (motionEvent.pointerCount >= 2) {
-                                                        lastPinchDistance = kotlin.math.hypot(
-                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                        ).toFloat()
-                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                    }
-                                                }
-                                                MotionEvent.ACTION_MOVE -> {
-                                                    if (isMultiTouchGesture || motionEvent.pointerCount >= 2) {
-                                                        if (motionEvent.pointerCount >= 2) {
-                                                            val curDist = kotlin.math.hypot(
-                                                                (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                                (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                            ).toFloat()
-                                                            if (lastPinchDistance > 10f && curDist > 10f) {
-                                                                val factor = curDist / lastPinchDistance
-                                                                if (factor in 0.7f..1.4f) {
-                                                                    zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
-                                                                }
-                                                            }
-                                                            lastPinchDistance = curDist
-
-                                                            val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                            val dy = curCenterY - lastPinchCenterY
-                                                            lastPinchCenterY = curCenterY
-                                                            listState.dispatchRawDelta(dy)
-
-                                                            val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                            val dx = curCenterX - lastPinchCenterX
-                                                            lastPinchCenterX = curCenterX
-                                                            if (zoomScale > 1f) {
-                                                                panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                                            }
-                                                        }
-                                                    } else {
-                                                        val dy = motionEvent.y - lastTouchY
-                                                        val dx = motionEvent.x - lastTouchX
-                                                        lastTouchY = motionEvent.y
-                                                        lastTouchX = motionEvent.x
-                                                        listState.dispatchRawDelta(dy)
-                                                        if (zoomScale > 1f) {
-                                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                                        }
-                                                    }
-                                                }
-                                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                    isMultiTouchGesture = false
-                                                    lastPinchDistance = 0f
-                                                }
-                                            }
-                                            return@pointerInteropFilter true
-                                        }
-
-                                        // ----------------------------------------------------
-                                        // 2. FINGER DRAWING IS ON (allowFingerDrawing)
-                                        // 1 finger draws. Double finger touch (2 fingers) scrolls & zooms!
-                                        // ----------------------------------------------------
-                                        if (allowFingerDrawing && !hasStylus && (motionEvent.pointerCount >= 2 || isMultiTouchGesture)) {
+                                        // ================================================================
+                                        // CASE A: TWO (OR MORE) FINGERS -> ZOOM OR TWO-FINGER SCROLL ONLY
+                                        // Page scrolling ONLY works with two finger swipe.
+                                        // When zooming in or out, pages will NEVER scroll!
+                                        // ================================================================
+                                        if (pointerCount >= 2 && !hasHardwareStylus) {
                                             activePoints = emptyList()
                                             lassoPoints = emptyList()
                                             activeEraserCenter = null
 
-                                            when (motionEvent.actionMasked) {
-                                                MotionEvent.ACTION_POINTER_DOWN -> {
-                                                    isMultiTouchGesture = true
-                                                    if (motionEvent.pointerCount >= 2) {
-                                                        lastPinchDistance = kotlin.math.hypot(
-                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                        ).toFloat()
-                                                        lastPinchCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                        lastPinchCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                    }
+                                            val p0x = motionEvent.getX(0)
+                                            val p0y = motionEvent.getY(0)
+                                            val p1x = motionEvent.getX(1)
+                                            val p1y = motionEvent.getY(1)
+                                            val curDist = kotlin.math.hypot((p1x - p0x).toDouble(), (p1y - p0y).toDouble()).toFloat()
+                                            val curCenterY = (p0y + p1y) / 2f
+                                            val curCenterX = (p0x + p1x) / 2f
+
+                                            when (action) {
+                                                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_DOWN -> {
+                                                    isTwoFingerActive = true
+                                                    twoFingerGestureMode = 0 // Undecided
+                                                    pinchStartDist = curDist
+                                                    lastPinchDist = curDist
+                                                    twoFingerStartY = curCenterY
+                                                    lastTwoFingerY = curCenterY
+                                                    twoFingerStartX = curCenterX
+                                                    lastTwoFingerX = curCenterX
                                                 }
                                                 MotionEvent.ACTION_MOVE -> {
-                                                    if (motionEvent.pointerCount >= 2) {
-                                                        val curDist = kotlin.math.hypot(
-                                                            (motionEvent.getX(1) - motionEvent.getX(0)).toDouble(),
-                                                            (motionEvent.getY(1) - motionEvent.getY(0)).toDouble()
-                                                        ).toFloat()
-                                                        if (lastPinchDistance > 10f && curDist > 10f) {
-                                                            val factor = curDist / lastPinchDistance
-                                                            if (factor in 0.7f..1.4f) {
-                                                                zoomScale = (zoomScale * factor).coerceIn(0.75f, 3.5f)
+                                                    isTwoFingerActive = true
+                                                    val distDelta = kotlin.math.abs(curDist - pinchStartDist)
+                                                    val yDelta = kotlin.math.abs(curCenterY - twoFingerStartY)
+
+                                                    if (twoFingerGestureMode == 0) {
+                                                        if (distDelta > 18f) {
+                                                            twoFingerGestureMode = 1 // PINCH ZOOM
+                                                        } else if (yDelta > 14f) {
+                                                            twoFingerGestureMode = 2 // TWO-FINGER SCROLL
+                                                        }
+                                                    }
+
+                                                    if (twoFingerGestureMode == 1) {
+                                                        // ZOOMING: do NOT scroll listState while zooming!
+                                                        if (lastPinchDist > 10f && curDist > 10f) {
+                                                            val factor = curDist / lastPinchDist
+                                                            if (factor in 0.6f..1.6f) {
+                                                                zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
                                                             }
                                                         }
-                                                        lastPinchDistance = curDist
-
-                                                        val curCenterY = (motionEvent.getY(0) + motionEvent.getY(1)) / 2f
-                                                        val dy = curCenterY - lastPinchCenterY
-                                                        lastPinchCenterY = curCenterY
+                                                        lastPinchDist = curDist
+                                                    } else if (twoFingerGestureMode == 2) {
+                                                        // SCROLLING: Two finger vertical swipe
+                                                        val dy = curCenterY - lastTwoFingerY
+                                                        lastTwoFingerY = curCenterY
                                                         listState.dispatchRawDelta(dy)
 
-                                                        val curCenterX = (motionEvent.getX(0) + motionEvent.getX(1)) / 2f
-                                                        val dx = curCenterX - lastPinchCenterX
-                                                        lastPinchCenterX = curCenterX
+                                                        val dx = curCenterX - lastTwoFingerX
+                                                        lastTwoFingerX = curCenterX
                                                         if (zoomScale > 1f) {
                                                             panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
                                                         }
                                                     }
                                                 }
+                                                MotionEvent.ACTION_POINTER_UP -> {}
                                                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                    isMultiTouchGesture = false
-                                                    lastPinchDistance = 0f
+                                                    isTwoFingerActive = false
+                                                    twoFingerGestureMode = 0
                                                 }
                                             }
                                             return@pointerInteropFilter true
                                         }
 
-                                        // ----------------------------------------------------
-                                        // 3. DRAWING (Stylus, or 1 finger when finger drawing is enabled)
-                                        // ----------------------------------------------------
-                                        val targetPointerIdx = if (hasStylus) {
-                                            (0 until motionEvent.pointerCount).firstOrNull { idx ->
+                                        // Ignore trailing finger release after a two-finger gesture
+                                        if (isTwoFingerActive) {
+                                            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                                                isTwoFingerActive = false
+                                                twoFingerGestureMode = 0
+                                            }
+                                            return@pointerInteropFilter true
+                                        }
+
+                                        // ================================================================
+                                        // CASE B: SINGLE TOUCH (Stylus OR Single Finger)
+                                        // Single touch NEVER scrolls the page! Pages never move while drawing!
+                                        // ================================================================
+                                        if (isReadOnlyMode) {
+                                            return@pointerInteropFilter true
+                                        }
+
+                                        val isStylus = hasHardwareStylus ||
+                                                motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS ||
+                                                motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
+
+                                        // If finger drawing is OFF and this is NOT a stylus: do not draw and do not scroll
+                                        if (!allowFingerDrawing && !isStylus) {
+                                            return@pointerInteropFilter true
+                                        }
+
+                                        val targetPointerIdx = if (hasHardwareStylus) {
+                                            (0 until pointerCount).firstOrNull { idx ->
                                                 val t = motionEvent.getToolType(idx)
                                                 t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
                                             } ?: 0
@@ -684,14 +599,13 @@ fun CanvasEditorScreen(
 
                                         when (packet.action) {
                                             MotionActionType.DOWN -> {
-                                                isMultiTouchGesture = false
                                                 if (selectedStudioTool == StudioTool.LASSO) {
                                                     lassoPoints = listOf(Offset(packet.x, packet.y))
                                                     selectedStrokeIndices = emptySet()
                                                     lassoBounds = null
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(packet.x, packet.y)
-                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f)
+                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     activePoints = listOf(
@@ -709,14 +623,15 @@ fun CanvasEditorScreen(
                                                             workspaceViewModel.eraseAt(
                                                                 motionEvent.getHistoricalX(targetPointerIdx, h),
                                                                 motionEvent.getHistoricalY(targetPointerIdx, h),
-                                                                32f
+                                                                32f,
+                                                                pageIndex = pageIdx
                                                             )
                                                         }
                                                     }
-                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f)
+                                                    workspaceViewModel.eraseAt(packet.x, packet.y, 32f, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
-                                                    val batch = mutableListOf<InkPoint>()
+                                                    val batch = ArrayList<InkPoint>(motionEvent.historySize + 1)
                                                     for (h in 0 until motionEvent.historySize) {
                                                         if (targetPointerIdx < motionEvent.pointerCount) {
                                                             batch.add(
@@ -737,7 +652,6 @@ fun CanvasEditorScreen(
                                             }
                                             MotionActionType.UP, MotionActionType.CANCEL -> {
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    // Calculate enclosed strokes
                                                     if (lassoPoints.size > 2) {
                                                         val minX = lassoPoints.minOf { it.x }
                                                         val maxX = lassoPoints.maxOf { it.x }
@@ -748,8 +662,10 @@ fun CanvasEditorScreen(
 
                                                         val selected = mutableSetOf<Int>()
                                                         uiState.strokes.forEachIndexed { idx, s ->
-                                                            val intersects = s.points.any { p -> rect.contains(Offset(p.x, p.y)) }
-                                                            if (intersects) selected.add(idx)
+                                                            if (s.pageIndex == pageIdx) {
+                                                                val intersects = s.points.any { p -> rect.contains(Offset(p.x, p.y)) }
+                                                                if (intersects) selected.add(idx)
+                                                            }
                                                         }
                                                         selectedStrokeIndices = selected
                                                     }
@@ -767,7 +683,9 @@ fun CanvasEditorScreen(
                                                     val newStroke = InkStroke(
                                                         points = activePoints,
                                                         baseWidth = strokeWidth,
-                                                        color = strokeColor
+                                                        color = strokeColor,
+                                                        toolType = InkToolType.PEN,
+                                                        pageIndex = pageIdx
                                                     )
                                                     workspaceViewModel.addStroke(newStroke)
                                                     notebook?.let { nb ->
@@ -783,9 +701,9 @@ fun CanvasEditorScreen(
                             ) {
                                 val d = this.density
 
-                                // Committed ink strokes
+                                // Committed ink strokes for this specific page only
                                 uiState.strokes.forEachIndexed { idx, stroke ->
-                                    if (stroke.points.size >= 2) {
+                                    if (stroke.pageIndex == pageIdx && stroke.points.size >= 2) {
                                         val path = BezierSplineInterpolator.createSplinePath(stroke.points)
                                         val isSelectedByLasso = selectedStrokeIndices.contains(idx)
                                         val strokeColor = if (isSelectedByLasso) Color(0xFF00BCD4) else stroke.color
@@ -923,7 +841,7 @@ fun CanvasEditorScreen(
                 ) {
                     IconButton(
                         onClick = {
-                            zoomScale = (zoomScale - 0.25f).coerceIn(0.75f, 3.5f)
+                            zoomScale = (zoomScale - 0.25f).coerceIn(0.25f, 4.0f)
                             if (zoomScale <= 1.0f) panX = 0f
                         },
                         modifier = Modifier.size(28.dp)
@@ -946,7 +864,7 @@ fun CanvasEditorScreen(
 
                     IconButton(
                         onClick = {
-                            zoomScale = (zoomScale + 0.25f).coerceIn(0.75f, 3.5f)
+                            zoomScale = (zoomScale + 0.25f).coerceIn(0.25f, 4.0f)
                         },
                         modifier = Modifier.size(28.dp)
                     ) {

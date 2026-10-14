@@ -50,7 +50,8 @@ data class InkStroke(
     val points: List<InkPoint>,
     val baseWidth: Float = 4f,
     val color: Color = WorkspaceColors.CoralOrange,
-    val toolType: InkToolType = InkToolType.PEN
+    val toolType: InkToolType = InkToolType.PEN,
+    val pageIndex: Int = 0
 ) {
     val boundingBox: StrokeBoundingBox by lazy {
         if (points.isEmpty()) {

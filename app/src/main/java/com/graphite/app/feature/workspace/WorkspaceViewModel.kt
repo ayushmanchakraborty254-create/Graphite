@@ -46,14 +46,15 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
-    fun eraseAt(x: Float, y: Float, eraserRadius: Float = 28f) {
+    fun eraseAt(x: Float, y: Float, eraserRadius: Float = 28f, pageIndex: Int = -1) {
         val currentStrokes = _uiState.value.strokes
         val erasedItems = mutableListOf<IndexedStroke>()
         val remainingStrokes = mutableListOf<InkStroke>()
 
         for (i in currentStrokes.indices) {
             val stroke = currentStrokes[i]
-            if (stroke.intersectsPoint(x, y, eraserRadius)) {
+            val matchesPage = pageIndex < 0 || stroke.pageIndex == pageIndex
+            if (matchesPage && stroke.intersectsPoint(x, y, eraserRadius)) {
                 erasedItems.add(IndexedStroke(i, stroke))
             } else {
                 remainingStrokes.add(stroke)
