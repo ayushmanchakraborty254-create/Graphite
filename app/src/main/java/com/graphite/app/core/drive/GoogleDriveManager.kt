@@ -38,6 +38,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.io.IOException
 
+import com.graphite.app.data.model.Book
+import com.graphite.app.data.model.BookCoverType
+import com.graphite.app.data.repository.GraphiteRepository
+import com.graphite.app.core.importer.DocumentContentParser
+import java.io.File
+
 private object SafeLogger {
     fun d(tag: String, message: String) {
         try {
@@ -65,6 +71,22 @@ data class ExportedNotebookPayload(
     val strokesJson: String,
     val exportedAtMillis: Long = System.currentTimeMillis(),
     val appVersion: String = "1.0.0"
+)
+
+data class DriveRemoteFile(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val size: Long = 0L
+)
+
+data class BookshelfSyncReport(
+    val isSuccess: Boolean,
+    val folderId: String,
+    val folderName: String,
+    val downloadedCount: Int,
+    val uploadedCount: Int,
+    val message: String
 )
 
 /**
@@ -101,6 +123,16 @@ interface DriveApiV3Uploader {
     ): Result<DriveFolder> = Result.success(
         DriveFolder(folderId, if (folderId == "root" || folderId.isBlank()) "My Drive (Root)" else "Selected Drive Folder")
     )
+
+    suspend fun listFiles(
+        accountEmail: String,
+        folderId: String
+    ): Result<List<DriveRemoteFile>> = Result.success(emptyList())
+
+    suspend fun downloadFile(
+        accountEmail: String,
+        fileId: String
+    ): Result<ByteArray> = Result.success(ByteArray(0))
 }
 
 class DefaultDriveApiV3Uploader(
@@ -238,6 +270,55 @@ class DefaultDriveApiV3Uploader(
                 )
             }
             Result.success(DriveFolder(id = file.id ?: folderId, name = file.name ?: "Selected Drive Folder"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun listFiles(
+        accountEmail: String,
+        folderId: String
+    ): Result<List<DriveRemoteFile>> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            val parentQuery = if (folderId == "root" || folderId.isBlank()) {
+                "'root' in parents"
+            } else {
+                "'$folderId' in parents"
+            }
+            val result = driveService.files().list()
+                .setQ("$parentQuery and mimeType != 'application/vnd.google-apps.folder' and trashed = false")
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setFields("files(id, name, mimeType, size)")
+                .setPageSize(100)
+                .execute()
+
+            val files = result.files?.map {
+                DriveRemoteFile(
+                    id = it.id ?: "",
+                    name = it.name ?: "Unnamed",
+                    mimeType = it.mimeType ?: "application/octet-stream",
+                    size = it.getSize() ?: 0L
+                )
+            } ?: emptyList()
+            Result.success(files)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun downloadFile(
+        accountEmail: String,
+        fileId: String
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            val inputStream = driveService.files().get(fileId)
+                .setSupportsAllDrives(true)
+                .executeMediaAsInputStream()
+            val bytes = inputStream.use { it.readBytes() }
+            Result.success(bytes)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -894,8 +975,211 @@ class GoogleDriveManager(
         _uploadState.value = DriveUploadState.Idle
     }
 
+    private val _isSyncingBookshelf = MutableStateFlow(false)
+    val isSyncingBookshelf: StateFlow<Boolean> = _isSyncingBookshelf.asStateFlow()
+
+    private val _bookshelfSyncStatus = MutableStateFlow<String?>(null)
+    val bookshelfSyncStatus: StateFlow<String?> = _bookshelfSyncStatus.asStateFlow()
+
+    fun getBookshelfSyncedFolder(): DriveFolder? {
+        val folderId = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_ID) ?: return null
+        val folderName = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_NAME) ?: "Drive Folder"
+        return DriveFolder(folderId, folderName)
+    }
+
+    fun setBookshelfSyncedFolder(folder: DriveFolder?) {
+        if (folder == null) {
+            secureStorage.remove(KEY_BOOKSHELF_SYNC_FOLDER_ID)
+            secureStorage.remove(KEY_BOOKSHELF_SYNC_FOLDER_NAME)
+        } else {
+            secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_ID, folder.id)
+            secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_NAME, folder.name)
+        }
+    }
+
+    fun hasBookshelfSyncConfigured(): Boolean = getBookshelfSyncedFolder() != null
+
+    fun getLastBookshelfSyncTimeMillis(): Long {
+        val str = secureStorage.getString(KEY_BOOKSHELF_LAST_SYNC_TIME) ?: return 0L
+        return str.toLongOrNull() ?: 0L
+    }
+
+    suspend fun syncBookshelfWithDrive(
+        context: Context,
+        targetFolderId: String? = null
+    ): BookshelfSyncReport = withContext(ioDispatcher) {
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+        if (accountEmail.isNullOrBlank()) {
+            return@withContext BookshelfSyncReport(
+                isSuccess = false,
+                folderId = "",
+                folderName = "",
+                downloadedCount = 0,
+                uploadedCount = 0,
+                message = "Google Drive authorization required. Please authorize first."
+            )
+        }
+
+        _isSyncingBookshelf.value = true
+        _bookshelfSyncStatus.value = "Starting Drive sync..."
+
+        try {
+            val uploader = uploaderProvider(context)
+            var currentFolder = if (!targetFolderId.isNullOrBlank()) {
+                val f = uploader.getFolder(accountEmail, targetFolderId).getOrNull()
+                    ?: DriveFolder(targetFolderId, "Synced Folder")
+                setBookshelfSyncedFolder(f)
+                f
+            } else {
+                getBookshelfSyncedFolder()
+            }
+
+            // Auto-create or find "Graphite Bookshelf" folder if none is configured
+            if (currentFolder == null) {
+                _bookshelfSyncStatus.value = "Finding or creating Graphite Bookshelf folder..."
+                val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
+                val existingBookshelf = existingFolders.find { it.name.equals("Graphite Bookshelf", ignoreCase = true) }
+                if (existingBookshelf != null) {
+                    currentFolder = existingBookshelf
+                } else {
+                    val createResult = uploader.createFolder(accountEmail, "Graphite Bookshelf", "root")
+                    currentFolder = createResult.getOrDefault(DriveFolder("folder_graphite_bookshelf", "Graphite Bookshelf"))
+                }
+                setBookshelfSyncedFolder(currentFolder)
+            }
+
+            val folderId = currentFolder.id
+            val folderName = currentFolder.name
+
+            // 1. PULL: List remote files in synced folder
+            _bookshelfSyncStatus.value = "Checking files in $folderName..."
+            val remoteFilesResult = uploader.listFiles(accountEmail, folderId)
+            val remoteFiles = remoteFilesResult.getOrDefault(emptyList())
+
+            var downloadedCount = 0
+            val localBooks = GraphiteRepository.books.value
+            val docsDir = File(context.filesDir, "imported_documents").apply { mkdirs() }
+
+            for (remoteFile in remoteFiles) {
+                val cleanName = remoteFile.name
+                val baseTitle = if (cleanName.contains('.')) cleanName.substringBeforeLast('.') else cleanName
+                val alreadyExistsLocally = localBooks.any { book ->
+                    (book.filePath != null && File(book.filePath).name.equals(cleanName, ignoreCase = true)) ||
+                            book.title.equals(baseTitle, ignoreCase = true)
+                }
+
+                if (!alreadyExistsLocally) {
+                    _bookshelfSyncStatus.value = "Downloading $cleanName..."
+                    val downloadResult = uploader.downloadFile(accountEmail, remoteFile.id)
+                    if (downloadResult.isSuccess) {
+                        val bytes = downloadResult.getOrThrow()
+                        if (bytes.isNotEmpty()) {
+                            val safeName = "${remoteFile.id}_${cleanName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}"
+                            val targetFile = File(docsDir, safeName)
+                            targetFile.writeBytes(bytes)
+
+                            val parsed = DocumentContentParser.parse(bytes, cleanName, remoteFile.mimeType)
+                            val ext = cleanName.substringAfterLast('.', "").lowercase()
+                            val coverType = when {
+                                ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
+                                else -> BookCoverType.CUSTOM
+                            }
+
+                            val newBook = Book(
+                                id = "drive_${remoteFile.id}",
+                                title = GraphiteRepository.disambiguateBookTitle(parsed.title),
+                                author = "Google Drive Sync",
+                                progressPercent = 0,
+                                coverType = coverType,
+                                totalChapters = parsed.pageOrSlideCount,
+                                currentChapter = 1,
+                                content = parsed.extractedText,
+                                filePath = targetFile.absolutePath,
+                                mimeType = remoteFile.mimeType
+                            )
+                            GraphiteRepository.addBook(newBook)
+                            downloadedCount++
+                        }
+                    }
+                }
+            }
+
+            // 2. PUSH: Upload local books not present in remote folder
+            var uploadedCount = 0
+            val updatedLocalBooks = GraphiteRepository.books.value
+            for (book in updatedLocalBooks) {
+                val matchesRemote = remoteFiles.any { rf ->
+                    rf.name.equals(book.title, ignoreCase = true) ||
+                            (book.filePath != null && rf.name.equals(File(book.filePath).name, ignoreCase = true)) ||
+                            rf.name.startsWith(book.title, ignoreCase = true)
+                }
+
+                if (!matchesRemote) {
+                    _bookshelfSyncStatus.value = "Uploading ${book.title} to Drive..."
+                    val (bytes, fileName, mimeType) = if (book.filePath != null && File(book.filePath).exists()) {
+                        val f = File(book.filePath)
+                        Triple(f.readBytes(), f.name, book.mimeType)
+                    } else {
+                        val safeName = "${book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}.txt"
+                        Triple(book.content.toByteArray(Charsets.UTF_8), safeName, "text/plain")
+                    }
+
+                    val uploadResult = uploader.upload(accountEmail, fileName, mimeType, bytes, folderId)
+                    if (uploadResult is DriveUploadResult.Success) {
+                        uploadedCount++
+                    }
+                }
+            }
+
+            secureStorage.putString(KEY_BOOKSHELF_LAST_SYNC_TIME, System.currentTimeMillis().toString())
+            _bookshelfSyncStatus.value = "Sync complete: $downloadedCount downloaded, $uploadedCount uploaded"
+            _isSyncingBookshelf.value = false
+
+            BookshelfSyncReport(
+                isSuccess = true,
+                folderId = folderId,
+                folderName = folderName,
+                downloadedCount = downloadedCount,
+                uploadedCount = uploadedCount,
+                message = "Synced with \"$folderName\": $downloadedCount imported from Drive, $uploadedCount uploaded."
+            )
+        } catch (e: Exception) {
+            _isSyncingBookshelf.value = false
+            _bookshelfSyncStatus.value = "Sync error: ${e.message}"
+            BookshelfSyncReport(
+                isSuccess = false,
+                folderId = "",
+                folderName = "",
+                downloadedCount = 0,
+                uploadedCount = 0,
+                message = "Failed to sync: ${e.message ?: "Unknown error"}"
+            )
+        }
+    }
+
+    suspend fun uploadBookToSyncedDriveFolder(
+        context: Context,
+        book: Book
+    ): DriveUploadResult? = withContext(ioDispatcher) {
+        val syncedFolder = getBookshelfSyncedFolder() ?: return@withContext null
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL) ?: return@withContext null
+
+        val uploader = uploaderProvider(context)
+        val (bytes, fileName, mimeType) = if (book.filePath != null && File(book.filePath).exists()) {
+            val f = File(book.filePath)
+            Triple(f.readBytes(), f.name, book.mimeType)
+        } else {
+            val safeName = "${book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}.txt"
+            Triple(book.content.toByteArray(Charsets.UTF_8), safeName, "text/plain")
+        }
+        uploader.upload(accountEmail, fileName, mimeType, bytes, syncedFolder.id)
+    }
+
     companion object {
         private const val TAG = "GoogleDriveManager"
         private const val KEY_DRIVE_ACCOUNT_EMAIL = "google_drive_authorized_account_email"
+        private const val KEY_BOOKSHELF_SYNC_FOLDER_ID = "google_drive_bookshelf_sync_folder_id"
+        private const val KEY_BOOKSHELF_SYNC_FOLDER_NAME = "google_drive_bookshelf_sync_folder_name"
+        private const val KEY_BOOKSHELF_LAST_SYNC_TIME = "google_drive_bookshelf_last_sync_time"
     }
 }

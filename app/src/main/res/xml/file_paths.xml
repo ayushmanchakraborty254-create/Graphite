@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="internal_files" path="." />
+    <files-path name="imported_notes" path="imported_notes/" />
+    <files-path name="imported_documents" path="imported_documents/" />
+    <cache-path name="cache" path="." />
+</paths>

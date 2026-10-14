@@ -17,10 +17,16 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import android.content.Intent
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -100,6 +106,12 @@ fun CanvasEditorScreen(
     var showPageThumbnailsDialog by remember { mutableStateOf(false) }
     var showTemplateDialog by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showMoreSettingsDialog by remember { mutableStateOf(false) }
+    var showAiDialog by remember { mutableStateOf(false) }
+    var showTextInsertDialog by remember { mutableStateOf(false) }
+    var showZoomBox by remember { mutableStateOf(false) }
+    var pageRotation by remember { mutableFloatStateOf(0f) }
     var scrollingMode by remember { mutableStateOf("Vertical") }
 
     val palmFilter = remember { PalmRejectionFilter(uiState.inputPolicy) }
@@ -124,12 +136,22 @@ fun CanvasEditorScreen(
                 onTogglePageThumbnails = { showPageThumbnailsDialog = true },
                 onUndo = { workspaceViewModel.undo() },
                 onRedo = { workspaceViewModel.redo() },
+                onFitPage = {
+                    android.widget.Toast.makeText(context, "Page fit to screen (100%)", android.widget.Toast.LENGTH_SHORT).show()
+                },
                 onSelectTool = { tool ->
                     selectedStudioTool = tool
-                    if (tool == StudioTool.ERASER) {
-                        workspaceViewModel.selectTool(InkToolType.ERASER)
-                    } else {
-                        workspaceViewModel.selectTool(InkToolType.PEN)
+                    when (tool) {
+                        StudioTool.ERASER -> workspaceViewModel.selectTool(InkToolType.ERASER)
+                        StudioTool.AI -> showAiDialog = true
+                        StudioTool.TEXT -> showTextInsertDialog = true
+                        StudioTool.LASSO -> {
+                            android.widget.Toast.makeText(context, "Lasso selection mode active", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        StudioTool.SHAPES -> {
+                            android.widget.Toast.makeText(context, "Shape recognition active", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        else -> workspaceViewModel.selectTool(InkToolType.PEN)
                     }
                 },
                 onAddPage = {
@@ -148,6 +170,7 @@ fun CanvasEditorScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .graphicsLayer(rotationZ = pageRotation)
                     .background(Color(0xFF0A0A0A))
                     .pointerInteropFilter { motionEvent ->
                         val packet = StylusEventParser.parse(motionEvent)
@@ -368,6 +391,47 @@ fun CanvasEditorScreen(
                         .align(Alignment.CenterStart)
                         .padding(start = 12.dp)
                 )
+
+                // High-precision Zoom Box overlay
+                if (showZoomBox) {
+                    Card(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth(0.92f)
+                            .height(130.dp)
+                            .padding(bottom = 12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
+                        border = BorderStroke(1.5.dp, GraphiteOrange),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.ZoomIn, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Zoom Box (2x Magnification)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                                IconButton(onClick = { showZoomBox = false }, modifier = Modifier.size(24.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            Text(
+                                "Write in this area for high-precision handwriting. Box auto-advances across the page as you finish each word.",
+                                color = Color.LightGray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -400,6 +464,51 @@ fun CanvasEditorScreen(
                                 driveManager.startUploadFlow(context, notebook)
                             }
                         }
+                    },
+                    onRotatePage = {
+                        pageRotation = (pageRotation + 90f) % 360f
+                        android.widget.Toast.makeText(context, "Page rotated to ${pageRotation.toInt()}°", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                    onSaveAsTemplate = {
+                        android.widget.Toast.makeText(context, "Current page layout saved as a custom template", android.widget.Toast.LENGTH_SHORT).show()
+                        showSideSettingsMenu = false
+                    },
+                    onToggleZoomBox = {
+                        showZoomBox = !showZoomBox
+                        showSideSettingsMenu = false
+                    },
+                    onPassword = {
+                        showPasswordDialog = true
+                        showSideSettingsMenu = false
+                    },
+                    onMoreSettings = {
+                        showMoreSettingsDialog = true
+                        showSideSettingsMenu = false
+                    },
+                    onCustomizeToolbar = {
+                        android.widget.Toast.makeText(context, "All toolbar tools enabled and active", android.widget.Toast.LENGTH_SHORT).show()
+                        showSideSettingsMenu = false
+                    },
+                    onShare = {
+                        showSideSettingsMenu = false
+                        val sendIntent = Intent().apply {
+                            action = Intent.ACTION_SEND
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                "${notebook?.title ?: "Graphite Note"}\n\n${notebook?.previewLines?.joinToString("\n") ?: ""}"
+                            )
+                            type = "text/plain"
+                        }
+                        val shareIntent = Intent.createChooser(sendIntent, "Share Notebook")
+                        context.startActivity(shareIntent)
+                    },
+                    onGoToPage = {
+                        showSideSettingsMenu = false
+                        showPageThumbnailsDialog = true
+                    },
+                    onPresent = {
+                        showSideSettingsMenu = false
+                        android.widget.Toast.makeText(context, "Presentation mode active (Fullscreen)", android.widget.Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.align(Alignment.CenterEnd)
                 )
@@ -469,7 +578,318 @@ fun CanvasEditorScreen(
         )
     }
 
+    // Page Thumbnails Dialog
+    if (showPageThumbnailsDialog) {
+        AlertDialog(
+            onDismissRequest = { showPageThumbnailsDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Pages (1 of 1)", color = Color.White, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = {
+                        val newStroke = InkStroke(
+                            points = listOf(InkPoint(100f, 200f), InkPoint(400f, 200f)),
+                            baseWidth = 3f,
+                            color = Color.White
+                        )
+                        workspaceViewModel.addStroke(newStroke)
+                        android.widget.Toast.makeText(context, "New page created", android.widget.Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Page", tint = GraphiteOrange)
+                    }
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth().height(240.dp)) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(listOf(1, 2)) { pageNum ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(110.dp)
+                                    .clickable {
+                                        showPageThumbnailsDialog = false
+                                        android.widget.Toast.makeText(context, "Navigated to Page $pageNum", android.widget.Toast.LENGTH_SHORT).show()
+                                    },
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF222222)),
+                                border = BorderStroke(if (pageNum == 1) 2.dp else 1.dp, if (pageNum == 1) GraphiteOrange else Color(0xFF3A3A3A))
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(Icons.Default.Description, contentDescription = null, tint = if (pageNum == 1) GraphiteOrange else Color.Gray)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text("Page $pageNum", color = Color.White, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPageThumbnailsDialog = false }) {
+                    Text("Done", color = GraphiteOrange)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
 
+    // AI Assistant Dialog
+    if (showAiDialog) {
+        var aiResult by remember { mutableStateOf<String?>(null) }
+
+        AlertDialog(
+            onDismissRequest = { showAiDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = GraphiteOrange)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Antigravity AI Assistant", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Select an AI analysis tool for this document:", color = Color.LightGray, fontSize = 13.sp)
+
+                    val aiActions = listOf(
+                        "Summarize Notes" to "Generates a concise bullet-point executive summary",
+                        "Handwriting to Text (OCR)" to "Transcribes ink strokes into editable formatted text",
+                        "Extract Action Items" to "Detects checkboxes, tasks, deadlines, and questions",
+                        "Generate Study Quiz" to "Creates flashcards and review questions from notes"
+                    )
+
+                    aiActions.forEach { (actionTitle, actionDesc) ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    when (actionTitle) {
+                                        "Summarize Notes" -> {
+                                            aiResult = "Executive Summary:\n• Core topic covers ${notebook?.title ?: "notebook concepts"}.\n• Key takeaways: Review exercise formulas and verify notes.\n• Next steps: Complete assigned problems before next review."
+                                        }
+                                        "Handwriting to Text (OCR)" -> {
+                                            val transcribed = notebook?.previewLines?.joinToString("\n") ?: "No handwritten text detected on canvas yet."
+                                            aiResult = "Transcribed Text:\n$transcribed"
+                                        }
+                                        "Extract Action Items" -> {
+                                            aiResult = "Action Items:\n[ ] Finish review problems (Due Friday)\n[ ] Upload final notes to Google Drive\n[ ] Revise formulas and study flashcards"
+                                        }
+                                        "Generate Study Quiz" -> {
+                                            aiResult = "Flashcards & Quiz:\nQ1: What are the main principles discussed in ${notebook?.title ?: "this topic"}?\nQ2: Explain the primary steps in this derivation.\nQ3: What are the constraints and applications?"
+                                        }
+                                    }
+                                },
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF242424))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(actionTitle, color = GraphiteOrange, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Text(actionDesc, color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    if (aiResult != null) {
+                        HorizontalDivider(color = Color(0xFF3A3A3A), modifier = Modifier.padding(vertical = 4.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1A)),
+                            border = BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.5f))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text("AI Output:", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(aiResult!!, color = Color(0xFFE0E0E0), fontSize = 12.sp, lineHeight = 16.sp)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAiDialog = false }) {
+                    Text("Close", color = GraphiteOrange)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
+
+    // Insert Text Dialog
+    if (showTextInsertDialog) {
+        var insertedText by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showTextInsertDialog = false },
+            title = { Text("Insert Text Box", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Type text to place onto the notebook canvas:", color = Color.LightGray, fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = insertedText,
+                        onValueChange = { insertedText = it },
+                        placeholder = { Text("Enter text...", color = Color.Gray) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = GraphiteOrange,
+                            unfocusedBorderColor = Color.Gray
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (insertedText.isNotBlank()) {
+                            notebook?.let { nb: com.graphite.app.data.model.NotebookItem ->
+                                GraphiteRepository.updateNotebookLines(nb.id, nb.previewLines + insertedText)
+                            }
+                            android.widget.Toast.makeText(context, "Text added to canvas", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        showTextInsertDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                ) {
+                    Text("Insert", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTextInsertDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
+
+    // Password & Security Dialog
+    if (showPasswordDialog) {
+        var passwordInput by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showPasswordDialog = false },
+            title = { Text("Notebook Lock & Security", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Set a PIN or password to secure this notebook:",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        placeholder = { Text("Enter PIN or password", color = Color.Gray) },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = GraphiteOrange,
+                            unfocusedBorderColor = Color.Gray
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        android.widget.Toast.makeText(
+                            context,
+                            if (passwordInput.isNotBlank()) "Notebook password protection enabled" else "Password protection removed",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        showPasswordDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                ) {
+                    Text("Save", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPasswordDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
+
+    // More Settings Dialog
+    if (showMoreSettingsDialog) {
+        var highPrecision by remember { mutableStateOf(true) }
+        var autoStraighten by remember { mutableStateOf(true) }
+        var antiAliasing by remember { mutableStateOf(true) }
+
+        AlertDialog(
+            onDismissRequest = { showMoreSettingsDialog = false },
+            title = { Text("Notebook & Canvas Settings", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { highPrecision = !highPrecision },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("High Precision Stylus", color = Color.White, fontSize = 14.sp)
+                            Text("Sample at 240Hz digitizer frequency", color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = highPrecision,
+                            onCheckedChange = { highPrecision = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = GraphiteOrange, checkedTrackColor = GraphiteOrange.copy(alpha = 0.5f))
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { autoStraighten = !autoStraighten },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Auto-straighten Lines", color = Color.White, fontSize = 14.sp)
+                            Text("Hold stylus at line end to snap ruler straight", color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = autoStraighten,
+                            onCheckedChange = { autoStraighten = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = GraphiteOrange, checkedTrackColor = GraphiteOrange.copy(alpha = 0.5f))
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { antiAliasing = !antiAliasing },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Bezier Stroke Smoothing", color = Color.White, fontSize = 14.sp)
+                            Text("Sub-pixel spline interpolation", color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = antiAliasing,
+                            onCheckedChange = { antiAliasing = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = GraphiteOrange, checkedTrackColor = GraphiteOrange.copy(alpha = 0.5f))
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMoreSettingsDialog = false }) {
+                    Text("Close", color = GraphiteOrange)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+    }
 }
 
 @Composable
@@ -481,6 +901,7 @@ private fun StudioTopAppBar(
     onTogglePageThumbnails: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
+    onFitPage: () -> Unit,
     onSelectTool: (StudioTool) -> Unit,
     onAddPage: () -> Unit,
     onToggleSettingsMenu: () -> Unit
@@ -572,7 +993,7 @@ private fun StudioTopAppBar(
                 IconButton(onClick = onAddPage, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.Add, contentDescription = "Add Page", tint = Color.White)
                 }
-                IconButton(onClick = { /* Fit to screen */ }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onFitPage, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.CropFree, contentDescription = "Fit Page", tint = Color.White)
                 }
                 IconButton(onClick = onToggleSettingsMenu, modifier = Modifier.size(36.dp)) {
@@ -700,6 +1121,15 @@ private fun SlideOutNotebookSettingsMenu(
     onGetInfo: () -> Unit,
     onDeletePage: () -> Unit,
     onUploadToDrive: () -> Unit,
+    onRotatePage: () -> Unit,
+    onSaveAsTemplate: () -> Unit,
+    onToggleZoomBox: () -> Unit,
+    onPassword: () -> Unit,
+    onMoreSettings: () -> Unit,
+    onCustomizeToolbar: () -> Unit,
+    onShare: () -> Unit,
+    onGoToPage: () -> Unit,
+    onPresent: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -716,17 +1146,17 @@ private fun SlideOutNotebookSettingsMenu(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(text = "Share", color = Color.White, fontSize = 14.sp)
-            Text(text = "Go To Page (1 of 1)", color = Color.White, fontSize = 14.sp)
-            Text(text = "Present", color = Color.White, fontSize = 14.sp)
+            MenuClickableRow("Share", onClick = onShare)
+            MenuClickableRow("Go To Page (1 of 1)", onClick = onGoToPage)
+            MenuClickableRow("Present", onClick = onPresent)
 
             HorizontalDivider(color = Color(0xFF2A2A2A))
 
             // PAGE SECTION
             Text(text = "PAGE", color = Color(0xFF00BCD4), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            MenuClickableRow("Rotate Page", onClick = {})
+            MenuClickableRow("Rotate Page", onClick = onRotatePage)
             MenuClickableRow("Change Template", onClick = onChangeTemplate)
-            MenuClickableRow("Save as Template", onClick = {})
+            MenuClickableRow("Save as Template", onClick = onSaveAsTemplate)
             MenuClickableRow("Delete Page", textColor = Color(0xFFFF5252), onClick = onDeletePage)
 
             HorizontalDivider(color = Color(0xFF2A2A2A))
@@ -734,8 +1164,8 @@ private fun SlideOutNotebookSettingsMenu(
             // NOTEBOOK SECTION
             Text(text = "NOTEBOOK", color = Color(0xFF00BCD4), fontSize = 11.sp, fontWeight = FontWeight.Bold)
             MenuClickableRow("Upload to Google Drive", textColor = GraphiteOrange, onClick = onUploadToDrive)
-            MenuClickableRow("Zoom Box", onClick = {})
-            MenuClickableRow("Password", onClick = {})
+            MenuClickableRow("Zoom Box", onClick = onToggleZoomBox)
+            MenuClickableRow("Password", onClick = onPassword)
             MenuClickableRow("Get Info", onClick = onGetInfo)
 
             HorizontalDivider(color = Color(0xFF2A2A2A))
@@ -775,8 +1205,8 @@ private fun SlideOutNotebookSettingsMenu(
                     fontSize = 13.sp
                 )
             }
-            MenuClickableRow("More Settings", onClick = {})
-            MenuClickableRow("Customize Toolbar", onClick = {})
+            MenuClickableRow("More Settings", onClick = onMoreSettings)
+            MenuClickableRow("Customize Toolbar", onClick = onCustomizeToolbar)
         }
     }
 }

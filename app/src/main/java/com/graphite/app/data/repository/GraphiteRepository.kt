@@ -127,6 +127,52 @@ object GraphiteRepository {
 
     fun getBook(id: String): Book? = _books.value.find { it.id == id }
 
+    fun getNotebookAsBook(id: String): Book? {
+        val directBook = _books.value.find { it.id == id }
+        if (directBook != null) return directBook
+
+        val note = getNotebook(id) ?: return null
+        val ext = note.filePath?.substringAfterLast('.', "")?.lowercase() ?: ""
+        val coverType = when {
+            ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
+            else -> BookCoverType.CUSTOM
+        }
+        return Book(
+            id = note.id,
+            title = note.title,
+            author = if (note.mimeType == "application/pdf" || ext == "pdf") "PDF Document" else "Imported Document",
+            progressPercent = 0,
+            coverType = coverType,
+            totalChapters = maxOf(1, note.pageCount),
+            currentChapter = 1,
+            content = note.previewLines.joinToString("\n"),
+            filePath = note.filePath,
+            mimeType = note.mimeType ?: if (ext == "pdf") "application/pdf" else "text/plain",
+            isBookmarked = note.isBookmarked
+        )
+    }
+
+    fun toggleBookmarkBook(id: String) {
+        _books.update { list ->
+            list.map {
+                if (it.id == id) it.copy(isBookmarked = !it.isBookmarked) else it
+            }
+        }
+    }
+
+    fun toggleFavoriteBook(id: String) {
+        _books.update { list ->
+            list.map {
+                if (it.id == id) it.copy(isFavorite = !it.isFavorite) else it
+            }
+        }
+    }
+
+    fun deleteBook(id: String) {
+        _books.update { list -> list.filter { it.id != id } }
+        _stats.update { it.copy(totalBooks = _books.value.size) }
+    }
+
     fun updateBookProgress(id: String, progress: Int) {
         _books.update { list ->
             list.map {
@@ -255,6 +301,26 @@ object GraphiteRepository {
         }
     }
 
+    fun updateNotebookLines(id: String, lines: List<String>) {
+        val now = System.currentTimeMillis()
+        val formatter = SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault())
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+
+        val index = userList.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val existing = userList[index]
+            val updated = existing.copy(
+                previewLines = lines,
+                updatedAtMillis = now,
+                updatedAtFormatted = formatter.format(Date(now)),
+                version = existing.version + 1
+            )
+            userList[index] = updated
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+    }
+
     fun deleteNotebook(id: String) {
         val now = System.currentTimeMillis()
         val currentUid = activeUserId ?: "default"
@@ -272,6 +338,84 @@ object GraphiteRepository {
             _notebooks.value = userList.filter { !it.isDeleted }
             _stats.update { it.copy(notesCount = _notebooks.value.size) }
         }
+    }
+
+    fun toggleStarNotebook(id: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(isStarred = !existing.isStarred, updatedAtMillis = System.currentTimeMillis())
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+    }
+
+    fun toggleBookmarkNotebook(id: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(isBookmarked = !existing.isBookmarked, updatedAtMillis = System.currentTimeMillis())
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+    }
+
+    fun renameNotebook(id: String, newTitle: String) {
+        if (newTitle.isBlank()) return
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(title = newTitle.trim(), updatedAtMillis = System.currentTimeMillis())
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+    }
+
+    fun moveNotebookToFolder(id: String, targetFolderId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(folderId = targetFolderId, updatedAtMillis = System.currentTimeMillis())
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+    }
+
+    fun restoreNotebook(id: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(isDeleted = false, updatedAtMillis = System.currentTimeMillis())
+            _notebooks.value = userList.filter { !it.isDeleted }
+            _stats.update { it.copy(notesCount = _notebooks.value.size) }
+        }
+    }
+
+    fun permanentlyDeleteNotebook(id: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        userList.removeAll { it.id == id }
+        _notebooks.value = userList.filter { !it.isDeleted }
+        _stats.update { it.copy(notesCount = _notebooks.value.size) }
+    }
+
+    fun emptyTrash() {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        userList.removeAll { it.isDeleted }
+        _notebooks.value = userList.filter { !it.isDeleted }
+        _stats.update { it.copy(notesCount = _notebooks.value.size) }
+    }
+
+    fun getAllNotesIncludingDeleted(): List<NotebookItem> {
+        val currentUid = activeUserId ?: "default"
+        return userNotebooksMap[currentUid]?.toList() ?: emptyList()
     }
 
     /**

@@ -223,28 +223,24 @@ class FileImportManager(
         try {
             targetFile.writeBytes(bytes)
 
-            var pageCount = 1
-            if (isPdf) {
-                try {
-                    val pfd = ParcelFileDescriptor.open(targetFile, ParcelFileDescriptor.MODE_READ_ONLY)
-                    val renderer = PdfRenderer(pfd)
-                    pageCount = renderer.pageCount
-                    renderer.close()
-                    pfd.close()
-                } catch (_: Exception) {
-                    // If PdfRenderer fails (e.g. in JVM test environment), default to 1 page
-                }
-            }
+            val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
+            val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
+            val pageCount = parsed.pageOrSlideCount
 
             val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateNoteTitle(rawTitle)
-            val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
+
+            val previewLines = if (isPdf) {
+                listOf(displayName, "PDF Document • $pageCount pages")
+            } else {
+                listOf(displayName, "${ext.uppercase()} • $pageCount ${if (ext.contains("ppt", true)) "slides" else "pages"}")
+            }
 
             val importedNote = NotebookItem(
                 id = UUID.randomUUID().toString(),
                 title = disambiguatedTitle,
                 paperStyle = PaperStyle.RULED,
-                previewLines = listOf(displayName, if (isPdf) "$pageCount pages" else "Format: ${ext.uppercase()}"),
+                previewLines = previewLines,
                 initialStrokes = emptyList(),
                 pageCount = pageCount,
                 createdAtMillis = System.currentTimeMillis(),
@@ -265,7 +261,7 @@ class FileImportManager(
             return ImportResult.SuccessNotebook(
                 notebook = savedNote,
                 syncedToCloud = syncedToCloud,
-                message = "Imported note \"${savedNote.title}\" (${if (isPdf) "$pageCount pages" else ext.uppercase()})"
+                message = if (isPdf) "Imported PDF \"${savedNote.title}\" ($pageCount pages)" else "Imported document \"${savedNote.title}\" ($pageCount pages)"
             )
         } catch (e: Exception) {
             if (targetFile.exists()) targetFile.delete()
@@ -296,22 +292,12 @@ class FileImportManager(
         try {
             targetFile.writeBytes(bytes)
 
-            var pageCount = 1
-            if (isPdf) {
-                try {
-                    val pfd = ParcelFileDescriptor.open(targetFile, ParcelFileDescriptor.MODE_READ_ONLY)
-                    val renderer = PdfRenderer(pfd)
-                    pageCount = renderer.pageCount
-                    renderer.close()
-                    pfd.close()
-                } catch (_: Exception) {
-                    // If PdfRenderer is unavailable (e.g. in JVM unit tests), default to 1 page
-                }
-            }
+            val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
+            val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
+            val pageCount = parsed.pageOrSlideCount
 
             val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateBookTitle(rawTitle)
-            val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
 
             val coverType = when {
                 ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
@@ -321,12 +307,12 @@ class FileImportManager(
             val importedBook = Book(
                 id = UUID.randomUUID().toString(),
                 title = disambiguatedTitle,
-                author = "Imported Document",
+                author = if (isPdf) "PDF Document" else "Imported ${ext.uppercase()}",
                 progressPercent = 0,
                 coverType = coverType,
                 totalChapters = pageCount,
                 currentChapter = 1,
-                content = "Imported Document: $displayName ($resolvedMimeType)",
+                content = parsed.extractedText,
                 filePath = targetFile.absolutePath,
                 mimeType = resolvedMimeType
             )
@@ -336,7 +322,7 @@ class FileImportManager(
             return ImportResult.SuccessBook(
                 book = importedBook,
                 pageCount = pageCount,
-                message = "Imported \"$disambiguatedTitle\" (${ext.uppercase()}) to Bookshelf"
+                message = "Imported \"$disambiguatedTitle\" (${if (ext.contains("ppt")) "$pageCount slides" else "$pageCount pages"}) to Bookshelf"
             )
         } catch (e: Exception) {
             if (targetFile.exists()) targetFile.delete()

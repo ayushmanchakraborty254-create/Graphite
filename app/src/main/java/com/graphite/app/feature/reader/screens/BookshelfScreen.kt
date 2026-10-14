@@ -1,9 +1,15 @@
 package com.graphite.app.feature.reader.screens
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,24 +21,29 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.graphite.app.GraphiteApplication
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
+import com.graphite.app.core.drive.BookshelfSyncReport
+import com.graphite.app.core.drive.DriveFolder
+import com.graphite.app.core.drive.DriveUploadResult
+import com.graphite.app.core.importer.ImportResult
 import com.graphite.app.core.theme.GraphiteBlack
 import com.graphite.app.core.theme.GraphiteOrange
 import com.graphite.app.core.theme.GraphiteSurfaceVariant
 import com.graphite.app.data.model.Book
+import com.graphite.app.data.model.BookCoverType
 import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.feature.reader.components.BookCover
-
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.platform.LocalContext
-import com.graphite.app.GraphiteApplication
-import com.graphite.app.core.importer.ImportResult
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun BookshelfScreen(
@@ -43,6 +54,7 @@ fun BookshelfScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val fileImportManager = remember { GraphiteApplication.instance.fileImportManager }
+    val driveManager = remember { GraphiteApplication.instance.googleDriveManager }
 
     var selectedCategory by remember { mutableStateOf("All Books") }
     var categoryMenuExpanded by remember { mutableStateOf(false) }
@@ -50,6 +62,16 @@ fun BookshelfScreen(
     var showImportDialog by remember { mutableStateOf(false) }
     var importStatusMessage by remember { mutableStateOf<String?>(null) }
     var isImportingDocument by remember { mutableStateOf(false) }
+
+    // Sort & View state
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+    var currentSortOption by remember { mutableStateOf("Title (A-Z)") }
+    var isGridView by remember { mutableStateOf(false) }
+
+    // Google Drive 2-Way Sync state
+    var showDriveSyncDialog by remember { mutableStateOf(false) }
+    val isSyncingDrive by driveManager.isSyncingBookshelf.collectAsState()
+    val driveSyncStatus by driveManager.bookshelfSyncStatus.collectAsState()
 
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -62,11 +84,14 @@ fun BookshelfScreen(
                 when (result) {
                     is ImportResult.SuccessBook -> {
                         importStatusMessage = "Imported \"${result.book.title}\" (${result.pageCount} pages) to Bookshelf"
+                        // Auto-upload to synced Drive folder if configured
+                        if (driveManager.hasBookshelfSyncConfigured()) {
+                            driveManager.uploadBookToSyncedDriveFolder(context, result.book)
+                        }
                         showImportDialog = false
                         onOpenBook(result.book.id)
                     }
                     is ImportResult.SuccessNotebook -> {
-                        // Handled for completeness
                         importStatusMessage = "Imported note \"${result.notebook.title}\""
                         showImportDialog = false
                     }
@@ -91,7 +116,7 @@ fun BookshelfScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
         ) {
-            // Header Bar: "All Books ⌄" and menu icon
+            // Header Bar: Category selector, Sync button, Sort button, Profile
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -146,13 +171,85 @@ fun BookshelfScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { /* Sort / View options */ }) {
-                        Icon(
-                            imageVector = Icons.Default.Sort,
-                            contentDescription = "Sort Books",
-                            tint = Color.White
-                        )
+                    // Google Drive 2-Way Sync Button
+                    val isSynced = driveManager.hasBookshelfSyncConfigured()
+                    IconButton(onClick = { showDriveSyncDialog = true }) {
+                        Box {
+                            Icon(
+                                imageVector = Icons.Default.CloudSync,
+                                contentDescription = "Sync with Google Drive",
+                                tint = if (isSynced) GraphiteOrange else Color.White
+                            )
+                            if (isSynced) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF4CAF50))
+                                        .align(Alignment.TopEnd)
+                                )
+                            }
+                        }
                     }
+
+                    // Sort & View Mode Menu Button
+                    Box {
+                        IconButton(onClick = { sortMenuExpanded = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Sort,
+                                contentDescription = "Sort Books",
+                                tint = Color.White
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = sortMenuExpanded,
+                            onDismissRequest = { sortMenuExpanded = false },
+                            modifier = Modifier.background(GraphiteSurfaceVariant)
+                        ) {
+                            val sortOptions = listOf(
+                                "Title (A-Z)",
+                                "Title (Z-A)",
+                                "Most Recent",
+                                "Reading Progress",
+                                "Author"
+                            )
+                            sortOptions.forEach { opt ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = opt,
+                                            color = if (opt == currentSortOption) GraphiteOrange else Color.White
+                                        )
+                                    },
+                                    onClick = {
+                                        currentSortOption = opt
+                                        sortMenuExpanded = false
+                                    }
+                                )
+                            }
+                            HorizontalDivider(color = Color(0xFF333333))
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
+                                            contentDescription = null,
+                                            tint = Color.LightGray,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(if (isGridView) "Switch to List View" else "Switch to Grid View", color = Color.White)
+                                    }
+                                },
+                                onClick = {
+                                    isGridView = !isGridView
+                                    sortMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.width(6.dp))
                     GoogleProfileTopBarIcon()
                 }
@@ -192,17 +289,27 @@ fun BookshelfScreen(
                 )
             )
 
-            // Metadata Counter: "2 Books"
+            // Filter & Sort
             val filteredBooks = books.filter { book ->
                 val matchesCategory = when (selectedCategory) {
                     "Completed" -> book.progressPercent >= 100
                     "Unread" -> book.progressPercent == 0
+                    "Favorites" -> book.isFavorite
                     else -> true
                 }
                 val matchesSearch = if (searchQuery.isBlank()) true else {
                     book.title.contains(searchQuery, ignoreCase = true) || book.author.contains(searchQuery, ignoreCase = true)
                 }
                 matchesCategory && matchesSearch
+            }.let { list ->
+                when (currentSortOption) {
+                    "Title (A-Z)" -> list.sortedBy { it.title.lowercase() }
+                    "Title (Z-A)" -> list.sortedByDescending { it.title.lowercase() }
+                    "Most Recent" -> list.sortedByDescending { it.lastReadTimeMillis }
+                    "Reading Progress" -> list.sortedByDescending { it.progressPercent }
+                    "Author" -> list.sortedBy { it.author.lowercase() }
+                    else -> list
+                }
             }
 
             Text(
@@ -212,17 +319,52 @@ fun BookshelfScreen(
                 modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
             )
 
-            // Bookshelf List
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                contentPadding = PaddingValues(bottom = 88.dp)
-            ) {
-                items(filteredBooks) { book ->
-                    BookshelfItemRow(
-                        book = book,
-                        onOpen = { onOpenBook(book.id) }
-                    )
+            // Bookshelf List or Grid
+            if (isGridView) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 130.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = PaddingValues(bottom = 88.dp)
+                ) {
+                    items(filteredBooks) { book ->
+                        BookshelfItemGridCard(
+                            book = book,
+                            onOpen = { onOpenBook(book.id) },
+                            onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
+                            onUploadToDrive = {
+                                scope.launch {
+                                    val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                    val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onDelete = { GraphiteRepository.deleteBook(book.id) }
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(bottom = 88.dp)
+                ) {
+                    items(filteredBooks) { book ->
+                        BookshelfItemRow(
+                            book = book,
+                            onOpen = { onOpenBook(book.id) },
+                            onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
+                            onUploadToDrive = {
+                                scope.launch {
+                                    val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                    val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onDelete = { GraphiteRepository.deleteBook(book.id) }
+                        )
+                    }
                 }
             }
         }
@@ -246,15 +388,48 @@ fun BookshelfScreen(
         }
     }
 
+    // Google Drive 2-Way Sync Dialog
+    if (showDriveSyncDialog) {
+        BookshelfDriveSyncDialog(
+            driveManager = driveManager,
+            onDismiss = { showDriveSyncDialog = false },
+            onSyncCompleted = { report ->
+                importStatusMessage = report.message
+            }
+        )
+    }
+
     // Import Book Dialog
     if (showImportDialog) {
         ImportBookDialog(
             onDismiss = { showImportDialog = false },
             onLaunchImport = {
-                fileImportLauncher.launch(arrayOf("application/pdf", "application/json", "application/octet-stream", "*/*"))
+                fileImportLauncher.launch(
+                    arrayOf(
+                        "application/pdf",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "application/msword",
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "application/vnd.ms-powerpoint",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "text/plain",
+                        "*/*"
+                    )
+                )
             },
             onAddBook = { title, author, content ->
-                GraphiteRepository.addBook(title, author, content)
+                val newBook = Book(
+                    title = GraphiteRepository.disambiguateBookTitle(title),
+                    author = author.ifBlank { "Unknown Author" },
+                    content = content.ifBlank { "Sample imported content." },
+                    coverType = BookCoverType.CUSTOM
+                )
+                GraphiteRepository.addBook(newBook)
+                if (driveManager.hasBookshelfSyncConfigured()) {
+                    scope.launch {
+                        driveManager.uploadBookToSyncedDriveFolder(context, newBook)
+                    }
+                }
                 showImportDialog = false
             }
         )
@@ -283,7 +458,7 @@ fun BookshelfScreen(
     importStatusMessage?.let { msg ->
         AlertDialog(
             onDismissRequest = { importStatusMessage = null },
-            title = { Text("Import Status", color = Color.White, fontWeight = FontWeight.Bold) },
+            title = { Text("Bookshelf Status", color = Color.White, fontWeight = FontWeight.Bold) },
             text = {
                 Text(text = msg, color = Color.LightGray, fontSize = 13.sp)
             },
@@ -302,9 +477,172 @@ fun BookshelfScreen(
 }
 
 @Composable
+private fun BookshelfDriveSyncDialog(
+    driveManager: com.graphite.app.core.drive.GoogleDriveManager,
+    onDismiss: () -> Unit,
+    onSyncCompleted: (BookshelfSyncReport) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val accountEmail = driveManager.getAuthorizedAccountEmail()
+    val syncedFolder = driveManager.getBookshelfSyncedFolder()
+    val isSyncing by driveManager.isSyncingBookshelf.collectAsState()
+    val syncStatusMsg by driveManager.bookshelfSyncStatus.collectAsState()
+
+    var showFolderSelector by remember { mutableStateOf(false) }
+    var availableFolders by remember { mutableStateOf<List<DriveFolder>>(emptyList()) }
+    var isLoadingFolders by remember { mutableStateOf(false) }
+
+    val lastSyncMillis = driveManager.getLastBookshelfSyncTimeMillis()
+    val lastSyncFormatted = if (lastSyncMillis > 0) {
+        SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault()).format(Date(lastSyncMillis))
+    } else "Never"
+
+    AlertDialog(
+        onDismissRequest = { if (!isSyncing) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CloudSync, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Google Drive 2-Way Sync", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    text = "Sync books bi-directionally between Bookshelf and your selected Google Drive folder.",
+                    color = Color.LightGray,
+                    fontSize = 13.sp
+                )
+
+                // Current Account & Folder Card
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1B1B1B)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(accountEmail ?: "Not authorized", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Folder: ${syncedFolder?.name ?: "Graphite Bookshelf (Auto-created)"}",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Schedule, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Last synced: $lastSyncFormatted", color = Color.Gray, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                if (isSyncing) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(syncStatusMsg ?: "Syncing...", color = GraphiteOrange, fontSize = 13.sp)
+                    }
+                }
+
+                // Choose folder action
+                OutlinedButton(
+                    onClick = {
+                        isLoadingFolders = true
+                        scope.launch {
+                            val res = driveManager.fetchSubfolders(context, "root")
+                            availableFolders = res.getOrDefault(emptyList())
+                            isLoadingFolders = false
+                            showFolderSelector = true
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                ) {
+                    Icon(Icons.Default.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Choose Particular Drive Folder")
+                }
+
+                if (showFolderSelector) {
+                    Text("Select a folder to sync:", color = Color.Gray, fontSize = 12.sp)
+                    if (isLoadingFolders) {
+                        CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(20.dp))
+                    } else {
+                        LazyColumn(modifier = Modifier.heightIn(max = 160.dp)) {
+                            item {
+                                TextButton(
+                                    onClick = {
+                                        driveManager.setBookshelfSyncedFolder(null)
+                                        showFolderSelector = false
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("• Default: Graphite Bookshelf", color = GraphiteOrange)
+                                }
+                            }
+                            items(availableFolders) { folder ->
+                                TextButton(
+                                    onClick = {
+                                        driveManager.setBookshelfSyncedFolder(folder)
+                                        showFolderSelector = false
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("• ${folder.name}", color = Color.White)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    scope.launch {
+                        val report = driveManager.syncBookshelfWithDrive(context, syncedFolder?.id)
+                        onDismiss()
+                        onSyncCompleted(report)
+                    }
+                },
+                enabled = !isSyncing,
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+            ) {
+                Text(if (isSyncing) "Syncing..." else "Sync Now", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSyncing) {
+                Text("Close", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+@Composable
 private fun BookshelfItemRow(
     book: Book,
-    onOpen: () -> Unit
+    onOpen: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onUploadToDrive: () -> Unit,
+    onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -332,22 +670,37 @@ private fun BookshelfItemRow(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.Center
         ) {
-            Text(
-                text = book.title,
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = book.title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (book.isFavorite) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Favorite",
+                        tint = Color(0xFFFFD54F),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = book.author,
                 color = Color(0xFF9E9E9E),
-                fontSize = 13.sp
+                fontSize = 13.sp,
+                maxLines = 1
             )
             Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = "${book.progressPercent}%",
-                color = Color(0xFF757575),
+                color = if (book.progressPercent >= 100) Color(0xFF81C784) else Color(0xFF757575),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium
             )
@@ -376,14 +729,94 @@ private fun BookshelfItemRow(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Reset Progress", color = Color.White) },
+                    text = { Text(if (book.isFavorite) "Remove from Favorites" else "Add to Favorites", color = Color.White) },
+                    onClick = {
+                        menuExpanded = false
+                        onToggleFavorite()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Reset Progress (0%)", color = Color.White) },
                     onClick = {
                         GraphiteRepository.updateBookProgress(book.id, 0)
                         menuExpanded = false
                     }
                 )
+                DropdownMenuItem(
+                    text = { Text("Mark as Completed (100%)", color = Color.White) },
+                    onClick = {
+                        GraphiteRepository.updateBookProgress(book.id, 100)
+                        menuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Upload to Google Drive", color = GraphiteOrange) },
+                    onClick = {
+                        menuExpanded = false
+                        onUploadToDrive()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Delete Book", color = Color(0xFFFF5252)) },
+                    onClick = {
+                        menuExpanded = false
+                        onDelete()
+                    }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun BookshelfItemGridCard(
+    book: Book,
+    onOpen: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onUploadToDrive: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onOpen)
+            .padding(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box {
+            BookCover(
+                coverType = book.coverType,
+                title = book.title,
+                modifier = Modifier
+                    .width(110.dp)
+                    .height(150.dp)
+            )
+            if (book.isFavorite) {
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD54F),
+                    modifier = Modifier.padding(4.dp).size(20.dp).align(Alignment.TopEnd)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = book.title,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = "${book.progressPercent}%",
+            color = Color(0xFF757575),
+            fontSize = 11.sp
+        )
     }
 }
 
@@ -411,7 +844,7 @@ private fun ImportBookDialog(
                 ) {
                     Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import PDF / Note from Tablet", fontWeight = FontWeight.SemiBold)
+                    Text("Import PDF / Word / PPTX", fontWeight = FontWeight.SemiBold)
                 }
 
                 Row(

@@ -7,10 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,6 +34,7 @@ fun ReadingScreen(
     val books by GraphiteRepository.books.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
     var showSearchBar by remember { mutableStateOf(false) }
+    var isGridView by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -69,9 +67,9 @@ fun ReadingScreen(
                         tint = Color.White
                     )
                 }
-                IconButton(onClick = { /* Toggle Grid/List */ }) {
+                IconButton(onClick = { isGridView = !isGridView }) {
                     Icon(
-                        imageVector = Icons.Default.GridView,
+                        imageVector = if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
                         contentDescription = "Switch View Mode",
                         tint = Color.White
                     )
@@ -100,20 +98,70 @@ fun ReadingScreen(
             )
         }
 
-        // Recent Books List
+        // Recent Books List or Grid
         val filteredBooks = if (searchQuery.isBlank()) books else books.filter {
             it.title.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true)
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            items(filteredBooks) { book ->
-                RecentBookCard(
-                    book = book,
-                    onOpen = { onOpenBook(book.id) }
-                )
+        if (isGridView) {
+            androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(minSize = 140.dp),
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                items(filteredBooks.size) { idx ->
+                    val book = filteredBooks[idx]
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenBook(book.id) },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141414))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BookCover(
+                                coverType = book.coverType,
+                                title = book.title,
+                                modifier = Modifier.width(90.dp).height(125.dp)
+                            )
+                            Text(
+                                text = book.title,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                            Button(
+                                onClick = { onOpenBook(book.id) },
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("${book.progressPercent}%", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                items(filteredBooks) { book ->
+                    RecentBookCard(
+                        book = book,
+                        onOpen = { onOpenBook(book.id) }
+                    )
+                }
             }
         }
     }

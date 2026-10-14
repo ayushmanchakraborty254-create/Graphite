@@ -15,7 +15,9 @@ data class Book(
     val currentChapter: Int = 1,
     val content: String = "",
     val filePath: String? = null,
-    val mimeType: String = "text/plain"
+    val mimeType: String = "text/plain",
+    val isBookmarked: Boolean = false,
+    val isFavorite: Boolean = false
 )
 
 enum class BookCoverType {
@@ -35,6 +37,10 @@ data class NotebookItem(
     val paperStyle: PaperStyle = PaperStyle.RULED,
     val isStarred: Boolean = false,
     val isDeleted: Boolean = false,
+    val isBookmarked: Boolean = false,
+    val hasPhotos: Boolean = false,
+    val hasRecordings: Boolean = false,
+    val isLocked: Boolean = false,
     val version: Long = 1L,
     val userId: String? = null,
     val previewLines: List<String> = emptyList(),

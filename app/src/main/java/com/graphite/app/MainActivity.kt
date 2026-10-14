@@ -27,6 +27,7 @@ import com.graphite.app.feature.workspace.CanvasEditorScreen
 
 import android.content.Intent
 import com.graphite.app.core.drive.GoogleDriveUploadWorkflow
+import com.graphite.app.data.repository.GraphiteRepository
 
 sealed interface ActiveDestination {
     data class MainTab(val tab: NavigationTab) : ActiveDestination
@@ -96,7 +97,16 @@ class MainActivity : ComponentActivity() {
                                         NavigationTab.NOTESHELF -> {
                                             NoteshelfScreen(
                                                 onOpenNotebook = { notebookId ->
-                                                    currentDestination = ActiveDestination.CanvasEditor(notebookId)
+                                                    val note = GraphiteRepository.getNotebook(notebookId)
+                                                    val isDoc = note?.mimeType?.contains("pdf", ignoreCase = true) == true
+                                                        || note?.filePath?.endsWith(".pdf", ignoreCase = true) == true
+                                                        || note?.filePath?.endsWith(".docx", ignoreCase = true) == true
+                                                        || note?.filePath?.endsWith(".pptx", ignoreCase = true) == true
+                                                    if (isDoc) {
+                                                        currentDestination = ActiveDestination.ReaderView(notebookId)
+                                                    } else {
+                                                        currentDestination = ActiveDestination.CanvasEditor(notebookId)
+                                                    }
                                                 }
                                             )
                                         }

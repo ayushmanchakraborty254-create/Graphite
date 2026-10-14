@@ -1,12 +1,18 @@
 package com.graphite.app.feature.noteshelf
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -19,23 +25,24 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.platform.LocalContext
 import com.graphite.app.GraphiteApplication
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
 import com.graphite.app.core.drive.DriveUploadState
+import com.graphite.app.core.importer.ImportResult
 import com.graphite.app.core.theme.GraphiteBlack
 import com.graphite.app.core.theme.GraphiteOrange
 import com.graphite.app.core.theme.GraphiteOutline
 import com.graphite.app.core.theme.GraphiteSurfaceVariant
+import com.graphite.app.data.model.FolderItem
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.data.repository.GraphiteRepository
+import com.graphite.app.feature.workspace.model.PaperStyle
 import kotlinx.coroutines.launch
 
 @Composable
@@ -56,6 +63,21 @@ fun NoteshelfScreen(
     var importStatusMessage by remember { mutableStateOf<String?>(null) }
     var isImportingFile by remember { mutableStateOf(false) }
 
+    // Dialogs & state
+    var selectedCategory by remember { mutableStateOf("All Notes") }
+    var sidebarVisible by remember { mutableStateOf(true) }
+    var searchQuery by remember { mutableStateOf("") }
+    var showSearchBar by remember { mutableStateOf(false) }
+
+    var showNewNotebookDialog by remember { mutableStateOf(false) }
+    var showNewFolderDialog by remember { mutableStateOf(false) }
+    var showRenameDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
+    var showMoveFolderDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
+
+    var moreMenuExpanded by remember { mutableStateOf(false) }
+    var currentSortOption by remember { mutableStateOf("Date Modified (Newest)") }
+    var isListView by remember { mutableStateOf(false) }
+
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -65,18 +87,14 @@ fun NoteshelfScreen(
                 val result = fileImportManager.importToNotes(context, uri)
                 isImportingFile = false
                 when (result) {
-                    is com.graphite.app.core.importer.ImportResult.SuccessNotebook -> {
-                        importStatusMessage = if (result.syncedToCloud) {
-                            "Imported \"${result.notebook.title}\" (synced to cloud)"
-                        } else {
-                            "Imported \"${result.notebook.title}\""
-                        }
+                    is ImportResult.SuccessNotebook -> {
+                        importStatusMessage = result.message
                         onOpenNotebook(result.notebook.id)
                     }
-                    is com.graphite.app.core.importer.ImportResult.SuccessBook -> {
+                    is ImportResult.SuccessBook -> {
                         importStatusMessage = "Imported \"${result.book.title}\""
                     }
-                    is com.graphite.app.core.importer.ImportResult.Error -> {
+                    is ImportResult.Error -> {
                         importStatusMessage = result.message
                     }
                 }
@@ -94,13 +112,38 @@ fun NoteshelfScreen(
             }
         }
     }
-    var selectedCategory by remember { mutableStateOf("All Notes") }
-    var sidebarVisible by remember { mutableStateOf(true) }
-    var searchQuery by remember { mutableStateOf("") }
-    var showSearchBar by remember { mutableStateOf(false) }
 
-    var showNewNotebookDialog by remember { mutableStateOf(false) }
-    var showNewFolderDialog by remember { mutableStateOf(false) }
+    // Filter notes according to category and search query
+    val allNotesWithDeleted = GraphiteRepository.getAllNotesIncludingDeleted()
+    val baseNotes = if (selectedCategory == "Trash") {
+        allNotesWithDeleted.filter { it.isDeleted }
+    } else {
+        allNotesWithDeleted.filter { !it.isDeleted }
+    }
+
+    val categoryFiltered = when (selectedCategory) {
+        "All Notes" -> baseNotes
+        "Starred" -> baseNotes.filter { it.isStarred }
+        "Unfiled" -> baseNotes.filter { it.folderId.isBlank() || it.folderId == "unfiled" }
+        "Trash" -> baseNotes
+        "Photos" -> baseNotes.filter { it.hasPhotos || it.previewLines.any { l -> l.contains("image", true) || l.contains("photo", true) } }
+        "Recordings" -> baseNotes.filter { it.hasRecordings || it.previewLines.any { l -> l.contains("audio", true) || l.contains("recording", true) } }
+        "Bookmarks" -> baseNotes.filter { it.isBookmarked }
+        "Templates" -> emptyList()
+        else -> baseNotes.filter { it.folderId == selectedCategory }
+    }
+
+    val searchFiltered = if (searchQuery.isBlank()) categoryFiltered else {
+        categoryFiltered.filter { it.title.contains(searchQuery, ignoreCase = true) }
+    }
+
+    val sortedNotebooks = when (currentSortOption) {
+        "Date Modified (Newest)" -> searchFiltered.sortedByDescending { it.updatedAtMillis }
+        "Date Modified (Oldest)" -> searchFiltered.sortedBy { it.updatedAtMillis }
+        "Title (A-Z)" -> searchFiltered.sortedBy { it.title.lowercase() }
+        "Title (Z-A)" -> searchFiltered.sortedByDescending { it.title.lowercase() }
+        else -> searchFiltered
+    }
 
     Row(
         modifier = modifier
@@ -146,13 +189,14 @@ fun NoteshelfScreen(
                 SidebarItem(
                     title = "All Notes",
                     icon = Icons.Default.Home,
-                    count = notebooks.size,
+                    count = notebooks.count { !it.isDeleted },
                     isSelected = selectedCategory == "All Notes",
                     onClick = { selectedCategory = "All Notes" }
                 )
                 SidebarItem(
                     title = "Starred",
-                    icon = Icons.Default.StarBorder,
+                    icon = Icons.Default.Star,
+                    count = notebooks.count { it.isStarred && !it.isDeleted }.takeIf { it > 0 },
                     isSelected = selectedCategory == "Starred",
                     onClick = { selectedCategory = "Starred" }
                 )
@@ -165,6 +209,7 @@ fun NoteshelfScreen(
                 SidebarItem(
                     title = "Trash",
                     icon = Icons.Default.DeleteOutline,
+                    count = allNotesWithDeleted.count { it.isDeleted }.takeIf { it > 0 },
                     isSelected = selectedCategory == "Trash",
                     onClick = { selectedCategory = "Trash" }
                 )
@@ -199,9 +244,11 @@ fun NoteshelfScreen(
                 }
 
                 folders.forEach { folder ->
+                    val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
                     SidebarItem(
                         title = folder.name,
                         icon = Icons.Default.Folder,
+                        count = noteCount,
                         isSelected = selectedCategory == folder.id,
                         onClick = { selectedCategory = folder.id }
                     )
@@ -240,9 +287,24 @@ fun NoteshelfScreen(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(vertical = 4.dp)
                 )
-                SidebarItem(title = "Photos", icon = Icons.Default.Image, onClick = {})
-                SidebarItem(title = "Recordings", icon = Icons.Default.Mic, onClick = {})
-                SidebarItem(title = "Bookmarks", icon = Icons.Default.BookmarkBorder, onClick = {})
+                SidebarItem(
+                    title = "Photos",
+                    icon = Icons.Default.Image,
+                    isSelected = selectedCategory == "Photos",
+                    onClick = { selectedCategory = "Photos" }
+                )
+                SidebarItem(
+                    title = "Recordings",
+                    icon = Icons.Default.Mic,
+                    isSelected = selectedCategory == "Recordings",
+                    onClick = { selectedCategory = "Recordings" }
+                )
+                SidebarItem(
+                    title = "Bookmarks",
+                    icon = Icons.Default.BookmarkBorder,
+                    isSelected = selectedCategory == "Bookmarks",
+                    onClick = { selectedCategory = "Bookmarks" }
+                )
             }
         }
 
@@ -253,7 +315,7 @@ fun NoteshelfScreen(
                 .fillMaxHeight()
                 .padding(horizontal = 18.dp, vertical = 12.dp)
         ) {
-            // Main Top Bar: Sidebar toggle, "All Notes", Action buttons (+) (Search) (More)
+            // Main Top Bar: Sidebar toggle, Category title, Action buttons (+) (Search) (More)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -270,8 +332,19 @@ fun NoteshelfScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
+                    val headerTitle = when (selectedCategory) {
+                        "All Notes" -> "All Notes"
+                        "Starred" -> "Starred Notes"
+                        "Unfiled" -> "Unfiled Notes"
+                        "Trash" -> "Trash"
+                        "Templates" -> "Paper Templates"
+                        "Photos" -> "Photos & Media Notes"
+                        "Recordings" -> "Voice Recordings"
+                        "Bookmarks" -> "Bookmarked Notes"
+                        else -> folders.find { it.id == selectedCategory }?.name ?: selectedCategory
+                    }
                     Text(
-                        text = selectedCategory,
+                        text = headerTitle,
                         color = Color.White,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
@@ -294,13 +367,80 @@ fun NoteshelfScreen(
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = { /* More options */ }) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Options",
-                            tint = Color.White
-                        )
+
+                    // More Options Dropdown Menu
+                    Box {
+                        IconButton(onClick = { moreMenuExpanded = true }) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Options",
+                                tint = Color.White
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = moreMenuExpanded,
+                            onDismissRequest = { moreMenuExpanded = false },
+                            modifier = Modifier.background(GraphiteSurfaceVariant)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Sort: Date Modified (Newest)", color = Color.White) },
+                                onClick = {
+                                    currentSortOption = "Date Modified (Newest)"
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sort: Date Modified (Oldest)", color = Color.White) },
+                                onClick = {
+                                    currentSortOption = "Date Modified (Oldest)"
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sort: Title (A-Z)", color = Color.White) },
+                                onClick = {
+                                    currentSortOption = "Title (A-Z)"
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sort: Title (Z-A)", color = Color.White) },
+                                onClick = {
+                                    currentSortOption = "Title (Z-A)"
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            HorizontalDivider(color = Color(0xFF333333))
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (isListView) "Switch to Grid View" else "Switch to List View", color = Color.White)
+                                },
+                                onClick = {
+                                    isListView = !isListView
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("New Folder", color = GraphiteOrange) },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    showNewFolderDialog = true
+                                }
+                            )
+                            if (selectedCategory == "Trash") {
+                                DropdownMenuItem(
+                                    text = { Text("Empty Trash", color = Color(0xFFFF5252)) },
+                                    onClick = {
+                                        GraphiteRepository.emptyTrash()
+                                        moreMenuExpanded = false
+                                        Toast.makeText(context, "Trash emptied", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                        }
                     }
+
                     Spacer(modifier = Modifier.width(6.dp))
                     GoogleProfileTopBarIcon()
                 }
@@ -324,77 +464,150 @@ fun NoteshelfScreen(
             }
 
             // Quick Creation Action Cards Row (Quick Note, Notebook, Import File)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 20.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                QuickActionCard(
-                    title = "Quick Note",
-                    icon = Icons.Default.NoteAlt,
-                    iconTint = Color(0xFFFFD54F),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        val quickNote = GraphiteRepository.createNotebook("Quick Note")
-                        onOpenNotebook(quickNote.id)
-                    }
-                )
-                QuickActionCard(
-                    title = "Notebook",
-                    icon = Icons.Default.Book,
-                    iconTint = Color(0xFF81C784),
-                    modifier = Modifier.weight(1f),
-                    onClick = { showNewNotebookDialog = true }
-                )
-                QuickActionCard(
-                    title = "Import File",
-                    icon = Icons.Default.FileDownload,
-                    iconTint = Color(0xFF64B5F6),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        fileImportLauncher.launch(
-                            arrayOf("application/pdf", "application/json", "application/octet-stream", "*/*")
-                        )
-                    }
-                )
-            }
-
-            // Notebook Cards Grid (Multi-column with live previews)
-            val filteredNotebooks = notebooks.filter { note ->
-                if (searchQuery.isBlank()) true
-                else note.title.contains(searchQuery, ignoreCase = true)
-            }
-
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 140.dp),
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                contentPadding = PaddingValues(bottom = 24.dp)
-            ) {
-                items(filteredNotebooks) { notebook ->
-                    NotebookThumbnailCard(
-                        notebook = notebook,
-                        onClick = { onOpenNotebook(notebook.id) },
-                        onUploadToDrive = {
-                            selectedNotebookForUpload = notebook
-                            if (!driveManager.hasDrivePermission(context)) {
-                                val intent = driveManager.createAuthorizationIntent(context)
-                                driveAuthLauncher.launch(intent)
-                            } else {
-                                scope.launch {
-                                    driveManager.startUploadFlow(context, notebook)
-                                }
-                            }
+            if (selectedCategory != "Templates" && selectedCategory != "Trash") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    QuickActionCard(
+                        title = "Quick Note",
+                        icon = Icons.Default.NoteAlt,
+                        iconTint = Color(0xFFFFD54F),
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val quickNote = GraphiteRepository.createNotebook("Quick Note")
+                            onOpenNotebook(quickNote.id)
+                        }
+                    )
+                    QuickActionCard(
+                        title = "Notebook",
+                        icon = Icons.Default.Book,
+                        iconTint = Color(0xFF81C784),
+                        modifier = Modifier.weight(1f),
+                        onClick = { showNewNotebookDialog = true }
+                    )
+                    QuickActionCard(
+                        title = "Import File",
+                        icon = Icons.Default.FileDownload,
+                        iconTint = Color(0xFF64B5F6),
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            fileImportLauncher.launch(
+                                arrayOf(
+                                    "application/pdf",
+                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    "application/json",
+                                    "*/*"
+                                )
+                            )
                         }
                     )
                 }
             }
+
+            if (selectedCategory == "Trash") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF211515))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Items in trash will remain until emptied.", color = Color.LightGray, fontSize = 12.sp)
+                    Button(
+                        onClick = {
+                            GraphiteRepository.emptyTrash()
+                            Toast.makeText(context, "Trash emptied", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Empty Trash", color = Color.White, fontSize = 12.sp)
+                    }
+                }
+            }
+
+            // View: Templates Grid OR Notebooks (Grid/List)
+            if (selectedCategory == "Templates") {
+                TemplatesGrid(
+                    onCreateFromTemplate = { title, paperStyle ->
+                        val newNote = GraphiteRepository.createNotebook(title, paperStyle = paperStyle)
+                        onOpenNotebook(newNote.id)
+                    }
+                )
+            } else if (isListView) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(bottom = 24.dp)
+                ) {
+                    items(sortedNotebooks) { notebook ->
+                        NotebookListRow(
+                            notebook = notebook,
+                            onClick = { onOpenNotebook(notebook.id) },
+                            onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
+                            onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
+                            onRename = { showRenameDialogForNote = notebook },
+                            onMoveFolder = { showMoveFolderDialogForNote = notebook },
+                            onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
+                            onPermanentlyDelete = { GraphiteRepository.permanentlyDeleteNotebook(notebook.id) },
+                            onDelete = { GraphiteRepository.deleteNotebook(notebook.id) },
+                            onUploadToDrive = {
+                                selectedNotebookForUpload = notebook
+                                if (!driveManager.hasDrivePermission(context)) {
+                                    val intent = driveManager.createAuthorizationIntent(context)
+                                    driveAuthLauncher.launch(intent)
+                                } else {
+                                    scope.launch {
+                                        driveManager.startUploadFlow(context, notebook)
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 140.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = PaddingValues(bottom = 24.dp)
+                ) {
+                    items(sortedNotebooks) { notebook ->
+                        NotebookThumbnailCard(
+                            notebook = notebook,
+                            onClick = { onOpenNotebook(notebook.id) },
+                            onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
+                            onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
+                            onRename = { showRenameDialogForNote = notebook },
+                            onMoveFolder = { showMoveFolderDialogForNote = notebook },
+                            onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
+                            onPermanentlyDelete = { GraphiteRepository.permanentlyDeleteNotebook(notebook.id) },
+                            onDelete = { GraphiteRepository.deleteNotebook(notebook.id) },
+                            onUploadToDrive = {
+                                selectedNotebookForUpload = notebook
+                                if (!driveManager.hasDrivePermission(context)) {
+                                    val intent = driveManager.createAuthorizationIntent(context)
+                                    driveAuthLauncher.launch(intent)
+                                } else {
+                                    scope.launch {
+                                        driveManager.startUploadFlow(context, notebook)
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
-
-
 
     if (showNewNotebookDialog) {
         NewNotebookDialog(
@@ -413,6 +626,29 @@ fun NoteshelfScreen(
             onCreate = { name ->
                 GraphiteRepository.addFolder(name)
                 showNewFolderDialog = false
+            }
+        )
+    }
+
+    showRenameDialogForNote?.let { note ->
+        RenameNoteDialog(
+            currentTitle = note.title,
+            onDismiss = { showRenameDialogForNote = null },
+            onRename = { newTitle ->
+                GraphiteRepository.renameNotebook(note.id, newTitle)
+                showRenameDialogForNote = null
+            }
+        )
+    }
+
+    showMoveFolderDialogForNote?.let { note ->
+        MoveNoteFolderDialog(
+            folders = folders,
+            currentFolderId = note.folderId,
+            onDismiss = { showMoveFolderDialogForNote = null },
+            onSelectFolder = { folderId ->
+                GraphiteRepository.moveNotebookToFolder(note.id, folderId)
+                showMoveFolderDialogForNote = null
             }
         )
     }
@@ -560,38 +796,137 @@ private fun QuickActionCard(
 private fun NotebookThumbnailCard(
     notebook: NotebookItem,
     onClick: () -> Unit,
+    onToggleStar: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onRename: () -> Unit,
+    onMoveFolder: () -> Unit,
+    onRestore: () -> Unit,
+    onPermanentlyDelete: () -> Unit,
+    onDelete: () -> Unit,
     onUploadToDrive: () -> Unit
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
+            notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
+    val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
+            notebook.filePath?.endsWith(".pptx", ignoreCase = true) == true
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Document Thumbnail Sheet (Lined white document preview matching Page 4)
+        // Document Thumbnail Sheet matching Page 4
         Card(
             modifier = Modifier
                 .width(130.dp)
                 .height(170.dp)
                 .shadow(4.dp, RoundedCornerShape(6.dp)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFFAFAFA)),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isPdf) Color(0xFF211515) else Color(0xFFFAFAFA)
+            ),
             shape = RoundedCornerShape(6.dp)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(10.dp)
-                ) {
-                    // Subtle horizontal lined preview
-                    repeat(9) { lineIdx ->
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(if (lineIdx % 3 == 0) 0.65f else 0.9f)
-                                .height(1.dp)
-                                .background(Color(0xFFE0E0E0))
+                if (isPdf) {
+                    // PDF Badge & Document Layout
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.SpaceBetween,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFFD32F2F))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("PDF", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (notebook.isStarred) {
+                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(16.dp))
+                            }
+                        }
+
+                        Icon(
+                            imageVector = Icons.Default.PictureAsPdf,
+                            contentDescription = "PDF File",
+                            tint = Color(0xFFEF5350),
+                            modifier = Modifier.size(46.dp)
                         )
-                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Text(
+                            text = "${notebook.pageCount} pages",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                } else if (isDoc) {
+                    // Word / PPTX Document Layout
+                    val isPpt = notebook.filePath?.endsWith(".pptx", true) == true
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.SpaceBetween,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isPpt) Color(0xFFD32F2F) else Color(0xFF1976D2))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(if (isPpt) "PPTX" else "DOCX", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (notebook.isStarred) {
+                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(16.dp))
+                            }
+                        }
+
+                        Icon(
+                            imageVector = if (isPpt) Icons.Default.Slideshow else Icons.Default.Description,
+                            contentDescription = "Document",
+                            tint = if (isPpt) Color(0xFFFF7043) else Color(0xFF42A5F5),
+                            modifier = Modifier.size(46.dp)
+                        )
+
+                        Text(
+                            text = if (isPpt) "${notebook.pageCount} slides" else "${notebook.pageCount} pages",
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                } else {
+                    // Handwritten Lined Paper Notebook Layout
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(10.dp)
+                    ) {
+                        repeat(9) { lineIdx ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(if (lineIdx % 3 == 0) 0.65f else 0.9f)
+                                    .height(1.dp)
+                                    .background(Color(0xFFE0E0E0))
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                        }
                     }
                 }
 
@@ -611,12 +946,102 @@ private fun NotebookThumbnailCard(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+
+                // 3-dots Menu Button (bottom right)
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(2.dp)
+                        .size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Note Options",
+                        tint = if (isPdf) Color.LightGray else Color.Gray,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier.background(GraphiteSurfaceVariant)
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (isPdf) "Open PDF" else "Open Note", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onClick()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (notebook.isStarred) "Unstar" else "Star", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onToggleStar()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (notebook.isBookmarked) "Remove Bookmark" else "Bookmark", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onToggleBookmark()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Rename", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onRename()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move to Folder", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onMoveFolder()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Upload to Google Drive", color = GraphiteOrange) },
+                        onClick = {
+                            menuExpanded = false
+                            onUploadToDrive()
+                        }
+                    )
+                    HorizontalDivider(color = Color(0xFF333333))
+                    if (notebook.isDeleted) {
+                        DropdownMenuItem(
+                            text = { Text("Restore Note", color = Color(0xFF81C784)) },
+                            onClick = {
+                                menuExpanded = false
+                                onRestore()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete Permanently", color = Color(0xFFFF5252)) },
+                            onClick = {
+                                menuExpanded = false
+                                onPermanentlyDelete()
+                            }
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text("Move to Trash", color = Color(0xFFFF5252)) },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            }
+                        )
+                    }
+                }
             }
         }
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Title and Timestamp matching Page 4 ("Ass9 (2)" / "12/10/26 12:35 pm")
+        // Title and Timestamp matching Page 4
         Text(
             text = notebook.title,
             color = Color.White,
@@ -634,6 +1059,169 @@ private fun NotebookThumbnailCard(
 }
 
 @Composable
+private fun NotebookListRow(
+    notebook: NotebookItem,
+    onClick: () -> Unit,
+    onToggleStar: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onRename: () -> Unit,
+    onMoveFolder: () -> Unit,
+    onRestore: () -> Unit,
+    onPermanentlyDelete: () -> Unit,
+    onDelete: () -> Unit,
+    onUploadToDrive: () -> Unit
+) {
+    val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
+            notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF141414))
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
+            contentDescription = null,
+            tint = if (isPdf) Color(0xFFEF5350) else GraphiteOrange,
+            modifier = Modifier.size(28.dp)
+        )
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = notebook.title,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (notebook.isStarred) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
+                }
+            }
+            Text(
+                text = "${if (isPdf) "PDF • " else ""}${notebook.updatedAtFormatted}",
+                color = Color.Gray,
+                fontSize = 11.sp
+            )
+        }
+        Box {
+            IconButton(onClick = { menuExpanded = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = null, tint = Color.Gray)
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+                modifier = Modifier.background(GraphiteSurfaceVariant)
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (isPdf) "Open PDF" else "Open Note", color = Color.White) },
+                    onClick = { menuExpanded = false; onClick() }
+                )
+                DropdownMenuItem(
+                    text = { Text(if (notebook.isStarred) "Unstar" else "Star", color = Color.White) },
+                    onClick = { menuExpanded = false; onToggleStar() }
+                )
+                DropdownMenuItem(
+                    text = { Text("Rename", color = Color.White) },
+                    onClick = { menuExpanded = false; onRename() }
+                )
+                DropdownMenuItem(
+                    text = { Text("Upload to Drive", color = GraphiteOrange) },
+                    onClick = { menuExpanded = false; onUploadToDrive() }
+                )
+                if (notebook.isDeleted) {
+                    DropdownMenuItem(
+                        text = { Text("Restore", color = Color(0xFF81C784)) },
+                        onClick = { menuExpanded = false; onRestore() }
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Move to Trash", color = Color(0xFFFF5252)) },
+                        onClick = { menuExpanded = false; onDelete() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplatesGrid(
+    onCreateFromTemplate: (String, PaperStyle) -> Unit
+) {
+    val templates = listOf(
+        Triple("Ruled Paper", PaperStyle.RULED, "Classic horizontal lined note"),
+        Triple("Grid Paper", PaperStyle.GRID, "Math, science & architectural grid"),
+        Triple("Dot Grid", PaperStyle.DOTTED, "Bullet journaling & wireframes"),
+        Triple("Blank Canvas", PaperStyle.BLANK, "Freeform drawing & sketching"),
+        Triple("Cornell Notes", PaperStyle.RULED, "Lecture review & key points"),
+        Triple("Weekly Planner", PaperStyle.GRID, "Daily schedule & priority tasks")
+    )
+
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 140.dp),
+        modifier = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        items(templates) { (title, style, desc) ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onCreateFromTemplate(title, style) },
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF191919)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(GraphiteOrange.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when (style) {
+                                PaperStyle.GRID -> Icons.Default.GridOn
+                                PaperStyle.DOTTED -> Icons.Default.Grain
+                                PaperStyle.BLANK -> Icons.Default.CropPortrait
+                                else -> Icons.Default.MenuBook
+                            },
+                            contentDescription = null,
+                            tint = GraphiteOrange,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                    Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(desc, color = Color.Gray, fontSize = 11.sp, maxLines = 2)
+                    Button(
+                        onClick = { onCreateFromTemplate(title, style) },
+                        colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                        modifier = Modifier.fillMaxWidth().height(32.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text("Use Template", fontSize = 11.sp, color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun NewNotebookDialog(
     onDismiss: () -> Unit,
     onCreate: (String) -> Unit
@@ -641,7 +1229,7 @@ private fun NewNotebookDialog(
     var title by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New Notebook", color = Color.White) },
+        title = { Text("New Notebook", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
                 value = title,
@@ -656,7 +1244,7 @@ private fun NewNotebookDialog(
         },
         confirmButton = {
             Button(
-                onClick = { if (title.isNotBlank()) onCreate(title) },
+                onClick = { if (title.isNotBlank()) onCreate(title.trim()) },
                 colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
             ) {
                 Text("Create", color = Color.White)
@@ -679,7 +1267,7 @@ private fun NewFolderDialog(
     var name by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New Folder", color = Color.White) },
+        title = { Text("New Folder", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
                 value = name,
@@ -694,12 +1282,91 @@ private fun NewFolderDialog(
         },
         confirmButton = {
             Button(
-                onClick = { if (name.isNotBlank()) onCreate(name) },
+                onClick = { if (name.isNotBlank()) onCreate(name.trim()) },
                 colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
             ) {
                 Text("Create", color = Color.White)
             }
         },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+private fun RenameNoteDialog(
+    currentTitle: String,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit
+) {
+    var newTitle by remember { mutableStateOf(currentTitle) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename Note", color = Color.White, fontWeight = FontWeight.Bold) },
+        text = {
+            OutlinedTextField(
+                value = newTitle,
+                onValueChange = { newTitle = it },
+                label = { Text("Title", color = Color.Gray) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White
+                )
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (newTitle.isNotBlank()) onRename(newTitle.trim()) },
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+            ) {
+                Text("Rename", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+private fun MoveNoteFolderDialog(
+    folders: List<FolderItem>,
+    currentFolderId: String,
+    onDismiss: () -> Unit,
+    onSelectFolder: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move to Folder", color = Color.White, fontWeight = FontWeight.Bold) },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                item {
+                    TextButton(
+                        onClick = { onSelectFolder("unfiled") },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("• Unfiled", color = if (currentFolderId == "unfiled") GraphiteOrange else Color.White)
+                    }
+                }
+                items(folders) { folder ->
+                    TextButton(
+                        onClick = { onSelectFolder(folder.id) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("• ${folder.name}", color = if (currentFolderId == folder.id) GraphiteOrange else Color.White)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancel", color = Color.Gray)
