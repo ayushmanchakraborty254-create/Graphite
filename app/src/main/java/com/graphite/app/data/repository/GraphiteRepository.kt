@@ -121,8 +121,18 @@ object GraphiteRepository {
             _stats.update { it.copy(notesCount = 0) }
         } else {
             val userNotes = userNotebooksMap.getOrPut(userId) { mutableListOf() }
+            val defaultNotes = userNotebooksMap["default"]
+            if (!defaultNotes.isNullOrEmpty()) {
+                val existingIds = userNotes.map { it.id }.toSet()
+                val toMigrate = defaultNotes.filter { it.id !in existingIds && !it.id.startsWith("note_") }
+                if (toMigrate.isNotEmpty()) {
+                    userNotes.addAll(toMigrate.map { it.copy(userId = userId) })
+                    defaultNotes.removeAll(toMigrate)
+                }
+            }
             _notebooks.value = userNotes.filter { !it.isDeleted }
             _stats.update { it.copy(notesCount = _notebooks.value.size) }
+            saveToDisk()
         }
     }
 
@@ -360,6 +370,23 @@ object GraphiteRepository {
         }
     }
 
+    fun updateNotebookFilePath(id: String, filePath: String, mimeType: String? = null) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val index = userList.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val existing = userList[index]
+            val updated = existing.copy(
+                filePath = filePath,
+                mimeType = mimeType ?: existing.mimeType,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            userList[index] = updated
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
+    }
+
     fun deleteNotebook(id: String) {
         val now = System.currentTimeMillis()
         val currentUid = activeUserId ?: "default"
@@ -478,7 +505,7 @@ object GraphiteRepository {
      * Handles new notes, edits, and tombstone deletions across devices.
      */
     fun reconcileRemoteNotes(remoteNotes: List<NotebookItem>) {
-        val currentUid = activeUserId ?: return
+        val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
         val localMap = userList.associateBy { it.id }.toMutableMap()
 
@@ -486,11 +513,11 @@ object GraphiteRepository {
             val local = localMap[remote.id]
             if (local == null) {
                 // New note from another device
-                localMap[remote.id] = remote
+                localMap[remote.id] = remote.copy(userId = currentUid)
             } else {
                 // Conflict handling: Last-Write-Wins based on timestamps
                 if (remote.updatedAtMillis > local.updatedAtMillis) {
-                    localMap[remote.id] = remote
+                    localMap[remote.id] = remote.copy(userId = currentUid)
                 } else if (remote.isDeleted && !local.isDeleted && remote.updatedAtMillis >= local.updatedAtMillis) {
                     localMap[remote.id] = local.copy(isDeleted = true, updatedAtMillis = remote.updatedAtMillis)
                 }
@@ -640,9 +667,11 @@ object GraphiteRepository {
 
     fun exportNotesAsJson(userId: String? = null): String {
         val uid = userId ?: activeUserId ?: "default"
-        val notes = userNotebooksMap[uid] ?: emptyList()
+        val userNotes = userNotebooksMap[uid] ?: emptyList()
+        val defaultNotes = if (uid != "default") (userNotebooksMap["default"]?.filter { !it.id.startsWith("note_") } ?: emptyList()) else emptyList()
+        val combinedNotes = (userNotes + defaultNotes).distinctBy { it.id }
         val arr = JSONArray()
-        for (item in notes) {
+        for (item in combinedNotes) {
             arr.put(notebookToJson(item))
         }
         return arr.toString(2)

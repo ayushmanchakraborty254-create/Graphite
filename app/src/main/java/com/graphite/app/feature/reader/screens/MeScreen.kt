@@ -71,6 +71,33 @@ fun MeScreen(
     var isSyncingBoth by remember { mutableStateOf(false) }
     var syncResultMessage by remember { mutableStateOf<String?>(null) }
 
+    val driveAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val authResult = driveManager.handleAuthorizationResult(result.data)
+        if (authResult.isSuccess) {
+            isSyncingBoth = true
+            scope.launch {
+                val driveResult = driveManager.syncNotesWithDrive(context)
+                val supabaseResult = syncManager.syncNotes()
+                isSyncingBoth = false
+
+                val msg = buildString {
+                    if (driveResult.isSuccess) {
+                        appendLine("✓ Google Drive: Successfully backed up & synced ${driveResult.getOrNull()} notes.")
+                    } else {
+                        appendLine("• Google Drive: ${driveResult.exceptionOrNull()?.message ?: "Check connection"}")
+                    }
+                    if (supabaseResult.isSuccess) {
+                        appendLine("✓ Supabase: Synced ${supabaseResult.getOrNull()} notes.")
+                    }
+                }
+                syncResultMessage = msg.trim()
+                showSyncResultDialog = true
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -246,24 +273,29 @@ fun MeScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             FilledTonalButton(
                                 onClick = {
-                                    isSyncingBoth = true
-                                    scope.launch {
-                                        val driveResult = driveManager.syncNotesWithDrive(context)
-                                        val supabaseResult = syncManager.syncNotes()
-                                        isSyncingBoth = false
+                                    if (!driveManager.hasDrivePermission(context)) {
+                                        val intent = driveManager.createAuthorizationIntent(context)
+                                        driveAuthLauncher.launch(intent)
+                                    } else {
+                                        isSyncingBoth = true
+                                        scope.launch {
+                                            val driveResult = driveManager.syncNotesWithDrive(context)
+                                            val supabaseResult = syncManager.syncNotes()
+                                            isSyncingBoth = false
 
-                                        val msg = buildString {
-                                            if (driveResult.isSuccess) {
-                                                appendLine("✓ Google Drive: Successfully backed up & synced ${driveResult.getOrNull()} notes.")
-                                            } else {
-                                                appendLine("• Google Drive: ${driveResult.exceptionOrNull()?.message ?: "Check connection"}")
+                                            val msg = buildString {
+                                                if (driveResult.isSuccess) {
+                                                    appendLine("✓ Google Drive: Successfully backed up & synced ${driveResult.getOrNull()} notes.")
+                                                } else {
+                                                    appendLine("• Google Drive: ${driveResult.exceptionOrNull()?.message ?: "Check connection"}")
+                                                }
+                                                if (supabaseResult.isSuccess) {
+                                                    appendLine("✓ Supabase: Synced ${supabaseResult.getOrNull()} notes.")
+                                                }
                                             }
-                                            if (supabaseResult.isSuccess) {
-                                                appendLine("✓ Supabase: Synced ${supabaseResult.getOrNull()} notes.")
-                                            }
+                                            syncResultMessage = msg.trim()
+                                            showSyncResultDialog = true
                                         }
-                                        syncResultMessage = msg.trim()
-                                        showSyncResultDialog = true
                                     }
                                 },
                                 enabled = !isSyncingBoth,

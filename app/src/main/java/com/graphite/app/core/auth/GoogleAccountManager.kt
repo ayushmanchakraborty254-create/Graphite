@@ -55,6 +55,9 @@ class GoogleAccountManager(
                 idToken = idToken
             )
             graphiteRepository.setActiveUser(email)
+            try {
+                com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
+            } catch (_: Exception) {}
         }
     }
 
@@ -63,6 +66,7 @@ class GoogleAccountManager(
             .requestIdToken(webClientId)
             .requestEmail()
             .requestProfile()
+            .requestScopes(com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_FILE))
             .build()
     }
 
@@ -93,41 +97,38 @@ class GoogleAccountManager(
             secureStorage.putString(KEY_GOOGLE_NAME, name)
             secureStorage.putString(KEY_GOOGLE_PHOTO, photoUrl)
             secureStorage.putString(KEY_GOOGLE_ID_TOKEN, idToken)
+            secureStorage.putString("google_drive_authorized_account_email", email)
 
             _currentUser.value = profile
             graphiteRepository.setActiveUser(email)
+            try {
+                com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
+            } catch (_: Exception) {}
 
             // Automatically bridge to Supabase Auth under the hood so RLS is authenticated
             if (supabaseAuthManager != null) {
-                if (!idToken.isNullOrBlank()) {
-                    CoroutineScope(Dispatchers.IO).launch {
+                CoroutineScope(Dispatchers.IO).launch {
+                    if (!idToken.isNullOrBlank()) {
                         try {
                             val authResult = supabaseAuthManager.signInWithGoogleIdToken(idToken)
                             if (authResult.isSuccess) {
                                 val session = authResult.getOrThrow()
-                                graphiteRepository.setActiveUser(session.user.id)
-                                // If account.photoUrl was missing but Supabase user metadata has it, update photoUrl
                                 if (photoUrl.isNullOrBlank() && !session.user.avatarUrl.isNullOrBlank()) {
                                     val updatedProfile = profile.copy(photoUrl = session.user.avatarUrl)
                                     secureStorage.putString(KEY_GOOGLE_PHOTO, session.user.avatarUrl)
                                     _currentUser.value = updatedProfile
                                 }
+                                return@launch
                             }
-                        } catch (_: Exception) {
-                            // If remote network id_token exchange fails, maintain session with publishable key
-                            supabaseAuthManager.setSession(
-                                SupabaseSession(
-                                    accessToken = GraphiteConfig.supabasePublishableKey,
-                                    user = SupabaseUser(id = email, email = email)
-                                )
-                            )
-                        }
+                        } catch (_: Exception) {}
                     }
-                } else {
+
+                    // Fallback to deterministic UUID based on Google email for valid UUID foreign keys
+                    val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
                     supabaseAuthManager.setSession(
                         SupabaseSession(
                             accessToken = GraphiteConfig.supabasePublishableKey,
-                            user = SupabaseUser(id = email, email = email)
+                            user = SupabaseUser(id = deterministicUuid, email = email)
                         )
                     )
                 }
@@ -153,10 +154,14 @@ class GoogleAccountManager(
         secureStorage.putString(KEY_GOOGLE_NAME, profile.displayName)
         secureStorage.putString(KEY_GOOGLE_PHOTO, profile.photoUrl)
         secureStorage.putString(KEY_GOOGLE_ID_TOKEN, profile.idToken)
+        secureStorage.putString("google_drive_authorized_account_email", profile.email)
         _currentUser.value = profile
 
         val userUid = profile.email
         graphiteRepository.setActiveUser(userUid)
+        try {
+            com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(profile.email)
+        } catch (_: Exception) {}
 
         supabaseAuthManager?.setSession(
             SupabaseSession(

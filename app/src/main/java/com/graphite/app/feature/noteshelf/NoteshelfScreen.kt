@@ -17,9 +17,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
+import androidx.compose.animation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -63,9 +66,25 @@ fun NoteshelfScreen(
     var importStatusMessage by remember { mutableStateOf<String?>(null) }
     var isImportingFile by remember { mutableStateOf(false) }
 
+    val configuration = LocalConfiguration.current
+    val isTablet = configuration.screenWidthDp >= 600
+    val syncManager = remember { GraphiteApplication.instance.supabaseSyncManager }
+    var isSyncingNotes by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                driveManager.syncNotesWithDrive(context)
+            } catch (_: Exception) {}
+            try {
+                syncManager.syncNotes()
+            } catch (_: Exception) {}
+        }
+    }
+
     // Dialogs & state
     var selectedCategory by remember { mutableStateOf("All Notes") }
-    var sidebarVisible by remember { mutableStateOf(true) }
+    var sidebarVisible by remember(isTablet) { mutableStateOf(isTablet) }
     var searchQuery by remember { mutableStateOf("") }
     var showSearchBar by remember { mutableStateOf(false) }
 
@@ -106,9 +125,22 @@ fun NoteshelfScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val authResult = driveManager.handleAuthorizationResult(result.data)
-        if (authResult.isSuccess && selectedNotebookForUpload != null) {
-            scope.launch {
-                driveManager.startUploadFlow(context, selectedNotebookForUpload!!)
+        if (authResult.isSuccess) {
+            val toUpload = selectedNotebookForUpload
+            if (toUpload != null) {
+                selectedNotebookForUpload = null
+                scope.launch {
+                    driveManager.startUploadFlow(context, toUpload)
+                }
+            } else {
+                isSyncingNotes = true
+                scope.launch {
+                    val dResult = driveManager.syncNotesWithDrive(context)
+                    val sResult = syncManager.syncNotes()
+                    isSyncingNotes = false
+                    val count = dResult.getOrNull() ?: sResult.getOrNull() ?: 0
+                    Toast.makeText(context, "Synced $count notes", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -145,35 +177,33 @@ fun NoteshelfScreen(
         else -> searchFiltered
     }
 
-    Row(
-        modifier = modifier
-            .fillMaxSize()
-            .background(GraphiteBlack)
-            .statusBarsPadding()
-    ) {
-        // Left Sidebar ("Noteshelf" Navigation Pane) matching Page 4
-        if (sidebarVisible) {
-            Column(
-                modifier = Modifier
-                    .width(240.dp)
-                    .fillMaxHeight()
-                    .background(Color(0xFF0F0F0F))
-                    .border(width = 0.5.dp, color = GraphiteOutline)
-                    .padding(horizontal = 14.dp, vertical = 16.dp)
+    val sidebarContent: @Composable () -> Unit = {
+        Column(
+            modifier = Modifier
+                .width(if (isTablet) 240.dp else 280.dp)
+                .fillMaxHeight()
+                .background(if (isTablet) Color(0xFF0F0F0F) else Color(0xFF141416))
+                .border(width = 0.5.dp, color = GraphiteOutline)
+                .padding(horizontal = 14.dp, vertical = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {}
+        ) {
+            // Top Title: Noteshelf
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top Title: Noteshelf
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Noteshelf",
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Serif
-                    )
+                Text(
+                    text = "Noteshelf",
+                    color = Color.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Serif
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     if (onNavigateBack != null) {
                         IconButton(onClick = onNavigateBack, modifier = Modifier.size(28.dp)) {
                             Icon(
@@ -183,138 +213,187 @@ fun NoteshelfScreen(
                             )
                         }
                     }
+                    if (!isTablet) {
+                        IconButton(onClick = { sidebarVisible = false }, modifier = Modifier.size(28.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close Sidebar",
+                                tint = Color.LightGray
+                            )
+                        }
+                    }
                 }
+            }
 
-                // Primary Smart Categories
-                SidebarItem(
-                    title = "All Notes",
-                    icon = Icons.Default.Home,
-                    count = notebooks.count { !it.isDeleted },
-                    isSelected = selectedCategory == "All Notes",
-                    onClick = { selectedCategory = "All Notes" }
-                )
-                SidebarItem(
-                    title = "Starred",
-                    icon = Icons.Default.Star,
-                    count = notebooks.count { it.isStarred && !it.isDeleted }.takeIf { it > 0 },
-                    isSelected = selectedCategory == "Starred",
-                    onClick = { selectedCategory = "Starred" }
-                )
-                SidebarItem(
-                    title = "Unfiled",
-                    icon = Icons.Default.Inbox,
-                    isSelected = selectedCategory == "Unfiled",
-                    onClick = { selectedCategory = "Unfiled" }
-                )
-                SidebarItem(
-                    title = "Trash",
-                    icon = Icons.Default.DeleteOutline,
-                    count = allNotesWithDeleted.count { it.isDeleted }.takeIf { it > 0 },
-                    isSelected = selectedCategory == "Trash",
-                    onClick = { selectedCategory = "Trash" }
-                )
-                SidebarItem(
-                    title = "Templates",
-                    icon = Icons.Default.Palette,
-                    badgeText = "New",
-                    isSelected = selectedCategory == "Templates",
-                    onClick = { selectedCategory = "Templates" }
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Collapsible Folders Section
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Folders",
-                        color = Color.Gray,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = null,
-                        tint = Color.Gray,
-                        modifier = Modifier.size(16.dp)
-                    )
+            // Primary Smart Categories
+            SidebarItem(
+                title = "All Notes",
+                icon = Icons.Default.Home,
+                count = notebooks.count { !it.isDeleted },
+                isSelected = selectedCategory == "All Notes",
+                onClick = {
+                    selectedCategory = "All Notes"
+                    if (!isTablet) sidebarVisible = false
                 }
-
-                folders.forEach { folder ->
-                    val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
-                    SidebarItem(
-                        title = folder.name,
-                        icon = Icons.Default.Folder,
-                        count = noteCount,
-                        isSelected = selectedCategory == folder.id,
-                        onClick = { selectedCategory = folder.id }
-                    )
+            )
+            SidebarItem(
+                title = "Starred",
+                icon = Icons.Default.Star,
+                count = notebooks.count { it.isStarred && !it.isDeleted }.takeIf { it > 0 },
+                isSelected = selectedCategory == "Starred",
+                onClick = {
+                    selectedCategory = "Starred"
+                    if (!isTablet) sidebarVisible = false
                 }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { showNewFolderDialog = true }
-                        .padding(vertical = 8.dp, horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AddCircleOutline,
-                        contentDescription = "New Folder",
-                        tint = GraphiteOrange,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "New Folder",
-                        color = GraphiteOrange,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+            )
+            SidebarItem(
+                title = "Unfiled",
+                icon = Icons.Default.Inbox,
+                isSelected = selectedCategory == "Unfiled",
+                onClick = {
+                    selectedCategory = "Unfiled"
+                    if (!isTablet) sidebarVisible = false
                 }
+            )
+            SidebarItem(
+                title = "Trash",
+                icon = Icons.Default.DeleteOutline,
+                count = allNotesWithDeleted.count { it.isDeleted }.takeIf { it > 0 },
+                isSelected = selectedCategory == "Trash",
+                onClick = {
+                    selectedCategory = "Trash"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
+            SidebarItem(
+                title = "Templates",
+                icon = Icons.Default.Palette,
+                badgeText = "New",
+                isSelected = selectedCategory == "Templates",
+                onClick = {
+                    selectedCategory = "Templates"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-                // Content Section
+            // Collapsible Folders Section
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "Content",
+                    text = "Folders",
                     color = Color.Gray,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(vertical = 4.dp)
+                    fontWeight = FontWeight.Bold
                 )
-                SidebarItem(
-                    title = "Photos",
-                    icon = Icons.Default.Image,
-                    isSelected = selectedCategory == "Photos",
-                    onClick = { selectedCategory = "Photos" }
-                )
-                SidebarItem(
-                    title = "Recordings",
-                    icon = Icons.Default.Mic,
-                    isSelected = selectedCategory == "Recordings",
-                    onClick = { selectedCategory = "Recordings" }
-                )
-                SidebarItem(
-                    title = "Bookmarks",
-                    icon = Icons.Default.BookmarkBorder,
-                    isSelected = selectedCategory == "Bookmarks",
-                    onClick = { selectedCategory = "Bookmarks" }
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Color.Gray,
+                    modifier = Modifier.size(16.dp)
                 )
             }
-        }
 
-        // Right Main Content Pane matching Page 4
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .padding(horizontal = 18.dp, vertical = 12.dp)
-        ) {
+            folders.forEach { folder ->
+                val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
+                SidebarItem(
+                    title = folder.name,
+                    icon = Icons.Default.Folder,
+                    count = noteCount,
+                    isSelected = selectedCategory == folder.id,
+                    onClick = {
+                        selectedCategory = folder.id
+                        if (!isTablet) sidebarVisible = false
+                    }
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { showNewFolderDialog = true }
+                    .padding(vertical = 8.dp, horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AddCircleOutline,
+                    contentDescription = "New Folder",
+                    tint = GraphiteOrange,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "New Folder",
+                    color = GraphiteOrange,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Content Section
+            Text(
+                text = "Content",
+                color = Color.Gray,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+            SidebarItem(
+                title = "Photos",
+                icon = Icons.Default.Image,
+                isSelected = selectedCategory == "Photos",
+                onClick = {
+                    selectedCategory = "Photos"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
+            SidebarItem(
+                title = "Recordings",
+                icon = Icons.Default.Mic,
+                isSelected = selectedCategory == "Recordings",
+                onClick = {
+                    selectedCategory = "Recordings"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
+            SidebarItem(
+                title = "Bookmarks",
+                icon = Icons.Default.BookmarkBorder,
+                isSelected = selectedCategory == "Bookmarks",
+                onClick = {
+                    selectedCategory = "Bookmarks"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(GraphiteBlack)
+            .statusBarsPadding()
+    ) {
+        Row(modifier = Modifier.fillMaxSize()) {
+            // Left Sidebar for Tablet
+            if (isTablet && sidebarVisible) {
+                sidebarContent()
+            }
+
+            // Right Main Content Pane
+            Column(
+                modifier = Modifier
+                    .then(if (isTablet) Modifier.weight(1f) else Modifier.fillMaxWidth())
+                    .fillMaxHeight()
+                    .padding(horizontal = if (isTablet) 18.dp else 14.dp, vertical = 12.dp)
+            ) {
             // Main Top Bar: Sidebar toggle, Category title, Action buttons (+) (Search) (More)
             Row(
                 modifier = Modifier
@@ -366,6 +445,40 @@ fun NoteshelfScreen(
                             contentDescription = "Search Notes",
                             tint = Color.White
                         )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            if (!driveManager.hasDrivePermission(context)) {
+                                selectedNotebookForUpload = null
+                                val intent = driveManager.createAuthorizationIntent(context)
+                                driveAuthLauncher.launch(intent)
+                            } else {
+                                isSyncingNotes = true
+                                scope.launch {
+                                    val dResult = driveManager.syncNotesWithDrive(context)
+                                    val sResult = syncManager.syncNotes()
+                                    isSyncingNotes = false
+                                    val count = dResult.getOrNull() ?: sResult.getOrNull() ?: 0
+                                    Toast.makeText(context, "Synced $count notes", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        enabled = !isSyncingNotes
+                    ) {
+                        if (isSyncingNotes) {
+                            CircularProgressIndicator(
+                                color = GraphiteOrange,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = "Sync Notes",
+                                tint = Color.White
+                            )
+                        }
                     }
 
                     // More Options Dropdown Menu
@@ -426,6 +539,26 @@ fun NoteshelfScreen(
                                 onClick = {
                                     moreMenuExpanded = false
                                     showNewFolderDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sync Notes with Cloud", color = GraphiteOrange) },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    if (!driveManager.hasDrivePermission(context)) {
+                                        selectedNotebookForUpload = null
+                                        val intent = driveManager.createAuthorizationIntent(context)
+                                        driveAuthLauncher.launch(intent)
+                                    } else {
+                                        isSyncingNotes = true
+                                        scope.launch {
+                                            val dResult = driveManager.syncNotesWithDrive(context)
+                                            val sResult = syncManager.syncNotes()
+                                            isSyncingNotes = false
+                                            val count = dResult.getOrNull() ?: sResult.getOrNull() ?: 0
+                                            Toast.makeText(context, "Synced $count notes", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
                                 }
                             )
                             if (selectedCategory == "Trash") {
@@ -604,6 +737,26 @@ fun NoteshelfScreen(
                             }
                         )
                     }
+                }
+            }
+        }
+    }
+
+        // Mobile slide-over drawer overlay
+        if (!isTablet) {
+            AnimatedVisibility(
+                visible = sidebarVisible,
+                enter = fadeIn() + slideInHorizontally(initialOffsetX = { -it }),
+                exit = fadeOut() + slideOutHorizontally(targetOffsetX = { -it })
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .clickable { sidebarVisible = false }
+                    )
+                    sidebarContent()
                 }
             }
         }
