@@ -2,12 +2,10 @@ package com.graphite.app.core.supabase
 
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.data.repository.GraphiteRepository
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
 
 sealed interface SupabaseSyncStatus {
     data object Idle : SupabaseSyncStatus
@@ -24,8 +22,30 @@ class SupabaseSyncManager(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
 
+    private val syncScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + ioDispatcher)
+    private var autoSyncJob: kotlinx.coroutines.Job? = null
+
     private val _syncStatus = MutableStateFlow<SupabaseSyncStatus>(SupabaseSyncStatus.Idle)
     val syncStatus: StateFlow<SupabaseSyncStatus> = _syncStatus.asStateFlow()
+
+    /**
+     * Silently triggers automatic background synchronization for notes with debouncing.
+     * Safe to call on note edits, app startup, tab navigation, or note deletions.
+     */
+    fun triggerAutoSync(debounceMs: Long = 300L) {
+        if (!authManager.isAuthenticated()) return
+        autoSyncJob?.cancel()
+        autoSyncJob = syncScope.launch {
+            if (debounceMs > 0) {
+                kotlinx.coroutines.delay(debounceMs)
+            }
+            try {
+                syncNotes()
+            } catch (_: Exception) {
+                // Background auto-sync is silent and non-blocking
+            }
+        }
+    }
 
     /**
      * Executes two-way cross-device synchronization between local repository and Supabase.

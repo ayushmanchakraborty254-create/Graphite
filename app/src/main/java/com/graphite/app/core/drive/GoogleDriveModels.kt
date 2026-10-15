@@ -1,7 +1,9 @@
 package com.graphite.app.core.drive
 
 import com.graphite.app.data.model.NotebookItem
+import kotlinx.serialization.Serializable
 
+@Serializable
 data class DriveFolder(
     val id: String,
     val name: String

@@ -6,8 +6,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.auth.api.identity.Identity
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -488,8 +491,10 @@ private fun BookshelfDriveSyncDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val accountEmail = driveManager.getAuthorizedAccountEmail()
-    val syncedFolder = driveManager.getBookshelfSyncedFolder()
+    val accountEmail = driveManager.getResolvedAccountEmail(context)
+    val activeFolder by driveManager.activeBookshelfFolder.collectAsState()
+    val defaultFolder by driveManager.defaultBookshelfFolder.collectAsState()
+    val curatedFolders by driveManager.curatedBookshelfFolders.collectAsState()
     val isSyncing by driveManager.isSyncingBookshelf.collectAsState()
     val syncStatusMsg by driveManager.bookshelfSyncStatus.collectAsState()
 
@@ -520,9 +525,10 @@ private fun BookshelfDriveSyncDialog(
                         if (res.isSuccess) {
                             val chosen = res.getOrNull()
                             if (chosen != null) {
+                                driveManager.addCuratedBookshelfFolder(chosen)
                                 driveManager.setBookshelfSyncedFolder(chosen)
                                 showDriveFolderBrowser = false
-                                Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Added to synced folders: ${chosen.name}", Toast.LENGTH_SHORT).show()
                                 return@launch
                             }
                         }
@@ -536,9 +542,10 @@ private fun BookshelfDriveSyncDialog(
                     if (fallback.isSuccess) {
                         val chosen = fallback.getOrNull()
                         if (chosen != null) {
+                            driveManager.addCuratedBookshelfFolder(chosen)
                             driveManager.setBookshelfSyncedFolder(chosen)
                             showDriveFolderBrowser = false
-                            Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Added to synced folders: ${chosen.name}", Toast.LENGTH_SHORT).show()
                         }
                     } else {
                         Toast.makeText(context, "No folder selected in Drive Picker", Toast.LENGTH_SHORT).show()
@@ -563,35 +570,29 @@ private fun BookshelfDriveSyncDialog(
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Text(
                     text = "Sync books bi-directionally between Bookshelf and your selected Google Drive folder.",
                     color = Color.LightGray,
                     fontSize = 13.sp
                 )
 
-                // Current Account & Folder Card
+                // Current Account & Status Card
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1B1B1B)),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(accountEmail ?: "Not authorized", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        }
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Folder, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Folder: ${syncedFolder?.name ?: "Graphite Bookshelf (Auto-created)"}",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -610,6 +611,121 @@ private fun BookshelfDriveSyncDialog(
                         CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(syncStatusMsg ?: "Syncing...", color = GraphiteOrange, fontSize = 13.sp)
+                    }
+                }
+
+                // Curated Folders Section
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Your Synced Folders",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = "Tap to switch destination. Star ★ to set as default cross-device folder.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        curatedFolders.forEach { folder ->
+                            val isSelected = folder.id == activeFolder.id ||
+                                    (folder.id.startsWith("default_") && activeFolder.id.startsWith("default_")) ||
+                                    folder.name.equals(activeFolder.name, ignoreCase = true)
+                            val isDefault = folder.id == defaultFolder.id ||
+                                    (folder.id.startsWith("default_") && defaultFolder.id.startsWith("default_")) ||
+                                    folder.name.equals(defaultFolder.name, ignoreCase = true)
+
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSelected) Color(0xFF2A2215) else Color(0xFF1E1E1E),
+                                border = BorderStroke(
+                                    width = if (isSelected) 1.5.dp else 1.dp,
+                                    color = if (isSelected) GraphiteOrange else Color(0xFF333333)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        driveManager.setBookshelfSyncedFolder(folder)
+                                        Toast.makeText(context, "Active folder: ${folder.name}", Toast.LENGTH_SHORT).show()
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.Folder,
+                                        contentDescription = null,
+                                        tint = if (isSelected) GraphiteOrange else Color.LightGray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = folder.name,
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+
+                                    if (isDefault) {
+                                        Surface(
+                                            color = GraphiteOrange.copy(alpha = 0.2f),
+                                            shape = RoundedCornerShape(4.dp),
+                                            border = BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.5f))
+                                        ) {
+                                            Text(
+                                                text = "★ Default",
+                                                color = GraphiteOrange,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    } else {
+                                        IconButton(
+                                            onClick = {
+                                                driveManager.setDefaultBookshelfFolder(folder)
+                                                Toast.makeText(context, "${folder.name} set as default cross-device folder", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.StarBorder,
+                                                contentDescription = "Set as Default",
+                                                tint = Color.Gray,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+
+                                    if (!isDefault && folder.id != driveManager.DEFAULT_BOOKSHELF_FOLDER.id) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        IconButton(
+                                            onClick = {
+                                                driveManager.removeCuratedBookshelfFolder(folder.id)
+                                                Toast.makeText(context, "Removed ${folder.name}", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Remove from list",
+                                                tint = Color.LightGray.copy(alpha = 0.6f),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -632,7 +748,7 @@ private fun BookshelfDriveSyncDialog(
                     ) {
                         OutlinedButton(
                             onClick = {
-                                customFolderInput = syncedFolder?.name ?: ""
+                                customFolderInput = ""
                                 showCustomFolderDialog = true
                             },
                             modifier = Modifier.weight(1f),
@@ -644,18 +760,16 @@ private fun BookshelfDriveSyncDialog(
                             Text("Enter Folder Name", fontSize = 12.sp)
                         }
 
-                        if (syncedFolder != null) {
-                            OutlinedButton(
-                                onClick = {
-                                    driveManager.setBookshelfSyncedFolder(null)
-                                    Toast.makeText(context, "Reset to default Graphite Bookshelf folder", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
-                            ) {
-                                Text("Reset to Default", fontSize = 12.sp)
-                            }
+                        OutlinedButton(
+                            onClick = {
+                                driveManager.resetBookshelfSyncedFolderToDefault()
+                                Toast.makeText(context, "Reset to default: ${defaultFolder.name}", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
+                        ) {
+                            Text("Reset to Default", fontSize = 12.sp)
                         }
                     }
                 }
@@ -665,7 +779,7 @@ private fun BookshelfDriveSyncDialog(
             Button(
                 onClick = {
                     scope.launch {
-                        val report = driveManager.syncBookshelfWithDrive(context, syncedFolder?.id)
+                        val report = driveManager.syncBookshelfWithDrive(context, activeFolder.id)
                         onDismiss()
                         onSyncCompleted(report)
                     }
@@ -688,8 +802,9 @@ private fun BookshelfDriveSyncDialog(
     if (showDriveFolderBrowser) {
         DriveFolderBrowserDialog(
             driveManager = driveManager,
-            initialFolder = syncedFolder ?: DriveFolder.ROOT,
+            initialFolder = activeFolder,
             onFolderSelected = { chosen ->
+                driveManager.addCuratedBookshelfFolder(chosen)
                 driveManager.setBookshelfSyncedFolder(chosen)
                 showDriveFolderBrowser = false
                 Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
@@ -723,6 +838,7 @@ private fun BookshelfDriveSyncDialog(
                                         if (res.isSuccess) {
                                             val chosen = res.getOrNull()
                                             if (chosen != null) {
+                                                driveManager.addCuratedBookshelfFolder(chosen)
                                                 driveManager.setBookshelfSyncedFolder(chosen)
                                                 showDriveFolderBrowser = false
                                                 Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
@@ -777,9 +893,13 @@ private fun BookshelfDriveSyncDialog(
                     onClick = {
                         val trimmed = customFolderInput.trim()
                         if (trimmed.isNotBlank()) {
-                            driveManager.setBookshelfSyncedFolder(DriveFolder("custom_$trimmed", trimmed))
-                            Toast.makeText(context, "Folder set to: $trimmed", Toast.LENGTH_SHORT).show()
-                            showCustomFolderDialog = false
+                            scope.launch {
+                                val res = driveManager.createOrConnectBookshelfFolder(context, trimmed)
+                                val folder = res.getOrNull()
+                                val name = folder?.name ?: trimmed
+                                Toast.makeText(context, "Folder set to: $name", Toast.LENGTH_SHORT).show()
+                                showCustomFolderDialog = false
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)

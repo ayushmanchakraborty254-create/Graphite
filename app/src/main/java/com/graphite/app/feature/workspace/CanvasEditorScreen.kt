@@ -350,6 +350,9 @@ fun CanvasEditorScreen(
             pdfBitmaps.clear()
             pageThumbnails.values.forEach { it.recycle() }
             pageThumbnails.clear()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 0L)
+            } catch (_: Exception) {}
         }
     }
 

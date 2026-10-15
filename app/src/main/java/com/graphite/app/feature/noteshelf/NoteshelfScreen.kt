@@ -72,14 +72,7 @@ fun NoteshelfScreen(
     var isSyncingNotes by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                driveManager.syncNotesWithDrive(context)
-            } catch (_: Exception) {}
-            try {
-                syncManager.syncNotes()
-            } catch (_: Exception) {}
-        }
+        syncManager.triggerAutoSync(debounceMs = 0L)
     }
 
     // Dialogs & state
@@ -449,18 +442,14 @@ fun NoteshelfScreen(
 
                     IconButton(
                         onClick = {
-                            if (!driveManager.hasDrivePermission(context)) {
-                                selectedNotebookForUpload = null
-                                val intent = driveManager.createAuthorizationIntent(context)
-                                driveAuthLauncher.launch(intent)
-                            } else {
-                                isSyncingNotes = true
-                                scope.launch {
-                                    val dResult = driveManager.syncNotesWithDrive(context)
-                                    val sResult = syncManager.syncNotes()
-                                    isSyncingNotes = false
-                                    val count = dResult.getOrNull() ?: sResult.getOrNull() ?: 0
-                                    Toast.makeText(context, "Synced $count notes", Toast.LENGTH_SHORT).show()
+                            isSyncingNotes = true
+                            scope.launch {
+                                val sResult = syncManager.syncNotes()
+                                isSyncingNotes = false
+                                if (sResult.isSuccess) {
+                                    Toast.makeText(context, "Synced ${sResult.getOrNull()} notes with Supabase", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Sync error: ${sResult.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         },

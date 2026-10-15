@@ -599,6 +599,27 @@ class GoogleDriveManager(
     }
 
     /**
+     * Resolves the Google account email from all possible sources including GoogleSignIn.
+     * Caches the resolved email into secure storage for subsequent calls.
+     */
+    fun getResolvedAccountEmail(context: Context? = null): String? {
+        val email = getAuthorizedAccountEmail()
+            ?: if (context != null) {
+                try {
+                    val lastAccount = GoogleSignIn.getLastSignedInAccount(context)
+                    lastAccount?.account?.name?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: lastAccount?.email?.takeIf { it.isNotBlank() && it != "null" }
+                } catch (_: Exception) {
+                    null
+                }
+            } else null
+        if (!email.isNullOrBlank()) {
+            saveAuthorizedAccount(email)
+        }
+        return email
+    }
+
+    /**
      * Step 2: User chose a destination folder. Show the final confirmation dialog
      * before any upload actually occurs.
      */
@@ -957,19 +978,30 @@ class GoogleDriveManager(
                 ?: (_uploadState.value as? DriveUploadState.SelectingFolder)?.notebook
                 ?: (_uploadState.value as? DriveUploadState.AwaitingConfirmation)?.notebook
 
-            val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL) ?: ""
+            val accountEmail = getResolvedAccountEmail(context) ?: ""
+            if (accountEmail.isBlank()) {
+                val errorMsg = "Google account authorization required"
+                if (targetNotebook != null) {
+                    setUploadError(errorMsg, targetNotebook)
+                }
+                return@withContext Result.failure(IllegalStateException(errorMsg))
+            }
+
             val uploader = uploaderProvider(context)
             val folderResult = uploader.getFolder(accountEmail, folderId)
             if (folderResult.isFailure) {
                 val errorMsg = folderResult.exceptionOrNull()?.message
                     ?: "Selected item is a file, not a folder. Please choose a destination folder."
                 SafeLogger.e(TAG, "Selected Drive item is not a folder: $errorMsg")
-                setUploadError(errorMsg, targetNotebook)
+                if (targetNotebook != null) {
+                    setUploadError(errorMsg, targetNotebook)
+                }
                 return@withContext Result.failure(folderResult.exceptionOrNull() ?: IllegalArgumentException(errorMsg))
             }
             val resolvedFolder = folderResult.getOrThrow()
 
             _customFolders.value = (_customFolders.value + resolvedFolder).distinctBy { it.id }
+            addCuratedBookshelfFolder(resolvedFolder)
 
             if (targetNotebook != null) {
                 onFolderSelected(targetNotebook, resolvedFolder)
@@ -980,7 +1012,9 @@ class GoogleDriveManager(
             SafeLogger.e(TAG, "Failed to handle picker folder selection: ${e.message}", e)
             val targetNotebook = notebook ?: (_uploadState.value as? DriveUploadState.SelectingFolder)?.notebook
                 ?: (_uploadState.value as? DriveUploadState.AwaitingConfirmation)?.notebook
-            setUploadError("Failed to process Google Drive selection: ${e.message}", targetNotebook)
+            if (targetNotebook != null) {
+                setUploadError("Failed to process Google Drive selection: ${e.message}", targetNotebook)
+            }
             Result.failure(e)
         }
     }
@@ -992,7 +1026,7 @@ class GoogleDriveManager(
         context: Context,
         parentFolderId: String = "root"
     ): Result<List<DriveFolder>> = withContext(ioDispatcher) {
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+        val accountEmail = getResolvedAccountEmail(context)
             ?: return@withContext Result.failure(IllegalStateException("Google Drive authorization required"))
         val uploader = uploaderProvider(context)
         uploader.listSubfolders(accountEmail, parentFolderId)
@@ -1110,23 +1144,149 @@ class GoogleDriveManager(
     private val _bookshelfSyncStatus = MutableStateFlow<String?>(null)
     val bookshelfSyncStatus: StateFlow<String?> = _bookshelfSyncStatus.asStateFlow()
 
-    fun getBookshelfSyncedFolder(): DriveFolder? {
-        val folderId = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_ID) ?: return null
-        val folderName = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_NAME) ?: "Drive Folder"
-        return DriveFolder(folderId, folderName)
+    val DEFAULT_BOOKSHELF_FOLDER = DriveFolder("default_graphite_bookshelf", "Graphite Bookshelf")
+
+    private val _curatedBookshelfFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
+    val curatedBookshelfFolders: StateFlow<List<DriveFolder>> = _curatedBookshelfFolders.asStateFlow()
+
+    private val _defaultBookshelfFolder = MutableStateFlow<DriveFolder>(DEFAULT_BOOKSHELF_FOLDER)
+    val defaultBookshelfFolder: StateFlow<DriveFolder> = _defaultBookshelfFolder.asStateFlow()
+
+    private val _activeBookshelfFolder = MutableStateFlow<DriveFolder>(DEFAULT_BOOKSHELF_FOLDER)
+    val activeBookshelfFolder: StateFlow<DriveFolder> = _activeBookshelfFolder.asStateFlow()
+
+    init {
+        val def = getDefaultBookshelfFolder()
+        _defaultBookshelfFolder.value = def
+        _curatedBookshelfFolders.value = getCuratedBookshelfFolders()
+        _activeBookshelfFolder.value = getBookshelfSyncedFolder()
     }
 
-    fun setBookshelfSyncedFolder(folder: DriveFolder?) {
-        if (folder == null) {
-            secureStorage.remove(KEY_BOOKSHELF_SYNC_FOLDER_ID)
-            secureStorage.remove(KEY_BOOKSHELF_SYNC_FOLDER_NAME)
+    fun getDefaultBookshelfFolder(): DriveFolder {
+        val id = secureStorage.getString(KEY_BOOKSHELF_DEFAULT_FOLDER_ID)
+        val name = secureStorage.getString(KEY_BOOKSHELF_DEFAULT_FOLDER_NAME)
+        return if (!id.isNullOrBlank() && !name.isNullOrBlank()) {
+            DriveFolder(id, name)
         } else {
-            secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_ID, folder.id)
-            secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_NAME, folder.name)
+            DEFAULT_BOOKSHELF_FOLDER
         }
     }
 
-    fun hasBookshelfSyncConfigured(): Boolean = getBookshelfSyncedFolder() != null
+    fun setDefaultBookshelfFolder(folder: DriveFolder) {
+        secureStorage.putString(KEY_BOOKSHELF_DEFAULT_FOLDER_ID, folder.id)
+        secureStorage.putString(KEY_BOOKSHELF_DEFAULT_FOLDER_NAME, folder.name)
+        _defaultBookshelfFolder.value = folder
+        addCuratedBookshelfFolder(folder)
+    }
+
+    fun getCuratedBookshelfFolders(): List<DriveFolder> {
+        val defaultFolder = getDefaultBookshelfFolder()
+        val jsonStr = secureStorage.getString(KEY_BOOKSHELF_CURATED_FOLDERS)
+        val list = if (!jsonStr.isNullOrBlank()) {
+            try {
+                Json.decodeFromString<List<DriveFolder>>(jsonStr)
+            } catch (_: Exception) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
+        return (listOf(defaultFolder) + list).distinctBy { it.id }
+    }
+
+    fun addCuratedBookshelfFolder(folder: DriveFolder) {
+        val current = getCuratedBookshelfFolders().toMutableList()
+        val existingIndex = current.indexOfFirst { it.id == folder.id || it.name.equals(folder.name, ignoreCase = true) }
+        if (existingIndex >= 0) {
+            current[existingIndex] = folder
+        } else {
+            current.add(folder)
+        }
+        val encoded = Json.encodeToString(current)
+        secureStorage.putString(KEY_BOOKSHELF_CURATED_FOLDERS, encoded)
+        _curatedBookshelfFolders.value = current
+    }
+
+    fun removeCuratedBookshelfFolder(folderId: String) {
+        val defaultFolder = getDefaultBookshelfFolder()
+        if (folderId == defaultFolder.id || folderId == DEFAULT_BOOKSHELF_FOLDER.id) {
+            return
+        }
+        val updated = getCuratedBookshelfFolders().filterNot { it.id == folderId }
+        val encoded = Json.encodeToString(updated)
+        secureStorage.putString(KEY_BOOKSHELF_CURATED_FOLDERS, encoded)
+        _curatedBookshelfFolders.value = updated
+
+        val active = getBookshelfSyncedFolder()
+        if (active.id == folderId) {
+            setBookshelfSyncedFolder(defaultFolder)
+        }
+    }
+
+    fun getBookshelfSyncedFolder(): DriveFolder {
+        val folderId = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_ID)
+        val folderName = secureStorage.getString(KEY_BOOKSHELF_SYNC_FOLDER_NAME)
+        return if (!folderId.isNullOrBlank() && !folderName.isNullOrBlank()) {
+            DriveFolder(folderId, folderName)
+        } else {
+            getDefaultBookshelfFolder()
+        }
+    }
+
+    fun setBookshelfSyncedFolder(folder: DriveFolder?) {
+        val target = folder ?: getDefaultBookshelfFolder()
+        secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_ID, target.id)
+        secureStorage.putString(KEY_BOOKSHELF_SYNC_FOLDER_NAME, target.name)
+        _activeBookshelfFolder.value = target
+        addCuratedBookshelfFolder(target)
+    }
+
+    fun resetBookshelfSyncedFolderToDefault() {
+        val defaultFolder = getDefaultBookshelfFolder()
+        setBookshelfSyncedFolder(defaultFolder)
+    }
+
+    suspend fun createOrConnectBookshelfFolder(
+        context: Context,
+        folderName: String
+    ): Result<DriveFolder> = withContext(ioDispatcher) {
+        val trimmed = folderName.trim()
+        if (trimmed.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Folder name cannot be blank"))
+        }
+
+        val accountEmail = getResolvedAccountEmail(context)
+        if (accountEmail.isNullOrBlank()) {
+            val localFolder = DriveFolder("custom_$trimmed", trimmed)
+            addCuratedBookshelfFolder(localFolder)
+            setBookshelfSyncedFolder(localFolder)
+            return@withContext Result.success(localFolder)
+        }
+        saveAuthorizedAccount(accountEmail)
+
+        try {
+            val uploader = uploaderProvider(context)
+            val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
+            val matched = existingFolders.find { it.name.equals(trimmed, ignoreCase = true) }
+            val folder = if (matched != null) {
+                matched
+            } else {
+                val created = uploader.createFolder(accountEmail, trimmed, "root")
+                created.getOrDefault(DriveFolder("custom_$trimmed", trimmed))
+            }
+            addCuratedBookshelfFolder(folder)
+            setBookshelfSyncedFolder(folder)
+            Result.success(folder)
+        } catch (e: Exception) {
+            SafeLogger.e(TAG, "Failed to connect or create folder: ${e.message}", e)
+            val fallback = DriveFolder("custom_$trimmed", trimmed)
+            addCuratedBookshelfFolder(fallback)
+            setBookshelfSyncedFolder(fallback)
+            Result.success(fallback)
+        }
+    }
+
+    fun hasBookshelfSyncConfigured(): Boolean = getAuthorizedAccountEmail() != null
 
     fun getLastBookshelfSyncTimeMillis(): Long {
         val str = secureStorage.getString(KEY_BOOKSHELF_LAST_SYNC_TIME) ?: return 0L
@@ -1137,13 +1297,7 @@ class GoogleDriveManager(
         context: Context,
         targetFolderId: String? = null
     ): BookshelfSyncReport = withContext(ioDispatcher) {
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
-            ?: GoogleSignIn.getLastSignedInAccount(context)?.account?.name?.takeIf { it.isNotBlank() && it != "null" }
-            ?: GoogleSignIn.getLastSignedInAccount(context)?.email?.takeIf { it.isNotBlank() && it != "null" }
+        val accountEmail = getResolvedAccountEmail(context)
         if (accountEmail.isNullOrBlank()) {
             return@withContext BookshelfSyncReport(
                 isSuccess = false,
@@ -1163,25 +1317,27 @@ class GoogleDriveManager(
             val uploader = uploaderProvider(context)
             var currentFolder = if (!targetFolderId.isNullOrBlank()) {
                 val f = uploader.getFolder(accountEmail, targetFolderId).getOrNull()
-                    ?: DriveFolder(targetFolderId, "Synced Folder")
+                    ?: DriveFolder(targetFolderId, getBookshelfSyncedFolder().name)
                 setBookshelfSyncedFolder(f)
                 f
             } else {
                 getBookshelfSyncedFolder()
             }
 
-            // Auto-create or find "Graphite Bookshelf" folder if none is configured
-            if (currentFolder == null) {
-                _bookshelfSyncStatus.value = "Finding or creating Graphite Bookshelf folder..."
+            // Auto-create or bind folder by name if default or custom placeholder
+            if (currentFolder.id.startsWith("default_") || currentFolder.id.startsWith("custom_") || currentFolder.id.isBlank()) {
+                val targetName = currentFolder.name.ifBlank { "Graphite Bookshelf" }
+                _bookshelfSyncStatus.value = "Finding or creating \"$targetName\" in Drive..."
                 val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
-                val existingBookshelf = existingFolders.find { it.name.equals("Graphite Bookshelf", ignoreCase = true) }
+                val existingBookshelf = existingFolders.find { it.name.equals(targetName, ignoreCase = true) }
                 if (existingBookshelf != null) {
                     currentFolder = existingBookshelf
                 } else {
-                    val createResult = uploader.createFolder(accountEmail, "Graphite Bookshelf", "root")
-                    currentFolder = createResult.getOrDefault(DriveFolder("folder_graphite_bookshelf", "Graphite Bookshelf"))
+                    val createResult = uploader.createFolder(accountEmail, targetName, "root")
+                    currentFolder = createResult.getOrDefault(DriveFolder("folder_${targetName.replace(" ", "_")}", targetName))
                 }
                 setBookshelfSyncedFolder(currentFolder)
+                addCuratedBookshelfFolder(currentFolder)
             }
 
             val folderId = currentFolder.id
@@ -1297,10 +1453,25 @@ class GoogleDriveManager(
         context: Context,
         book: Book
     ): DriveUploadResult? = withContext(ioDispatcher) {
-        val syncedFolder = getBookshelfSyncedFolder() ?: return@withContext null
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL) ?: return@withContext null
-
+        val accountEmail = getResolvedAccountEmail(context) ?: return@withContext null
+        saveAuthorizedAccount(accountEmail)
+        var syncedFolder = getBookshelfSyncedFolder()
         val uploader = uploaderProvider(context)
+        if (syncedFolder.id.startsWith("default_") || syncedFolder.id.startsWith("custom_")) {
+            val existing = uploader.listFolders(accountEmail).getOrDefault(emptyList())
+                .find { it.name.equals(syncedFolder.name, ignoreCase = true) }
+            if (existing != null) {
+                syncedFolder = existing
+                setBookshelfSyncedFolder(existing)
+            } else {
+                val created = uploader.createFolder(accountEmail, syncedFolder.name, "root").getOrNull()
+                if (created != null) {
+                    syncedFolder = created
+                    setBookshelfSyncedFolder(created)
+                }
+            }
+        }
+
         val (bytes, fileName, mimeType) = if (book.filePath != null && File(book.filePath).exists()) {
             val f = File(book.filePath)
             Triple(f.readBytes(), f.name, book.mimeType)
@@ -1483,6 +1654,9 @@ class GoogleDriveManager(
         const val KEY_DRIVE_ACCOUNT_EMAIL = "google_drive_authorized_account_email"
         private const val KEY_BOOKSHELF_SYNC_FOLDER_ID = "google_drive_bookshelf_sync_folder_id"
         private const val KEY_BOOKSHELF_SYNC_FOLDER_NAME = "google_drive_bookshelf_sync_folder_name"
+        private const val KEY_BOOKSHELF_DEFAULT_FOLDER_ID = "google_drive_bookshelf_default_folder_id"
+        private const val KEY_BOOKSHELF_DEFAULT_FOLDER_NAME = "google_drive_bookshelf_default_folder_name"
+        private const val KEY_BOOKSHELF_CURATED_FOLDERS = "google_drive_bookshelf_curated_folders"
         private const val KEY_BOOKSHELF_LAST_SYNC_TIME = "google_drive_bookshelf_last_sync_time"
     }
 }
