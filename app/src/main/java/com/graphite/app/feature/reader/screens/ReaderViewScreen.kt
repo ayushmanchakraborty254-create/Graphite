@@ -1,12 +1,26 @@
 package com.graphite.app.feature.reader.screens
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
+import android.widget.Toast
+import androidx.compose.animation.*
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,31 +34,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.graphite.app.core.theme.GraphiteBlack
-import com.graphite.app.core.theme.GraphiteOrange
-import com.graphite.app.core.theme.GraphiteSurfaceVariant
-import com.graphite.app.data.repository.GraphiteRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
-import android.content.Context
-import android.widget.Toast
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.core.importer.ParsedDocument
 import com.graphite.app.core.importer.SlideContent
+import com.graphite.app.core.theme.GraphiteBlack
+import com.graphite.app.core.theme.GraphiteOrange
+import com.graphite.app.core.theme.GraphiteSurfaceVariant
 import com.graphite.app.data.model.BookCoverType
+import com.graphite.app.data.repository.GraphiteRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun ReaderViewScreen(
@@ -61,6 +76,8 @@ fun ReaderViewScreen(
     var fontSize by remember { mutableFloatStateOf(16f) }
     var showFontDialog by remember { mutableStateOf(false) }
     var isBookmarked by remember { mutableStateOf(book?.isBookmarked == true) }
+    var isFullscreen by remember { mutableStateOf(false) }
+    var showPagePill by remember { mutableStateOf(true) }
 
     if (book == null) {
         Box(modifier = modifier.fillMaxSize().background(GraphiteBlack), contentAlignment = Alignment.Center) {
@@ -84,6 +101,13 @@ fun ReaderViewScreen(
 
     var parsedDoc by remember { mutableStateOf<ParsedDocument?>(null) }
     var isLoadingDoc by remember { mutableStateOf(false) }
+
+    // Auto-disappear floating page indicator pill after 1.2s
+    LaunchedEffect(pdfCurrentPage, pptxCurrentSlide, isFullscreen) {
+        showPagePill = true
+        delay(1200)
+        showPagePill = false
+    }
 
     LaunchedEffect(book.filePath) {
         if (!book.filePath.isNullOrBlank()) {
@@ -124,274 +148,253 @@ fun ReaderViewScreen(
 
     Scaffold(
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(GraphiteBlack)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+            AnimatedVisibility(
+                visible = !isFullscreen,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
             ) {
                 Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(GraphiteBlack)
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = book.title,
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            fontFamily = FontFamily.Serif
-                        )
-                        Text(
-                            text = subtitle,
-                            color = Color.Gray,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Open with external app (Word, PowerPoint, Google Docs, etc.)
-                    if (book.filePath != null) {
-                        IconButton(
-                            onClick = {
-                                DocumentContentParser.openWithExternalApp(
-                                    context,
-                                    File(book.filePath),
-                                    book.mimeType
-                                )
-                            }
-                        ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onNavigateBack) {
                             Icon(
-                                imageVector = Icons.Default.OpenInNew,
-                                contentDescription = "Open in External App",
-                                tint = Color.LightGray
-                            )
-                        }
-                    }
-
-                    if (!isPdf && !isPptx) {
-                        IconButton(onClick = { showFontDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.FormatSize,
-                                contentDescription = "Adjust Font",
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
                                 tint = Color.White
                             )
                         }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = book.title,
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                fontFamily = FontFamily.Serif
+                            )
+                            Text(
+                                text = subtitle,
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                maxLines = 1
+                            )
+                        }
                     }
 
-                    // Bookmark button (Functional with persistence)
-                    IconButton(
-                        onClick = {
-                            isBookmarked = !isBookmarked
-                            GraphiteRepository.toggleBookmarkBook(book.id)
-                            GraphiteRepository.toggleBookmarkNotebook(book.id)
-                            val msg = if (isBookmarked) "Page bookmarked" else "Bookmark removed"
-                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        }
-                    ) {
-                        Icon(
-                            imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                            contentDescription = "Bookmark Page",
-                            tint = if (isBookmarked) GraphiteOrange else Color.LightGray
-                        )
-                    }
-                }
-            }
-        },
-        bottomBar = {
-            Surface(
-                color = Color(0xFF141414),
-                modifier = Modifier.fillMaxWidth().navigationBarsPadding()
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = when {
-                                isPdf -> "Page ${pdfCurrentPage + 1} of ${maxOf(1, pdfTotalPages)}"
-                                isPptx -> "Slide ${pptxCurrentSlide + 1} of ${maxOf(1, pptxSlides.size.ifZero(book.totalChapters))}"
-                                else -> "Chapter ${book.currentChapter} of ${book.totalChapters}"
-                            },
-                            color = Color.Gray,
-                            fontSize = 12.sp
-                        )
-                        Text(
-                            text = when {
-                                isPdf -> "${((pdfCurrentPage + 1) * 100 / maxOf(1, pdfTotalPages))}%"
-                                isPptx -> "${((pptxCurrentSlide + 1) * 100 / maxOf(1, pptxSlides.size.ifZero(book.totalChapters)))}%"
-                                else -> "${currentProgress.toInt()}%"
-                            },
-                            color = GraphiteOrange,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Slider(
-                        value = when {
-                            isPdf -> pdfCurrentPage.toFloat()
-                            isPptx -> pptxCurrentSlide.toFloat()
-                            else -> currentProgress
-                        },
-                        onValueChange = {
-                            when {
-                                isPdf -> {
-                                    pdfCurrentPage = it.toInt().coerceIn(0, maxOf(0, pdfTotalPages - 1))
-                                    val progress = ((pdfCurrentPage + 1) * 100 / maxOf(1, pdfTotalPages))
-                                    GraphiteRepository.updateBookProgress(book.id, progress)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Open with external app (Word, PowerPoint, Google Docs, etc.)
+                        if (book.filePath != null) {
+                            IconButton(
+                                onClick = {
+                                    DocumentContentParser.openWithExternalApp(
+                                        context,
+                                        File(book.filePath),
+                                        book.mimeType
+                                    )
                                 }
-                                isPptx -> {
-                                    val maxSlide = maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1)
-                                    pptxCurrentSlide = it.toInt().coerceIn(0, maxSlide)
-                                    val progress = ((pptxCurrentSlide + 1) * 100 / maxOf(1, maxSlide + 1))
-                                    GraphiteRepository.updateBookProgress(book.id, progress)
-                                }
-                                else -> {
-                                    currentProgress = it
-                                    GraphiteRepository.updateBookProgress(book.id, it.toInt())
-                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.OpenInNew,
+                                    contentDescription = "Open in External App",
+                                    tint = Color.LightGray
+                                )
                             }
-                        },
-                        valueRange = when {
-                            isPdf -> 0f..maxOf(0, pdfTotalPages - 1).toFloat()
-                            isPptx -> 0f..maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1).toFloat()
-                            else -> 0f..100f
-                        },
-                        colors = SliderDefaults.colors(
-                            thumbColor = GraphiteOrange,
-                            activeTrackColor = GraphiteOrange,
-                            inactiveTrackColor = Color(0xFF333333)
-                        )
-                    )
+                        }
+
+                        if (!isPdf && !isPptx) {
+                            IconButton(onClick = { showFontDialog = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.FormatSize,
+                                    contentDescription = "Adjust Font",
+                                    tint = Color.White
+                                )
+                            }
+                        }
+
+                        // Bookmark button (Functional with persistence)
+                        IconButton(
+                            onClick = {
+                                isBookmarked = !isBookmarked
+                                GraphiteRepository.toggleBookmarkBook(book.id)
+                                GraphiteRepository.toggleBookmarkNotebook(book.id)
+                                val msg = if (isBookmarked) "Page bookmarked" else "Bookmark removed"
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        ) {
+                            Icon(
+                                imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                contentDescription = "Bookmark Page",
+                                tint = if (isBookmarked) GraphiteOrange else Color.LightGray
+                            )
+                        }
+                    }
                 }
             }
         },
         containerColor = GraphiteBlack
     ) { innerPadding ->
-        when {
-            isPdf && book.filePath != null -> {
-                PdfDocumentViewer(
-                    filePath = book.filePath,
-                    currentPageIndex = pdfCurrentPage,
-                    onTotalPagesLoaded = { count ->
-                        pdfTotalPages = maxOf(1, count)
-                    },
-                    onNextPage = {
-                        if (pdfCurrentPage < pdfTotalPages - 1) {
-                            pdfCurrentPage++
-                            val progress = ((pdfCurrentPage + 1) * 100 / pdfTotalPages)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(GraphiteBlack)
+        ) {
+            when {
+                isPdf && book.filePath != null -> {
+                    PdfDocumentViewer(
+                        filePath = book.filePath,
+                        currentPageIndex = pdfCurrentPage,
+                        totalPages = maxOf(1, pdfTotalPages),
+                        onTotalPagesLoaded = { count ->
+                            pdfTotalPages = maxOf(1, count)
+                        },
+                        onNextPage = {
+                            if (pdfCurrentPage < pdfTotalPages - 1) {
+                                pdfCurrentPage++
+                                val progress = ((pdfCurrentPage + 1) * 100 / pdfTotalPages)
+                                GraphiteRepository.updateBookProgress(book.id, progress)
+                            }
+                        },
+                        onPreviousPage = {
+                            if (pdfCurrentPage > 0) {
+                                pdfCurrentPage--
+                                val progress = ((pdfCurrentPage + 1) * 100 / pdfTotalPages)
+                                GraphiteRepository.updateBookProgress(book.id, progress)
+                            }
+                        },
+                        onToggleFullscreen = {
+                            isFullscreen = !isFullscreen
+                        },
+                        onUserInteraction = {
+                            showPagePill = true
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                    )
+                }
+                isPptx -> {
+                    PptxPresentationViewer(
+                        slides = if (pptxSlides.isNotEmpty()) pptxSlides else (parsedDoc?.slides ?: emptyList()),
+                        fallbackContent = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
+                        currentSlideIndex = pptxCurrentSlide,
+                        onSlideSelected = { idx ->
+                            pptxCurrentSlide = idx
+                            val total = maxOf(1, pptxSlides.size.ifZero(book.totalChapters))
+                            val progress = ((pptxCurrentSlide + 1) * 100 / total)
                             GraphiteRepository.updateBookProgress(book.id, progress)
-                        }
-                    },
-                    onPreviousPage = {
-                        if (pdfCurrentPage > 0) {
-                            pdfCurrentPage--
-                            val progress = ((pdfCurrentPage + 1) * 100 / pdfTotalPages)
-                            GraphiteRepository.updateBookProgress(book.id, progress)
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                )
-            }
-            isPptx -> {
-                PptxPresentationViewer(
-                    slides = if (pptxSlides.isNotEmpty()) pptxSlides else (parsedDoc?.slides ?: emptyList()),
-                    fallbackContent = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
-                    currentSlideIndex = pptxCurrentSlide,
-                    onSlideSelected = { idx ->
-                        pptxCurrentSlide = idx
-                        val total = maxOf(1, pptxSlides.size.ifZero(book.totalChapters))
-                        val progress = ((pptxCurrentSlide + 1) * 100 / total)
-                        GraphiteRepository.updateBookProgress(book.id, progress)
-                    },
-                    onNextSlide = {
-                        val maxSlide = maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1)
-                        if (pptxCurrentSlide < maxSlide) {
-                            pptxCurrentSlide++
-                            val progress = ((pptxCurrentSlide + 1) * 100 / (maxSlide + 1))
-                            GraphiteRepository.updateBookProgress(book.id, progress)
-                        }
-                    },
-                    onPreviousSlide = {
-                        if (pptxCurrentSlide > 0) {
-                            pptxCurrentSlide--
+                        },
+                        onNextSlide = {
                             val maxSlide = maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1)
-                            val progress = ((pptxCurrentSlide + 1) * 100 / (maxSlide + 1))
-                            GraphiteRepository.updateBookProgress(book.id, progress)
+                            if (pptxCurrentSlide < maxSlide) {
+                                pptxCurrentSlide++
+                                val progress = ((pptxCurrentSlide + 1) * 100 / (maxSlide + 1))
+                                GraphiteRepository.updateBookProgress(book.id, progress)
+                            }
+                        },
+                        onPreviousSlide = {
+                            if (pptxCurrentSlide > 0) {
+                                pptxCurrentSlide--
+                                val maxSlide = maxOf(0, pptxSlides.size.ifZero(book.totalChapters) - 1)
+                                val progress = ((pptxCurrentSlide + 1) * 100 / (maxSlide + 1))
+                                GraphiteRepository.updateBookProgress(book.id, progress)
+                            }
+                        },
+                        documentFile = book.filePath?.let { File(it) },
+                        mimeType = book.mimeType,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                    )
+                }
+                isDocx -> {
+                    val docParagraphs = remember(parsedDoc, book.content) {
+                        if (parsedDoc?.paragraphs?.isNotEmpty() == true) {
+                            parsedDoc!!.paragraphs
+                        } else if (book.content.isNotBlank()) {
+                            book.content.split("\n\n").filter { it.isNotBlank() }
+                        } else {
+                            listOf("Document: ${book.title}")
                         }
-                    },
-                    documentFile = book.filePath?.let { File(it) },
-                    mimeType = book.mimeType,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                )
-            }
-            isDocx -> {
-                val docParagraphs = remember(parsedDoc, book.content) {
-                    if (parsedDoc?.paragraphs?.isNotEmpty() == true) {
-                        parsedDoc!!.paragraphs
-                    } else if (book.content.isNotBlank()) {
-                        book.content.split("\n\n").filter { it.isNotBlank() }
-                    } else {
-                        listOf("Document: ${book.title}")
+                    }
+                    DocxDocumentViewer(
+                        title = book.title,
+                        paragraphs = docParagraphs,
+                        fontSize = fontSize,
+                        onFontSizeChange = { fontSize = it },
+                        documentFile = book.filePath?.let { File(it) },
+                        mimeType = book.mimeType,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                    )
+                }
+                isXlsx -> {
+                    XlsxSpreadsheetViewer(
+                        title = book.title,
+                        content = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
+                        documentFile = book.filePath?.let { File(it) },
+                        mimeType = book.mimeType,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                    )
+                }
+                else -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 24.dp, vertical = 16.dp)
+                    ) {
+                        Text(
+                            text = book.content,
+                            color = Color(0xFFE0E0E0),
+                            fontSize = fontSize.sp,
+                            lineHeight = (fontSize * 1.6f).sp,
+                            fontFamily = FontFamily.Serif
+                        )
                     }
                 }
-                DocxDocumentViewer(
-                    title = book.title,
-                    paragraphs = docParagraphs,
-                    fontSize = fontSize,
-                    onFontSizeChange = { fontSize = it },
-                    documentFile = book.filePath?.let { File(it) },
-                    mimeType = book.mimeType,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                )
             }
-            isXlsx -> {
-                XlsxSpreadsheetViewer(
-                    title = book.title,
-                    content = parsedDoc?.extractedText?.ifBlank { null } ?: book.content,
-                    documentFile = book.filePath?.let { File(it) },
-                    mimeType = book.mimeType,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                )
-            }
-            else -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 24.dp, vertical = 16.dp)
+
+            // Sleek floating page pill indicator that auto-disappears after 1.2s
+            AnimatedVisibility(
+                visible = showPagePill,
+                enter = fadeIn() + scaleIn(initialScale = 0.88f),
+                exit = fadeOut() + scaleOut(targetScale = 0.88f),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 24.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xDD1E1E22),
+                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                    shadowElevation = 8.dp
                 ) {
                     Text(
-                        text = book.content,
-                        color = Color(0xFFE0E0E0),
-                        fontSize = fontSize.sp,
-                        lineHeight = (fontSize * 1.6f).sp,
-                        fontFamily = FontFamily.Serif
+                        text = when {
+                            isPdf -> "Page ${pdfCurrentPage + 1} of ${maxOf(1, pdfTotalPages)}"
+                            isPptx -> "Slide ${pptxCurrentSlide + 1} of ${maxOf(1, pptxSlides.size.ifZero(book.totalChapters))}"
+                            else -> "${currentProgress.toInt()}%"
+                        },
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp)
                     )
                 }
             }
@@ -427,21 +430,41 @@ fun ReaderViewScreen(
 }
 
 /**
- * Native PDF renderer utilizing Android's PdfRenderer API for Moto Pad 60 Pro tablet viewing.
+ * Native PDF renderer utilizing Android's PdfRenderer API for Moto Pad 60 Pro tablet viewing
+ * with high-fidelity pinch-to-zoom, pan, edge-tap navigation, and smooth 3D page curl transition.
  */
 @Composable
 private fun PdfDocumentViewer(
     filePath: String,
     currentPageIndex: Int,
+    totalPages: Int,
     onTotalPagesLoaded: (Int) -> Unit,
     onNextPage: () -> Unit,
     onPreviousPage: () -> Unit,
+    onToggleFullscreen: () -> Unit,
+    onUserInteraction: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val file = remember(filePath) { File(filePath) }
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var renderError by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+
+    // Zoom & Pan state
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var panOffset by remember { mutableStateOf(Offset.Zero) }
+
+    // 3D Page Curl & Drag animation
+    val scope = rememberCoroutineScope()
+    val curlRotation = remember { Animatable(0f) }
+    var totalDragX by remember { mutableFloatStateOf(0f) }
+
+    val density = LocalDensity.current
+
+    LaunchedEffect(currentPageIndex) {
+        zoomScale = 1f
+        panOffset = Offset.Zero
+    }
 
     LaunchedEffect(filePath, currentPageIndex) {
         isLoading = true
@@ -466,8 +489,8 @@ private fun PdfDocumentViewer(
                 if (currentPageIndex in 0 until count) {
                     val page = renderer.openPage(currentPageIndex)
                     // Render page at sharp tablet resolution
-                    val width = (page.width * 1.6f).toInt()
-                    val height = (page.height * 1.6f).toInt()
+                    val width = (page.width * 1.8f).toInt()
+                    val height = (page.height * 1.8f).toInt()
                     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     val canvas = Canvas(bmp)
                     canvas.drawColor(android.graphics.Color.WHITE)
@@ -505,7 +528,105 @@ private fun PdfDocumentViewer(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0D0D0D)),
+            .background(Color(0xFF0D0D0D))
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    onUserInteraction()
+                    val newZoom = (zoomScale * zoom).coerceIn(1f, 4f)
+                    zoomScale = newZoom
+                    if (newZoom > 1.02f) {
+                        val maxPanX = (size.width * (newZoom - 1f)) / 2f
+                        val maxPanY = (size.height * (newZoom - 1f)) / 2f
+                        panOffset = Offset(
+                            (panOffset.x + pan.x).coerceIn(-maxPanX, maxPanX),
+                            (panOffset.y + pan.y).coerceIn(-maxPanY, maxPanY)
+                        )
+                    } else {
+                        panOffset = Offset.Zero
+                    }
+                }
+            }
+            .pointerInput(zoomScale, currentPageIndex, totalPages) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        onUserInteraction()
+                        if (zoomScale > 1.05f) {
+                            zoomScale = 1f
+                            panOffset = Offset.Zero
+                        } else {
+                            zoomScale = 2.2f
+                        }
+                    },
+                    onTap = { tapOffset ->
+                        onUserInteraction()
+                        if (zoomScale <= 1.05f) {
+                            val w = size.width
+                            if (tapOffset.x < w * 0.22f) {
+                                if (currentPageIndex > 0) {
+                                    scope.launch {
+                                        curlRotation.snapTo(35f)
+                                        curlRotation.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
+                                    }
+                                    onPreviousPage()
+                                }
+                            } else if (tapOffset.x > w * 0.78f) {
+                                if (currentPageIndex < totalPages - 1) {
+                                    scope.launch {
+                                        curlRotation.snapTo(-35f)
+                                        curlRotation.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
+                                    }
+                                    onNextPage()
+                                }
+                            } else {
+                                onToggleFullscreen()
+                            }
+                        } else {
+                            onToggleFullscreen()
+                        }
+                    }
+                )
+            }
+            .pointerInput(zoomScale, currentPageIndex, totalPages) {
+                if (zoomScale <= 1.05f) {
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            totalDragX = 0f
+                            onUserInteraction()
+                        },
+                        onHorizontalDrag = { _, dragAmount ->
+                            totalDragX += dragAmount
+                            val progress = (totalDragX / (size.width.toFloat().coerceAtLeast(1f))).coerceIn(-1f, 1f)
+                            scope.launch { curlRotation.snapTo(progress * -50f) }
+                        },
+                        onDragEnd = {
+                            if (totalDragX < -75f && currentPageIndex < totalPages - 1) {
+                                scope.launch {
+                                    curlRotation.animateTo(-85f, tween(160, easing = FastOutSlowInEasing))
+                                    onNextPage()
+                                    curlRotation.snapTo(45f)
+                                    curlRotation.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
+                                }
+                            } else if (totalDragX > 75f && currentPageIndex > 0) {
+                                scope.launch {
+                                    curlRotation.animateTo(85f, tween(160, easing = FastOutSlowInEasing))
+                                    onPreviousPage()
+                                    curlRotation.snapTo(-45f)
+                                    curlRotation.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
+                                }
+                            } else {
+                                scope.launch {
+                                    curlRotation.animateTo(0f, tween(180, easing = FastOutSlowInEasing))
+                                }
+                            }
+                            totalDragX = 0f
+                        },
+                        onDragCancel = {
+                            scope.launch { curlRotation.animateTo(0f, tween(180)) }
+                            totalDragX = 0f
+                        }
+                    )
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         if (isLoading) {
@@ -549,7 +670,7 @@ private fun PdfDocumentViewer(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(16.dp),
+                        .padding(if (zoomScale > 1f) 0.dp else 16.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Image(
@@ -557,45 +678,20 @@ private fun PdfDocumentViewer(
                         contentDescription = "PDF Page ${currentPageIndex + 1}",
                         modifier = Modifier
                             .fillMaxHeight()
+                            .graphicsLayer {
+                                scaleX = zoomScale
+                                scaleY = zoomScale
+                                translationX = panOffset.x
+                                translationY = panOffset.y
+                                if (zoomScale <= 1.05f && curlRotation.value != 0f) {
+                                    cameraDistance = 14f * density.density
+                                    rotationY = curlRotation.value
+                                    transformOrigin = TransformOrigin(if (curlRotation.value < 0) 1f else 0f, 0.5f)
+                                    shadowElevation = (kotlin.math.abs(curlRotation.value) / 3f).dp.toPx()
+                                }
+                            }
                             .clip(RoundedCornerShape(4.dp))
                     )
-
-                    // Overlay Navigation Touch Targets on Left and Right
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.Center)
-                            .padding(horizontal = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        IconButton(
-                            onClick = onPreviousPage,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.5f))
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Previous Page",
-                                tint = Color.White
-                            )
-                        }
-
-                        IconButton(
-                            onClick = onNextPage,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.5f))
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                contentDescription = "Next Page",
-                                tint = Color.White
-                            )
-                        }
-                    }
                 }
             }
         }
