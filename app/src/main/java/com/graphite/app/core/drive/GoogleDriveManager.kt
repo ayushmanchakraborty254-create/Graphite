@@ -149,7 +149,8 @@ interface DriveApiV3Uploader {
 }
 
 class DefaultDriveApiV3Uploader(
-    private val context: Context
+    private val context: Context,
+    private val secureStorage: SecureStorage? = null
 ) : DriveApiV3Uploader {
 
     private fun getDriveService(accountEmail: String): Drive {
@@ -158,7 +159,35 @@ class DefaultDriveApiV3Uploader(
             context,
             listOf(GraphiteConfig.DRIVE_SCOPE_FILE)
         )
-        credential.selectedAccountName = accountEmail
+        val signInAccount = GoogleSignIn.getLastSignedInAccount(context)
+        val storage = secureStorage ?: try { com.graphite.app.GraphiteApplication.instance.secureStorage } catch (_: Exception) { null }
+
+        val resolvedEmail = if (accountEmail.isNotBlank() && accountEmail != "authorized_user" && accountEmail != "null") {
+            accountEmail
+        } else {
+            signInAccount?.account?.name?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: signInAccount?.email?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: storage?.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: storage?.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: storage?.getString(GoogleDriveManager.KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+                ?: ""
+        }
+
+        if (resolvedEmail.isBlank() || resolvedEmail == "authorized_user" || resolvedEmail == "null") {
+            throw IllegalStateException("Google account authorization required. Please sign in with your Google account in Graphite.")
+        }
+
+        // Auto-heal storage so future operations have the genuine email
+        storage?.putString(GoogleDriveManager.KEY_DRIVE_ACCOUNT_EMAIL, resolvedEmail)
+        storage?.putString("google_user_email", resolvedEmail)
+        storage?.putString("google_account_email", resolvedEmail)
+
+        val googleAccount = signInAccount?.account?.takeIf { !it.name.isNullOrBlank() }
+            ?: Account(resolvedEmail, "com.google")
+
+        credential.selectedAccount = googleAccount
+        credential.selectedAccountName = resolvedEmail
 
         return Drive.Builder(
             NetHttpTransport(),
@@ -397,7 +426,7 @@ class DefaultDriveApiV3Uploader(
  */
 class GoogleDriveManager(
     private val secureStorage: SecureStorage,
-    private val uploaderProvider: (Context) -> DriveApiV3Uploader = { ctx -> DefaultDriveApiV3Uploader(ctx) },
+    private val uploaderProvider: (Context) -> DriveApiV3Uploader = { ctx -> DefaultDriveApiV3Uploader(ctx, secureStorage) },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
 
@@ -413,9 +442,16 @@ class GoogleDriveManager(
     val customFolders: StateFlow<List<DriveFolder>> = _customFolders.asStateFlow()
 
     init {
-        val savedAccount = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+        restoreAuthState()
+    }
+
+    private fun restoreAuthState() {
+        val savedAccount = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
         if (!savedAccount.isNullOrBlank()) {
-            _authStatus.value = DriveAuthStatus.Authorized(savedAccount)
+            saveAuthorizedAccount(savedAccount)
         }
     }
 
@@ -439,13 +475,19 @@ class GoogleDriveManager(
      * Checks whether the user has already authorized Drive access on this device.
      */
     fun hasDrivePermission(context: Context): Boolean {
-        val account = GoogleSignIn.getLastSignedInAccount(context) ?: return false
-        val hasScope = GoogleSignIn.hasPermissions(account, driveScope)
-        if (hasScope && account.email != null) {
+        val account = GoogleSignIn.getLastSignedInAccount(context)
+        val hasScope = account != null && GoogleSignIn.hasPermissions(account, driveScope)
+        val resolvedEmail = (account?.account?.name ?: account?.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+
+        if (!resolvedEmail.isNullOrBlank()) {
             if (_authStatus.value !is DriveAuthStatus.Authorized) {
-                saveAuthorizedAccount(account.email!!)
+                saveAuthorizedAccount(resolvedEmail)
             }
-            return true
+            return hasScope || account != null
         }
         return false
     }
@@ -473,7 +515,14 @@ class GoogleDriveManager(
                 return Result.failure(SecurityException("User did not grant Google Drive permissions."))
             }
 
-            val email = account.email ?: "authorized_user"
+            val email = (account.account?.name ?: account.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "null" }
+                ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "null" }
+                ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+            if (email.isNullOrBlank()) {
+                _authStatus.value = DriveAuthStatus.NotAuthorized
+                return Result.failure(IllegalStateException("No valid Google account email found."))
+            }
             saveAuthorizedAccount(email)
             Result.success(email)
         } catch (e: Exception) {
@@ -483,8 +532,11 @@ class GoogleDriveManager(
     }
 
     fun saveAuthorizedAccount(email: String) {
-        secureStorage.putString(KEY_DRIVE_ACCOUNT_EMAIL, email)
-        _authStatus.value = DriveAuthStatus.Authorized(email)
+        val cleanEmail = email.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" } ?: return
+        secureStorage.putString(KEY_DRIVE_ACCOUNT_EMAIL, cleanEmail)
+        secureStorage.putString("google_user_email", cleanEmail)
+        secureStorage.putString("google_account_email", cleanEmail)
+        _authStatus.value = DriveAuthStatus.Authorized(cleanEmail)
     }
 
     /**
@@ -492,6 +544,7 @@ class GoogleDriveManager(
      */
     fun disconnect() {
         secureStorage.remove(KEY_DRIVE_ACCOUNT_EMAIL)
+        secureStorage.remove("google_drive_authorized_account_email")
         _authStatus.value = DriveAuthStatus.NotAuthorized
         _uploadState.value = DriveUploadState.Idle
     }
@@ -506,10 +559,14 @@ class GoogleDriveManager(
         notebook: NotebookItem,
         preselectedFolder: DriveFolder? = null
     ): Boolean = withContext(ioDispatcher) {
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: getAuthorizedAccountEmail()
         if (accountEmail.isNullOrBlank()) {
             return@withContext false // Caller should launch authorization intent
         }
+        saveAuthorizedAccount(accountEmail)
 
         // Fetch folders if possible under drive.file, always including Root in available options
         val uploader = uploaderProvider(context)
@@ -527,7 +584,19 @@ class GoogleDriveManager(
     /**
      * Returns the currently authorized Google Account email, if any.
      */
-    fun getAuthorizedAccountEmail(): String? = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+    fun getAuthorizedAccountEmail(): String? {
+        val saved = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+        if (!saved.isNullOrBlank()) return saved
+        val googleUserEmail = secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+        if (!googleUserEmail.isNullOrBlank()) return googleUserEmail
+        val googleEmail = secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+        if (!googleEmail.isNullOrBlank()) return googleEmail
+        return try {
+            com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     /**
      * Step 2: User chose a destination folder. Show the final confirmation dialog
@@ -1068,10 +1137,13 @@ class GoogleDriveManager(
         context: Context,
         targetFolderId: String? = null
     ): BookshelfSyncReport = withContext(ioDispatcher) {
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
-            ?: secureStorage.getString("google_account_email")
-            ?: getAuthorizedAccountEmail()
-            ?: GoogleSignIn.getLastSignedInAccount(context)?.email
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.account?.name?.takeIf { it.isNotBlank() && it != "null" }
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.email?.takeIf { it.isNotBlank() && it != "null" }
         if (accountEmail.isNullOrBlank()) {
             return@withContext BookshelfSyncReport(
                 isSuccess = false,
@@ -1082,6 +1154,7 @@ class GoogleDriveManager(
                 message = "Google Drive authorization required. Please authorize first."
             )
         }
+        saveAuthorizedAccount(accountEmail)
 
         _isSyncingBookshelf.value = true
         _bookshelfSyncStatus.value = "Starting Drive sync..."
@@ -1245,13 +1318,21 @@ class GoogleDriveManager(
     val notesSyncStatus: StateFlow<String?> = _notesSyncStatus.asStateFlow()
 
     suspend fun syncNotesWithDrive(context: Context): Result<Int> = withContext(ioDispatcher) {
-        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
-            ?: secureStorage.getString("google_account_email")
-            ?: getAuthorizedAccountEmail()
-            ?: GoogleSignIn.getLastSignedInAccount(context)?.email
+        val accountEmail = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.account?.name?.takeIf { it.isNotBlank() && it != "null" }
+            ?: GoogleSignIn.getLastSignedInAccount(context)?.email?.takeIf { it.isNotBlank() && it != "null" }
+
         if (accountEmail.isNullOrBlank()) {
+            _isSyncingNotes.value = false
+            _notesSyncStatus.value = "Google account authorization required"
             return@withContext Result.failure(IllegalStateException("Google account authorization required to sync notes."))
         }
+
+        saveAuthorizedAccount(accountEmail)
 
         if (!hasDrivePermission(context)) {
             _isSyncingNotes.value = false
@@ -1399,7 +1480,7 @@ class GoogleDriveManager(
 
     companion object {
         private const val TAG = "GoogleDriveManager"
-        private const val KEY_DRIVE_ACCOUNT_EMAIL = "google_drive_authorized_account_email"
+        const val KEY_DRIVE_ACCOUNT_EMAIL = "google_drive_authorized_account_email"
         private const val KEY_BOOKSHELF_SYNC_FOLDER_ID = "google_drive_bookshelf_sync_folder_id"
         private const val KEY_BOOKSHELF_SYNC_FOLDER_NAME = "google_drive_bookshelf_sync_folder_name"
         private const val KEY_BOOKSHELF_LAST_SYNC_TIME = "google_drive_bookshelf_last_sync_time"

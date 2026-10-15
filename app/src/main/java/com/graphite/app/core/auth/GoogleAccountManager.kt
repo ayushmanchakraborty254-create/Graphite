@@ -42,15 +42,18 @@ class GoogleAccountManager(
     }
 
     private fun restoreFromStorage() {
-        val email = secureStorage.getString(KEY_GOOGLE_EMAIL)
+        val email = secureStorage.getString(KEY_GOOGLE_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_drive_authorized_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
         val name = secureStorage.getString(KEY_GOOGLE_NAME)
         val photoUrl = secureStorage.getString(KEY_GOOGLE_PHOTO)
         val idToken = secureStorage.getString(KEY_GOOGLE_ID_TOKEN)
 
-        if (!email.isNullOrBlank() && !name.isNullOrBlank()) {
+        if (!email.isNullOrBlank()) {
+            val displayName = if (!name.isNullOrBlank()) name else email.substringBefore("@")
             _currentUser.value = GoogleProfile(
                 email = email,
-                displayName = name,
+                displayName = displayName,
                 photoUrl = photoUrl,
                 idToken = idToken
             )
@@ -58,6 +61,14 @@ class GoogleAccountManager(
             try {
                 com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
             } catch (_: Exception) {}
+
+            val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
+            supabaseAuthManager?.setSession(
+                SupabaseSession(
+                    accessToken = idToken ?: GraphiteConfig.supabasePublishableKey,
+                    user = SupabaseUser(id = deterministicUuid, email = email)
+                )
+            )
         }
     }
 
@@ -80,7 +91,8 @@ class GoogleAccountManager(
             val task = GoogleSignIn.getSignedInAccountFromIntent(data)
             val account: GoogleSignInAccount = task.getResult(ApiException::class.java)
 
-            val email = account.email ?: "user@gmail.com"
+            val rawEmail = (account.account?.name ?: account.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            val email = rawEmail ?: "user@gmail.com"
             val name = account.displayName ?: email.substringBefore("@")
             val photoUrl = account.photoUrl?.toString()
             val idToken = account.idToken
@@ -94,6 +106,7 @@ class GoogleAccountManager(
 
             // Persist to SecureStorage
             secureStorage.putString(KEY_GOOGLE_EMAIL, email)
+            secureStorage.putString("google_account_email", email)
             secureStorage.putString(KEY_GOOGLE_NAME, name)
             secureStorage.putString(KEY_GOOGLE_PHOTO, photoUrl)
             secureStorage.putString(KEY_GOOGLE_ID_TOKEN, idToken)
@@ -151,6 +164,7 @@ class GoogleAccountManager(
 
     fun setProfileDirectly(profile: GoogleProfile) {
         secureStorage.putString(KEY_GOOGLE_EMAIL, profile.email)
+        secureStorage.putString("google_account_email", profile.email)
         secureStorage.putString(KEY_GOOGLE_NAME, profile.displayName)
         secureStorage.putString(KEY_GOOGLE_PHOTO, profile.photoUrl)
         secureStorage.putString(KEY_GOOGLE_ID_TOKEN, profile.idToken)
@@ -181,6 +195,8 @@ class GoogleAccountManager(
 
     fun clearLocalSession() {
         secureStorage.remove(KEY_GOOGLE_EMAIL)
+        secureStorage.remove("google_account_email")
+        secureStorage.remove("google_drive_authorized_account_email")
         secureStorage.remove(KEY_GOOGLE_NAME)
         secureStorage.remove(KEY_GOOGLE_PHOTO)
         secureStorage.remove(KEY_GOOGLE_ID_TOKEN)
