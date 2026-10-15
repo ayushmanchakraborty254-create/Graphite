@@ -80,6 +80,10 @@ fun BookshelfScreen(
     val isSyncingDrive by driveManager.isSyncingBookshelf.collectAsState()
     val driveSyncStatus by driveManager.bookshelfSyncStatus.collectAsState()
 
+    LaunchedEffect(Unit) {
+        GraphiteRepository.cleanBookDuplicatesAndGhosts()
+    }
+
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -327,7 +331,39 @@ fun BookshelfScreen(
             )
 
             // Bookshelf List or Grid
-            if (isGridView) {
+            if (filteredBooks.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = 88.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MenuBook,
+                            contentDescription = null,
+                            tint = Color.DarkGray,
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = if (searchQuery.isNotBlank()) "No matching PDF books" else "No PDF books in Bookshelf",
+                            color = Color.Gray,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (searchQuery.isNotBlank()) "Try a different search query" else "Tap + to import a PDF document or sync with Google Drive",
+                            color = Color(0xFF666666),
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            } else if (isGridView) {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 130.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -378,7 +414,9 @@ fun BookshelfScreen(
 
         // Floating Action Button (FAB) matching Page 2
         FloatingActionButton(
-            onClick = { showImportDialog = true },
+            onClick = {
+                fileImportLauncher.launch(arrayOf("application/pdf"))
+            },
             containerColor = GraphiteOrange,
             contentColor = Color.White,
             shape = CircleShape,
@@ -389,7 +427,7 @@ fun BookshelfScreen(
         ) {
             Icon(
                 imageVector = Icons.Default.Add,
-                contentDescription = "Import or Add Book",
+                contentDescription = "Import PDF Document",
                 modifier = Modifier.size(28.dp)
             )
         }
@@ -411,32 +449,7 @@ fun BookshelfScreen(
         ImportBookDialog(
             onDismiss = { showImportDialog = false },
             onLaunchImport = {
-                fileImportLauncher.launch(
-                    arrayOf(
-                        "application/pdf",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        "application/msword",
-                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        "application/vnd.ms-powerpoint",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        "text/plain",
-                        "*/*"
-                    )
-                )
-            },
-            onAddBook = { title, author, content ->
-                val newBook = Book(
-                    title = GraphiteRepository.disambiguateBookTitle(title),
-                    author = author.ifBlank { "Unknown Author" },
-                    content = content.ifBlank { "Sample imported content." },
-                    coverType = BookCoverType.CUSTOM
-                )
-                GraphiteRepository.addBook(newBook)
-                if (driveManager.hasBookshelfSyncConfigured()) {
-                    scope.launch {
-                        driveManager.uploadBookToSyncedDriveFolder(context, newBook)
-                    }
-                }
+                fileImportLauncher.launch(arrayOf("application/pdf"))
                 showImportDialog = false
             }
         )
@@ -1104,83 +1117,31 @@ private fun BookshelfItemGridCard(
 @Composable
 private fun ImportBookDialog(
     onDismiss: () -> Unit,
-    onLaunchImport: () -> Unit,
-    onAddBook: (String, String, String) -> Unit
+    onLaunchImport: () -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var author by remember { mutableStateOf("") }
-    var content by remember { mutableStateOf("") }
-
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import E-Book / Document", color = Color.White, fontWeight = FontWeight.Bold) },
+        title = { Text("Import PDF Document", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Tablet SAF file picker option
-                OutlinedButton(
+                Text(
+                    "Select a PDF document (.pdf) from your device to import into Bookshelf.",
+                    color = Color.LightGray,
+                    fontSize = 13.sp
+                )
+                Button(
                     onClick = onLaunchImport,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = GraphiteOrange)
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
                 ) {
                     Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import PDF / Word / PPTX", fontWeight = FontWeight.SemiBold)
+                    Text("Select PDF Document", fontWeight = FontWeight.SemiBold, color = Color.White)
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    HorizontalDivider(modifier = Modifier.weight(1f), color = GraphiteSurfaceVariant)
-                    Text(" OR CREATE CUSTOM ", color = Color.Gray, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp))
-                    HorizontalDivider(modifier = Modifier.weight(1f), color = GraphiteSurfaceVariant)
-                }
-
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = { Text("Title", color = Color.Gray) },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    )
-                )
-                OutlinedTextField(
-                    value = author,
-                    onValueChange = { author = it },
-                    label = { Text("Author", color = Color.Gray) },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    )
-                )
-                OutlinedTextField(
-                    value = content,
-                    onValueChange = { content = it },
-                    label = { Text("Sample Text / Chapter Preview", color = Color.Gray) },
-                    maxLines = 4,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    )
-                )
             }
         },
-        confirmButton = {
-            Button(
-                onClick = {
-                    if (title.isNotBlank()) {
-                        onAddBook(title, author.ifBlank { "Unknown Author" }, content.ifBlank { "Sample imported content." })
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
-            ) {
-                Text("Add to Bookshelf", color = Color.White)
-            }
-        },
+        confirmButton = {},
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancel", color = Color.Gray)

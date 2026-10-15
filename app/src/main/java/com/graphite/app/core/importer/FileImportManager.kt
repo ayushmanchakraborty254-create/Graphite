@@ -177,8 +177,11 @@ class FileImportManager(
             }
 
             ImportDestination.BOOKSHELF -> {
-                // Strictly importing into Bookshelf (PDF, DOCX, PPTX, XLSX, etc.)
-                return@withContext importDocumentToBookshelf(context, displayName, mimeType, bytes, isPdf)
+                // Strictly importing into Bookshelf (PDF only)
+                if (!isPdf) {
+                    return@withContext ImportResult.Error("Only PDF documents (.pdf) are supported in Bookshelf.")
+                }
+                return@withContext importDocumentToBookshelf(context, displayName, mimeType, bytes, true)
             }
 
             ImportDestination.AUTO -> {
@@ -191,10 +194,10 @@ class FileImportManager(
                 }
                 val ext = displayName.substringAfterLast('.', "").lowercase()
                 if (ext in listOf("docx", "doc", "pptx", "ppt", "xlsx", "xls", "rtf", "csv")) {
-                    return@withContext importDocumentToBookshelf(context, displayName, mimeType, bytes, false)
+                    return@withContext importDocumentAsNotebook(context, displayName, mimeType, bytes, false)
                 }
                 ImportResult.Error(
-                    "Unsupported file format: \"$displayName\". Graphite supports PDF documents (.pdf), Word (.docx), PowerPoint (.pptx), Excel (.xlsx), and Graphite notes (.graphite)."
+                    "Unsupported file format: \"$displayName\". Graphite supports PDF documents (.pdf) in Bookshelf, and office documents (.docx, .pptx, .xlsx) in Noteshelf."
                 )
             }
         }
@@ -277,8 +280,8 @@ class FileImportManager(
     }
 
     /**
-     * Imports a document (PDF, DOCX, PPTX, XLSX, etc.) into Bookshelf,
-     * keeping the original file format intact in app storage.
+     * Imports a PDF document into Bookshelf,
+     * keeping the original PDF file intact in app storage.
      */
     private fun importDocumentToBookshelf(
         context: Context,
@@ -290,33 +293,30 @@ class FileImportManager(
         if (isPdf && !isPdfHeader(bytes)) {
             return ImportResult.Error("Invalid or corrupted PDF file: missing \"%PDF-\" signature header.")
         }
+        if (!isPdf) {
+            return ImportResult.Error("Only valid PDF documents (.pdf) are supported in Bookshelf.")
+        }
 
         val docsDir = File(context.filesDir, "imported_documents").apply { mkdirs() }
-        val ext = displayName.substringAfterLast('.', "").lowercase()
         val safeFileName = "${UUID.randomUUID()}_${displayName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}"
         val targetFile = File(docsDir, safeFileName)
 
         try {
             targetFile.writeBytes(bytes)
 
-            val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
+            val resolvedMimeType = "application/pdf"
             val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
             val pageCount = parsed.pageOrSlideCount
 
             val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateBookTitle(rawTitle)
 
-            val coverType = when {
-                ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
-                else -> BookCoverType.CUSTOM
-            }
-
             val importedBook = Book(
                 id = UUID.randomUUID().toString(),
                 title = disambiguatedTitle,
-                author = if (isPdf) "PDF Document" else "Imported ${ext.uppercase()}",
+                author = "PDF Document",
                 progressPercent = 0,
-                coverType = coverType,
+                coverType = BookCoverType.CUSTOM,
                 totalChapters = pageCount,
                 currentChapter = 1,
                 content = parsed.extractedText,
@@ -329,11 +329,11 @@ class FileImportManager(
             return ImportResult.SuccessBook(
                 book = importedBook,
                 pageCount = pageCount,
-                message = "Imported \"$disambiguatedTitle\" (${if (ext.contains("ppt")) "$pageCount slides" else "$pageCount pages"}) to Bookshelf"
+                message = "Imported PDF \"$disambiguatedTitle\" ($pageCount pages) to Bookshelf"
             )
         } catch (e: Exception) {
             if (targetFile.exists()) targetFile.delete()
-            return ImportResult.Error("Error saving document to app storage: ${e.message}")
+            return ImportResult.Error("Error saving PDF document to app storage: ${e.message}")
         }
     }
 

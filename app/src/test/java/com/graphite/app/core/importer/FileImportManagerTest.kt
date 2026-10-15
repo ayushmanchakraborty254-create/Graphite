@@ -372,7 +372,7 @@ class FileImportManagerTest {
     }
 
     @Test
-    fun testImportDocxPptxXlsxToBookshelfKeepsFileFormatIntact() = runBlocking {
+    fun testImportDocxPptxXlsxToBookshelfFailsStrictPdfPolicy() = runBlocking {
         val importManager = FileImportManager(
             graphiteRepository = GraphiteRepository,
             ioDispatcher = Dispatchers.Unconfined
@@ -388,18 +388,9 @@ class FileImportManagerTest {
             target = ImportDestination.BOOKSHELF
         )
 
-        assertTrue("Result must be SuccessBook", result is ImportResult.SuccessBook)
-        val book = (result as ImportResult.SuccessBook).book
-        assertEquals("LectureSlides", book.title)
-        assertNotNull("filePath must be preserved", book.filePath)
-        assertTrue("filePath must point to imported_documents file", book.filePath!!.contains("imported_documents"))
-        assertEquals("application/vnd.openxmlformats-officedocument.presentationml.presentation", book.mimeType)
-        assertEquals(com.graphite.app.data.model.BookCoverType.CE_PPT, book.coverType)
-
-        // Verify stored in repository
-        val stored = GraphiteRepository.getBook(book.id)
-        assertNotNull(stored)
-        assertEquals(book.filePath, stored!!.filePath)
+        assertTrue("Result must be Error because Bookshelf strictly supports PDF only", result is ImportResult.Error)
+        val error = result as ImportResult.Error
+        assertTrue("Error message must mention only PDF supported", error.message.contains("Only PDF"))
     }
 }
 

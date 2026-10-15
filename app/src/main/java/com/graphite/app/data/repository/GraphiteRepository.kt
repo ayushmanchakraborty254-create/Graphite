@@ -61,51 +61,26 @@ object GraphiteRepository {
         • Life-cycle carbon abatement strategies in megaprojects.
     """.trimIndent()
 
-    private val _books = MutableStateFlow(
-        listOf(
-            Book(
-                id = "book_treasure_island",
-                title = "Treasure Island",
-                author = "Robert Louis Stevenson",
-                progressPercent = 1,
-                coverType = BookCoverType.TREASURE_ISLAND,
-                totalChapters = 34,
-                currentChapter = 1,
-                content = sampleTreasureIslandContent
-            ),
-            Book(
-                id = "book_ce_ppt",
-                title = "CE Ppt",
-                author = "Ayushman Chakraborty",
-                progressPercent = 50,
-                coverType = BookCoverType.CE_PPT,
-                totalChapters = 12,
-                currentChapter = 6,
-                content = sampleCePptContent
-            )
-        )
-    )
+    private val _books = MutableStateFlow<List<Book>>(emptyList())
     val books: StateFlow<List<Book>> = _books.asStateFlow()
 
     // Isolated notebook collections partitioned by user ID to guarantee strict multi-user privacy
-    private val userNotebooksMap = mutableMapOf<String, MutableList<NotebookItem>>().apply {
-        put("default", createInitialNotebooks().toMutableList())
-    }
-    private var activeUserId: String? = "default"
+    private val userNotebooksMap = mutableMapOf<String, MutableList<NotebookItem>>()
+    private var activeUserId: String? = null
 
-    private val _notebooks = MutableStateFlow(userNotebooksMap["default"]?.toList() ?: emptyList())
+    private val _notebooks = MutableStateFlow<List<NotebookItem>>(emptyList())
     val notebooks: StateFlow<List<NotebookItem>> = _notebooks.asStateFlow()
 
     private val _folders = MutableStateFlow(
         listOf(
-            FolderItem("my_notes", "My Notes", 9),
-            FolderItem("lectures", "Lectures", 14),
-            FolderItem("projects", "Projects", 16)
+            FolderItem("my_notes", "My Notes", 0),
+            FolderItem("lectures", "Lectures", 0),
+            FolderItem("projects", "Projects", 0)
         )
     )
     val folders: StateFlow<List<FolderItem>> = _folders.asStateFlow()
 
-    private val _stats = MutableStateFlow(ReadingStats(totalHoursRead = 0.1f, totalBooks = 2, notesCount = 39))
+    private val _stats = MutableStateFlow(ReadingStats(totalHoursRead = 0.0f, totalBooks = 0, notesCount = 0))
     val stats: StateFlow<ReadingStats> = _stats.asStateFlow()
 
     fun getActiveUserId(): String? = activeUserId
@@ -238,13 +213,28 @@ object GraphiteRepository {
     }
 
     fun addBook(book: Book) {
-        val disambiguatedBook = if (_books.value.any { it.title == book.title && it.id != book.id }) {
-            book.copy(title = disambiguateBookTitle(book.title))
-        } else {
-            book
+        val normalized = normalizeBookTitle(book.title)
+        val existingIndex = _books.value.indexOfFirst {
+            it.id == book.id ||
+            (book.driveFileId != null && it.driveFileId == book.driveFileId) ||
+            normalizeBookTitle(it.title) == normalized
         }
-        _books.update { listOf(disambiguatedBook) + it }
-        _stats.update { it.copy(totalBooks = _books.value.size) }
+        if (existingIndex >= 0) {
+            _books.update { currentList ->
+                val updated = currentList.toMutableList()
+                val existing = updated[existingIndex]
+                updated[existingIndex] = existing.copy(
+                    filePath = book.filePath ?: existing.filePath,
+                    driveFileId = book.driveFileId ?: existing.driveFileId,
+                    mimeType = if (book.mimeType.isNotBlank()) book.mimeType else existing.mimeType,
+                    content = if (book.content.isNotBlank()) book.content else existing.content
+                )
+                updated
+            }
+        } else {
+            _books.update { listOf(book) + it }
+            _stats.update { it.copy(totalBooks = _books.value.size) }
+        }
         saveToDisk()
     }
 
@@ -536,58 +526,53 @@ object GraphiteRepository {
         _folders.update { it + newFolder }
     }
 
-    private fun createInitialNotebooks(): List<NotebookItem> {
-        val names = listOf(
-            "Ass9 (2)" to "12/10/26 12:35 pm",
-            "Ass1 (6)" to "12/10/26 12:27 pm",
-            "Ass2 (2)" to "12/10/26 12:24 pm",
-            "Ass4 (1)" to "12/10/26 12:24 pm",
-            "Ass3 (4)" to "12/10/26 12:24 pm",
-            "Ass5 (2)" to "12/10/26 12:23 pm",
-            "Ass6 (3)" to "12/10/26 12:23 pm",
-            "Ass13 (2)" to "12/10/26 12:13 pm",
-            "Ass12 (2)" to "12/10/26 12:13 pm"
-        )
-
-        return names.mapIndexed { idx, (title, date) ->
-            val sampleStrokes = if (idx == 0) {
-                listOf(
-                    InkStroke(
-                        points = listOf(
-                            InkPoint(120f, 220f, 0.6f),
-                            InkPoint(260f, 220f, 0.7f),
-                            InkPoint(400f, 220f, 0.5f)
-                        ),
-                        baseWidth = 4f,
-                        color = WorkspaceColors.CoralOrange,
-                        toolType = InkToolType.PEN
-                    ),
-                    InkStroke(
-                        points = listOf(
-                            InkPoint(120f, 320f, 0.5f),
-                            InkPoint(350f, 320f, 0.6f)
-                        ),
-                        baseWidth = 4f,
-                        color = WorkspaceColors.White,
-                        toolType = InkToolType.PEN
-                    )
-                )
-            } else emptyList()
-
-            NotebookItem(
-                id = "note_$idx",
-                userId = "default",
-                title = title,
-                updatedAtFormatted = date,
-                paperStyle = PaperStyle.RULED,
-                previewLines = listOf(
-                    "1) Write programs to demonstrate math module",
-                    "2) Write programs to demonstrate random module",
-                    "3) Write programs to demonstrate statistics module"
-                ),
-                initialStrokes = sampleStrokes
-            )
+    fun normalizeBookTitle(raw: String): String {
+        var t = raw.trim()
+        if (t.contains('.')) {
+            t = t.substringBeforeLast('.')
         }
+        // Remove trailing " (1)", " (2)", etc.
+        t = t.replace(Regex("\\s*\\(\\d+\\)$"), "")
+        // Replace underscores and hyphens with spaces
+        t = t.replace('_', ' ').replace('-', ' ')
+        // Remove extra spaces and lowercase
+        return t.replace("\\s+".toRegex(), " ").trim().lowercase()
+    }
+
+    fun cleanBookDuplicatesAndGhosts() {
+        _books.update { currentList ->
+            val cleaned = mutableListOf<Book>()
+            for (book in currentList) {
+                // Filter out legacy mock books
+                if (book.id == "book_treasure_island" || book.id == "book_ce_ppt") continue
+
+                // Filter out non-PDF files if user requested PDF only
+                val isNonPdf = (book.filePath != null && !book.filePath.endsWith(".pdf", ignoreCase = true)) ||
+                        (book.mimeType.isNotBlank() && book.mimeType != "application/pdf")
+                if (isNonPdf) continue
+
+                // Filter out raw UUID / random Drive ID books from earlier erroneous sync
+                val isRawIdTitle = book.title.length > 20 && (
+                        book.title.matches(Regex("^[a-zA-Z0-9_-]{20,}$")) ||
+                        book.title.matches(Regex("^[0-9a-fA-F-]{36}$"))
+                )
+                if (isRawIdTitle) continue
+
+                val normalized = normalizeBookTitle(book.title)
+                val existing = cleaned.find { normalizeBookTitle(it.title) == normalized }
+                if (existing == null) {
+                    cleaned.add(book)
+                } else {
+                    if (existing.filePath.isNullOrBlank() && !book.filePath.isNullOrBlank()) {
+                        cleaned.remove(existing)
+                        cleaned.add(book)
+                    }
+                }
+            }
+            cleaned
+        }
+        _stats.update { it.copy(totalBooks = _books.value.size) }
+        saveToDisk()
     }
 
     private var appContext: Context? = null
@@ -609,15 +594,23 @@ object GraphiteRepository {
                     val arr = rootObj.getJSONArray(uid)
                     val list = mutableListOf<NotebookItem>()
                     for (i in 0 until arr.length()) {
-                        list.add(notebookFromJson(arr.getJSONObject(i)))
+                        val nb = notebookFromJson(arr.getJSONObject(i))
+                        if (!nb.id.startsWith("note_") && !nb.title.startsWith("Ass")) {
+                            list.add(nb)
+                        }
                     }
                     if (list.isNotEmpty()) {
                         userNotebooksMap[uid] = list
                     }
                 }
-                val currentUid = activeUserId ?: "default"
-                _notebooks.value = (userNotebooksMap[currentUid] ?: emptyList()).filter { !it.isDeleted }
-                _stats.update { it.copy(notesCount = _notebooks.value.size) }
+                val currentUid = activeUserId
+                if (currentUid == null) {
+                    _notebooks.value = emptyList()
+                    _stats.update { it.copy(notesCount = 0) }
+                } else {
+                    _notebooks.value = (userNotebooksMap[currentUid] ?: emptyList()).filter { !it.isDeleted }
+                    _stats.update { it.copy(notesCount = _notebooks.value.size) }
+                }
             }
 
             val booksFile = File(context.filesDir, "graphite_books_storage.json")
@@ -626,15 +619,15 @@ object GraphiteRepository {
                 val arr = JSONArray(jsonStr)
                 val list = mutableListOf<Book>()
                 for (i in 0 until arr.length()) {
-                    list.add(bookFromJson(arr.getJSONObject(i)))
+                    val b = bookFromJson(arr.getJSONObject(i))
+                    if (b.id != "book_treasure_island" && b.id != "book_ce_ppt") {
+                        list.add(b)
+                    }
                 }
-                if (list.isNotEmpty()) {
-                    val existingIds = list.map { it.id }.toSet()
-                    val defaultsToAdd = _books.value.filter { it.id !in existingIds }
-                    _books.value = list + defaultsToAdd
-                    _stats.update { it.copy(totalBooks = _books.value.size) }
-                }
+                _books.value = list
+                _stats.update { it.copy(totalBooks = _books.value.size) }
             }
+            cleanBookDuplicatesAndGhosts()
         } catch (e: Exception) {
             android.util.Log.e("GraphiteRepository", "Failed to load storage from disk", e)
         }
@@ -763,6 +756,7 @@ object GraphiteRepository {
             put("mimeType", book.mimeType)
             put("isBookmarked", book.isBookmarked)
             put("isFavorite", book.isFavorite)
+            put("driveFileId", book.driveFileId)
         }
     }
 
@@ -778,9 +772,10 @@ object GraphiteRepository {
             currentChapter = json.optInt("currentChapter", 1),
             content = json.optString("content", ""),
             filePath = if (json.has("filePath") && !json.isNull("filePath")) json.getString("filePath") else null,
-            mimeType = json.optString("mimeType", "text/plain"),
+            mimeType = json.optString("mimeType", "application/pdf"),
             isBookmarked = json.optBoolean("isBookmarked", false),
-            isFavorite = json.optBoolean("isFavorite", false)
+            isFavorite = json.optBoolean("isFavorite", false),
+            driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null
         )
     }
 }

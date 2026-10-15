@@ -17,7 +17,8 @@ data class Book(
     val filePath: String? = null,
     val mimeType: String = "text/plain",
     val isBookmarked: Boolean = false,
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    val driveFileId: String? = null
 )
 
 enum class BookCoverType {

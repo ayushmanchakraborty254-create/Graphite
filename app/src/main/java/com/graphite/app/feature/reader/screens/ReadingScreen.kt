@@ -36,6 +36,10 @@ fun ReadingScreen(
     var showSearchBar by remember { mutableStateOf(false) }
     var isGridView by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        GraphiteRepository.cleanBookDuplicatesAndGhosts()
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -103,7 +107,37 @@ fun ReadingScreen(
             it.title.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true)
         }
 
-        if (isGridView) {
+        if (filteredBooks.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MenuBook,
+                        contentDescription = null,
+                        tint = Color.DarkGray,
+                        modifier = Modifier.size(64.dp)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = if (searchQuery.isNotBlank()) "No matching recent books" else "No recent books",
+                        color = Color.Gray,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (searchQuery.isNotBlank()) "Try a different search query" else "Your opened and imported PDF books will appear here",
+                        color = Color(0xFF666666),
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        } else if (isGridView) {
             androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
                 columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(minSize = 140.dp),
                 modifier = Modifier.fillMaxSize(),

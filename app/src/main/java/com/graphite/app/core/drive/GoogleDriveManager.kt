@@ -1354,13 +1354,38 @@ class GoogleDriveManager(
 
             for (remoteFile in remoteFiles) {
                 val cleanName = remoteFile.name
-                val baseTitle = if (cleanName.contains('.')) cleanName.substringBeforeLast('.') else cleanName
-                val alreadyExistsLocally = localBooks.any { book ->
-                    (book.filePath != null && File(book.filePath).name.equals(cleanName, ignoreCase = true)) ||
-                            book.title.equals(baseTitle, ignoreCase = true)
+
+                // Bookshelf strictly supports PDF files only
+                val isPdf = cleanName.endsWith(".pdf", ignoreCase = true) ||
+                        remoteFile.mimeType.equals("application/pdf", ignoreCase = true)
+                if (!isPdf) {
+                    continue
                 }
 
-                if (!alreadyExistsLocally) {
+                // Ignore note backups, doc attachments, or raw UUIDs
+                if (cleanName.startsWith("doc_") || cleanName.equals("graphite_notes_backup.json", ignoreCase = true)) {
+                    continue
+                }
+                val isRawId = cleanName.matches(Regex("^[a-zA-Z0-9_-]{20,}(\\..+)?$")) ||
+                        cleanName.matches(Regex("^[0-9a-fA-F-]{36}(\\..+)?$"))
+                if (isRawId) {
+                    continue
+                }
+
+                val normalizedRemote = GraphiteRepository.normalizeBookTitle(cleanName)
+                val existingLocal = localBooks.find { book ->
+                    book.driveFileId == remoteFile.id ||
+                            book.id == "drive_${remoteFile.id}" ||
+                            GraphiteRepository.normalizeBookTitle(book.title) == normalizedRemote ||
+                            (book.filePath != null && File(book.filePath).name.equals(cleanName, ignoreCase = true))
+                }
+
+                if (existingLocal != null) {
+                    // Book already exists locally - ensure driveFileId is attached and skip re-downloading
+                    if (existingLocal.driveFileId.isNullOrBlank()) {
+                        GraphiteRepository.addBook(existingLocal.copy(driveFileId = remoteFile.id))
+                    }
+                } else {
                     _bookshelfSyncStatus.value = "Downloading $cleanName..."
                     val downloadResult = uploader.downloadFile(accountEmail, remoteFile.id)
                     if (downloadResult.isSuccess) {
@@ -1370,24 +1395,22 @@ class GoogleDriveManager(
                             val targetFile = File(docsDir, safeName)
                             targetFile.writeBytes(bytes)
 
-                            val parsed = DocumentContentParser.parse(bytes, cleanName, remoteFile.mimeType)
-                            val ext = cleanName.substringAfterLast('.', "").lowercase()
-                            val coverType = when {
-                                ext in listOf("pptx", "ppt") -> BookCoverType.CE_PPT
-                                else -> BookCoverType.CUSTOM
-                            }
+                            val parsed = DocumentContentParser.parse(bytes, cleanName, "application/pdf")
+                            val rawBaseTitle = if (cleanName.endsWith(".pdf", ignoreCase = true)) cleanName.removeSuffix(".pdf") else cleanName
+                            val displayTitle = rawBaseTitle.replace('_', ' ').replace('-', ' ').trim()
 
                             val newBook = Book(
                                 id = "drive_${remoteFile.id}",
-                                title = GraphiteRepository.disambiguateBookTitle(parsed.title),
+                                title = displayTitle,
                                 author = "Google Drive Sync",
                                 progressPercent = 0,
-                                coverType = coverType,
+                                coverType = BookCoverType.CUSTOM,
                                 totalChapters = parsed.pageOrSlideCount,
                                 currentChapter = 1,
                                 content = parsed.extractedText,
                                 filePath = targetFile.absolutePath,
-                                mimeType = remoteFile.mimeType
+                                mimeType = "application/pdf",
+                                driveFileId = remoteFile.id
                             )
                             GraphiteRepository.addBook(newBook)
                             downloadedCount++
@@ -1396,28 +1419,32 @@ class GoogleDriveManager(
                 }
             }
 
-            // 2. PUSH: Upload local books not present in remote folder
+            // 2. PUSH: Upload local PDF books that are not yet on Drive
             var uploadedCount = 0
             val updatedLocalBooks = GraphiteRepository.books.value
             for (book in updatedLocalBooks) {
+                val isPdf = book.mimeType == "application/pdf" ||
+                        (book.filePath != null && book.filePath.endsWith(".pdf", ignoreCase = true))
+                if (!isPdf || book.filePath == null) continue
+
+                val f = File(book.filePath)
+                if (!f.exists()) continue
+
+                val normalizedLocal = GraphiteRepository.normalizeBookTitle(book.title)
                 val matchesRemote = remoteFiles.any { rf ->
-                    rf.name.equals(book.title, ignoreCase = true) ||
-                            (book.filePath != null && rf.name.equals(File(book.filePath).name, ignoreCase = true)) ||
-                            rf.name.startsWith(book.title, ignoreCase = true)
+                    rf.id == book.driveFileId ||
+                            GraphiteRepository.normalizeBookTitle(rf.name) == normalizedLocal ||
+                            rf.name.equals(f.name, ignoreCase = true)
                 }
 
                 if (!matchesRemote) {
                     _bookshelfSyncStatus.value = "Uploading ${book.title} to Drive..."
-                    val (bytes, fileName, mimeType) = if (book.filePath != null && File(book.filePath).exists()) {
-                        val f = File(book.filePath)
-                        Triple(f.readBytes(), f.name, book.mimeType)
-                    } else {
-                        val safeName = "${book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}.txt"
-                        Triple(book.content.toByteArray(Charsets.UTF_8), safeName, "text/plain")
-                    }
+                    val rawName = book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                    val fileName = if (rawName.endsWith(".pdf", ignoreCase = true)) rawName else "$rawName.pdf"
 
-                    val uploadResult = uploader.upload(accountEmail, fileName, mimeType, bytes, folderId)
+                    val uploadResult = uploader.upload(accountEmail, fileName, "application/pdf", f.readBytes(), folderId)
                     if (uploadResult is DriveUploadResult.Success) {
+                        GraphiteRepository.addBook(book.copy(driveFileId = uploadResult.fileId))
                         uploadedCount++
                     }
                 }
@@ -1453,6 +1480,14 @@ class GoogleDriveManager(
         context: Context,
         book: Book
     ): DriveUploadResult? = withContext(ioDispatcher) {
+        val isPdf = book.mimeType == "application/pdf" ||
+                (book.filePath != null && book.filePath.endsWith(".pdf", ignoreCase = true))
+        if (!isPdf || book.filePath == null) {
+            return@withContext null
+        }
+        val f = File(book.filePath)
+        if (!f.exists()) return@withContext null
+
         val accountEmail = getResolvedAccountEmail(context) ?: return@withContext null
         saveAuthorizedAccount(accountEmail)
         var syncedFolder = getBookshelfSyncedFolder()
@@ -1472,14 +1507,13 @@ class GoogleDriveManager(
             }
         }
 
-        val (bytes, fileName, mimeType) = if (book.filePath != null && File(book.filePath).exists()) {
-            val f = File(book.filePath)
-            Triple(f.readBytes(), f.name, book.mimeType)
-        } else {
-            val safeName = "${book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}.txt"
-            Triple(book.content.toByteArray(Charsets.UTF_8), safeName, "text/plain")
+        val rawName = book.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+        val fileName = if (rawName.endsWith(".pdf", ignoreCase = true)) rawName else "$rawName.pdf"
+        val res = uploader.upload(accountEmail, fileName, "application/pdf", f.readBytes(), syncedFolder.id)
+        if (res is DriveUploadResult.Success) {
+            GraphiteRepository.addBook(book.copy(driveFileId = res.fileId))
         }
-        uploader.upload(accountEmail, fileName, mimeType, bytes, syncedFolder.id)
+        res
     }
 
     private val _isSyncingNotes = MutableStateFlow(false)
