@@ -436,6 +436,7 @@ fun CanvasEditorScreen(
                                         val factor = curDist / prevDist
                                         if (factor in 0.7f..1.4f) {
                                             zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
+                                            if (zoomScale <= 1.0f) panX = 0f
                                         }
                                     }
                                 } else if (gestureMode == 2) {
@@ -470,17 +471,16 @@ fun CanvasEditorScreen(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 items(totalPages) { pageIdx ->
-                    // A single page sheet inside the vertical continuous document
-                    Card(
+                    // Outer layout boundary holding the scaled footprint in LazyColumn
+                    Box(
                         modifier = Modifier
                             .offset { IntOffset(panX.roundToInt(), 0) }
                             .width(scaledPageWidth)
-                            .height(scaledPageHeight)
-                            .shadow(6.dp, RoundedCornerShape(3.dp)),
-                        shape = RoundedCornerShape(3.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White)
+                            .height(scaledPageHeight),
+                        contentAlignment = Alignment.TopStart
                     ) {
-                        Box(
+                        // The page card (white paper sheet + shadow + all contents scale as ONE unified unit)
+                        Card(
                             modifier = Modifier
                                 .requiredSize(basePageWidth, basePageHeight)
                                 .graphicsLayer {
@@ -488,8 +488,12 @@ fun CanvasEditorScreen(
                                     scaleY = zoomScale
                                     transformOrigin = TransformOrigin(0f, 0f)
                                 }
+                                .shadow(6.dp, RoundedCornerShape(3.dp)),
+                            shape = RoundedCornerShape(3.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White)
                         ) {
-                            // Layer A: Document content
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                // Layer A: Document content
                             val pageBmp = pdfBitmaps[pageIdx]
                             if (pageBmp != null) {
                                 Image(
@@ -836,6 +840,7 @@ fun CanvasEditorScreen(
                     }
                 }
             }
+        }
 
             // Floating Zoom Control Pill (Bottom Right)
             Card(
