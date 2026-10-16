@@ -4,20 +4,25 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.pdf.PdfRenderer
+import android.os.BatteryManager
 import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.compose.animation.*
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.layout.ContentScale
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -72,13 +77,6 @@ fun ReaderViewScreen(
         GraphiteRepository.getBook(bookId) ?: GraphiteRepository.getNotebookAsBook(bookId)
     }
 
-    var currentProgress by remember { mutableFloatStateOf((book?.progressPercent ?: 0).toFloat()) }
-    var fontSize by remember { mutableFloatStateOf(16f) }
-    var showFontDialog by remember { mutableStateOf(false) }
-    var isBookmarked by remember { mutableStateOf(book?.isBookmarked == true) }
-    var isFullscreen by remember { mutableStateOf(false) }
-    var showPagePill by remember { mutableStateOf(true) }
-
     if (book == null) {
         Box(modifier = modifier.fillMaxSize().background(GraphiteBlack), contentAlignment = Alignment.Center) {
             Text("Document not found", color = Color.White)
@@ -92,6 +90,13 @@ fun ReaderViewScreen(
     val isDocx = ext in listOf("docx", "doc") || book.mimeType.contains("word", ignoreCase = true)
     val isXlsx = ext in listOf("xlsx", "xls", "csv") || book.mimeType.contains("spreadsheet", ignoreCase = true) || book.mimeType.contains("sheet", ignoreCase = true)
 
+    var currentProgress by remember { mutableFloatStateOf((book.progressPercent).toFloat()) }
+    var fontSize by remember { mutableFloatStateOf(16f) }
+    var showFontDialog by remember { mutableStateOf(false) }
+    var isBookmarked by remember { mutableStateOf(book.isBookmarked) }
+    var isFullscreen by remember(isPdf) { mutableStateOf(isPdf) }
+    var showPagePill by remember { mutableStateOf(true) }
+
     var pdfTotalPages by remember { mutableIntStateOf(book.totalChapters) }
     var pdfCurrentPage by remember { mutableIntStateOf(0) }
 
@@ -102,11 +107,13 @@ fun ReaderViewScreen(
     var parsedDoc by remember { mutableStateOf<ParsedDocument?>(null) }
     var isLoadingDoc by remember { mutableStateOf(false) }
 
-    // Auto-disappear floating page indicator pill after 1.2s
+    // Auto-disappear floating page indicator pill after 1.2s for non-PDF
     LaunchedEffect(pdfCurrentPage, pptxCurrentSlide, isFullscreen) {
-        showPagePill = true
-        delay(1200)
-        showPagePill = false
+        if (!isPdf) {
+            showPagePill = true
+            delay(1200)
+            showPagePill = false
+        }
     }
 
     LaunchedEffect(book.filePath) {
@@ -148,97 +155,37 @@ fun ReaderViewScreen(
 
     Scaffold(
         topBar = {
-            AnimatedVisibility(
-                visible = !isFullscreen,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(GraphiteBlack)
-                        .statusBarsPadding()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            if (!isPdf) {
+                AnimatedVisibility(
+                    visible = !isFullscreen,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = onNavigateBack) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = book.title,
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                fontFamily = FontFamily.Serif
-                            )
-                            Text(
-                                text = subtitle,
-                                color = Color.Gray,
-                                fontSize = 11.sp,
-                                maxLines = 1
-                            )
-                        }
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Open with external app (Word, PowerPoint, Google Docs, etc.)
-                        if (book.filePath != null) {
-                            IconButton(
-                                onClick = {
-                                    DocumentContentParser.openWithExternalApp(
-                                        context,
-                                        File(book.filePath),
-                                        book.mimeType
-                                    )
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.OpenInNew,
-                                    contentDescription = "Open in External App",
-                                    tint = Color.LightGray
+                    ReaderTopBar(
+                        title = book.title,
+                        subtitle = subtitle,
+                        isPdf = isPdf,
+                        isPptx = isPptx,
+                        isBookmarked = isBookmarked,
+                        onNavigateBack = onNavigateBack,
+                        onOpenExternal = if (book.filePath != null) {
+                            {
+                                DocumentContentParser.openWithExternalApp(
+                                    context,
+                                    File(book.filePath),
+                                    book.mimeType
                                 )
                             }
+                        } else null,
+                        onAdjustFont = { showFontDialog = true },
+                        onToggleBookmark = {
+                            isBookmarked = !isBookmarked
+                            GraphiteRepository.toggleBookmarkBook(book.id)
+                            GraphiteRepository.toggleBookmarkNotebook(book.id)
+                            val msg = if (isBookmarked) "Page bookmarked" else "Bookmark removed"
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         }
-
-                        if (!isPdf && !isPptx) {
-                            IconButton(onClick = { showFontDialog = true }) {
-                                Icon(
-                                    imageVector = Icons.Default.FormatSize,
-                                    contentDescription = "Adjust Font",
-                                    tint = Color.White
-                                )
-                            }
-                        }
-
-                        // Bookmark button (Functional with persistence)
-                        IconButton(
-                            onClick = {
-                                isBookmarked = !isBookmarked
-                                GraphiteRepository.toggleBookmarkBook(book.id)
-                                GraphiteRepository.toggleBookmarkNotebook(book.id)
-                                val msg = if (isBookmarked) "Page bookmarked" else "Bookmark removed"
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                            }
-                        ) {
-                            Icon(
-                                imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
-                                contentDescription = "Bookmark Page",
-                                tint = if (isBookmarked) GraphiteOrange else Color.LightGray
-                            )
-                        }
-                    }
+                    )
                 }
             }
         },
@@ -275,13 +222,43 @@ fun ReaderViewScreen(
                         onToggleFullscreen = {
                             isFullscreen = !isFullscreen
                         },
-                        onUserInteraction = {
-                            showPagePill = true
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(if (isFullscreen) PaddingValues(0.dp) else innerPadding)
+                        onUserInteraction = {},
+                        modifier = Modifier.fillMaxSize()
                     )
+
+                    // Overlay Top Bar for PDF when !isFullscreen without displacing the PDF
+                    AnimatedVisibility(
+                        visible = !isFullscreen,
+                        enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+                        exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    ) {
+                        ReaderTopBar(
+                            title = book.title,
+                            subtitle = subtitle,
+                            isPdf = isPdf,
+                            isPptx = isPptx,
+                            isBookmarked = isBookmarked,
+                            onNavigateBack = onNavigateBack,
+                            onOpenExternal = if (book.filePath != null) {
+                                {
+                                    DocumentContentParser.openWithExternalApp(
+                                        context,
+                                        File(book.filePath),
+                                        book.mimeType
+                                    )
+                                }
+                            } else null,
+                            onAdjustFont = { showFontDialog = true },
+                            onToggleBookmark = {
+                                isBookmarked = !isBookmarked
+                                GraphiteRepository.toggleBookmarkBook(book.id)
+                                GraphiteRepository.toggleBookmarkNotebook(book.id)
+                                val msg = if (isBookmarked) "Page bookmarked" else "Bookmark removed"
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
                 }
                 isPptx -> {
                     PptxPresentationViewer(
@@ -369,33 +346,34 @@ fun ReaderViewScreen(
                 }
             }
 
-            // Sleek floating page pill indicator that auto-disappears after 1.2s
-            AnimatedVisibility(
-                visible = showPagePill,
-                enter = fadeIn() + scaleIn(initialScale = 0.88f),
-                exit = fadeOut() + scaleOut(targetScale = 0.88f),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(bottom = 24.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color(0xDD1E1E22),
-                    border = BorderStroke(1.dp, Color(0x33FFFFFF)),
-                    shadowElevation = 8.dp
+            // Sleek floating page pill indicator that auto-disappears after 1.2s (only for non-PDF)
+            if (!isPdf) {
+                AnimatedVisibility(
+                    visible = showPagePill,
+                    enter = fadeIn() + scaleIn(initialScale = 0.88f),
+                    exit = fadeOut() + scaleOut(targetScale = 0.88f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(bottom = 24.dp)
                 ) {
-                    Text(
-                        text = when {
-                            isPdf -> "Page ${pdfCurrentPage + 1} of ${maxOf(1, pdfTotalPages)}"
-                            isPptx -> "Slide ${pptxCurrentSlide + 1} of ${maxOf(1, pptxSlides.size.ifZero(book.totalChapters))}"
-                            else -> "${currentProgress.toInt()}%"
-                        },
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp)
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color(0xDD1E1E22),
+                        border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                        shadowElevation = 8.dp
+                    ) {
+                        Text(
+                            text = when {
+                                isPptx -> "Slide ${pptxCurrentSlide + 1} of ${maxOf(1, pptxSlides.size.ifZero(book.totalChapters))}"
+                                else -> "${currentProgress.toInt()}%"
+                            },
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp)
+                        )
+                    }
                 }
             }
         }
@@ -454,12 +432,23 @@ private fun PdfDocumentViewer(
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
 
-    // 3D Page Curl & Drag animation
-    val scope = rememberCoroutineScope()
-    val curlRotation = remember { Animatable(0f) }
-    var totalDragX by remember { mutableFloatStateOf(0f) }
+    val context = LocalContext.current
+    var currentTime by remember {
+        mutableStateOf(SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()))
+    }
+    var batteryLevel by remember { mutableIntStateOf(-1) }
 
-    val density = LocalDensity.current
+    LaunchedEffect(Unit) {
+        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        while (true) {
+            currentTime = sdf.format(Date())
+            batteryLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            delay(30000)
+        }
+    }
+
+    var totalDragX by remember { mutableFloatStateOf(0f) }
 
     LaunchedEffect(currentPageIndex) {
         zoomScale = 1f
@@ -561,20 +550,12 @@ private fun PdfDocumentViewer(
                         onUserInteraction()
                         if (zoomScale <= 1.05f) {
                             val w = size.width
-                            if (tapOffset.x < w * 0.22f) {
+                            if (tapOffset.x < w * 0.20f) {
                                 if (currentPageIndex > 0) {
-                                    scope.launch {
-                                        curlRotation.snapTo(35f)
-                                        curlRotation.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
-                                    }
                                     onPreviousPage()
                                 }
-                            } else if (tapOffset.x > w * 0.78f) {
+                            } else if (tapOffset.x > w * 0.80f) {
                                 if (currentPageIndex < totalPages - 1) {
-                                    scope.launch {
-                                        curlRotation.snapTo(-35f)
-                                        curlRotation.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
-                                    }
                                     onNextPage()
                                 }
                             } else {
@@ -595,33 +576,16 @@ private fun PdfDocumentViewer(
                         },
                         onHorizontalDrag = { _, dragAmount ->
                             totalDragX += dragAmount
-                            val progress = (totalDragX / (size.width.toFloat().coerceAtLeast(1f))).coerceIn(-1f, 1f)
-                            scope.launch { curlRotation.snapTo(progress * -50f) }
                         },
                         onDragEnd = {
-                            if (totalDragX < -75f && currentPageIndex < totalPages - 1) {
-                                scope.launch {
-                                    curlRotation.animateTo(-85f, tween(160, easing = FastOutSlowInEasing))
-                                    onNextPage()
-                                    curlRotation.snapTo(45f)
-                                    curlRotation.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
-                                }
-                            } else if (totalDragX > 75f && currentPageIndex > 0) {
-                                scope.launch {
-                                    curlRotation.animateTo(85f, tween(160, easing = FastOutSlowInEasing))
-                                    onPreviousPage()
-                                    curlRotation.snapTo(-45f)
-                                    curlRotation.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
-                                }
-                            } else {
-                                scope.launch {
-                                    curlRotation.animateTo(0f, tween(180, easing = FastOutSlowInEasing))
-                                }
+                            if (totalDragX < -60f && currentPageIndex < totalPages - 1) {
+                                onNextPage()
+                            } else if (totalDragX > 60f && currentPageIndex > 0) {
+                                onPreviousPage()
                             }
                             totalDragX = 0f
                         },
                         onDragCancel = {
-                            scope.launch { curlRotation.animateTo(0f, tween(180)) }
                             totalDragX = 0f
                         }
                     )
@@ -668,31 +632,173 @@ private fun PdfDocumentViewer(
         } else {
             bitmap?.let { bmp ->
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(if (zoomScale > 1f) 0.dp else 16.dp),
+                    modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
                     Image(
                         bitmap = bmp.asImageBitmap(),
                         contentDescription = "PDF Page ${currentPageIndex + 1}",
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
-                            .fillMaxHeight()
+                            .fillMaxSize()
                             .graphicsLayer {
                                 scaleX = zoomScale
                                 scaleY = zoomScale
                                 translationX = panOffset.x
                                 translationY = panOffset.y
-                                if (zoomScale <= 1.05f && curlRotation.value != 0f) {
-                                    cameraDistance = 14f * density.density
-                                    rotationY = curlRotation.value
-                                    transformOrigin = TransformOrigin(if (curlRotation.value < 0) 1f else 0f, 0.5f)
-                                    shadowElevation = (kotlin.math.abs(curlRotation.value) / 3f).dp.toPx()
-                                }
                             }
-                            .clip(RoundedCornerShape(4.dp))
                     )
                 }
+            }
+        }
+
+        // Clean e-reader bottom status bar matching Image 2 (Time & Battery on bottom-left, page count on bottom-right)
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = currentTime,
+                    color = Color(0xFF8E8E93),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Normal
+                )
+                BatteryPillIcon(level = batteryLevel)
+            }
+
+            Text(
+                text = "${currentPageIndex + 1}/$totalPages",
+                color = Color(0xFF8E8E93),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Normal
+            )
+        }
+    }
+}
+
+@Composable
+private fun BatteryPillIcon(
+    level: Int,
+    modifier: Modifier = Modifier
+) {
+    val pct = if (level in 0..100) level else 100
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+    ) {
+        Box(
+            modifier = Modifier
+                .width(18.dp)
+                .height(9.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .border(1.dp, Color(0xFF8E8E93), RoundedCornerShape(2.dp))
+                .padding(1.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(pct / 100f)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(Color(0xFF8E8E93))
+            )
+        }
+        Box(
+            modifier = Modifier
+                .width(1.5.dp)
+                .height(4.dp)
+                .background(Color(0xFF8E8E93), RoundedCornerShape(topEnd = 1.dp, bottomEnd = 1.dp))
+        )
+    }
+}
+
+@Composable
+private fun ReaderTopBar(
+    title: String,
+    subtitle: String,
+    isPdf: Boolean,
+    isPptx: Boolean,
+    isBookmarked: Boolean,
+    onNavigateBack: () -> Unit,
+    onOpenExternal: (() -> Unit)?,
+    onAdjustFont: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(GraphiteBlack.copy(alpha = 0.94f))
+            .statusBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onNavigateBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    fontFamily = FontFamily.Serif
+                )
+                Text(
+                    text = subtitle,
+                    color = Color.Gray,
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (onOpenExternal != null) {
+                IconButton(onClick = onOpenExternal) {
+                    Icon(
+                        imageVector = Icons.Default.OpenInNew,
+                        contentDescription = "Open in External App",
+                        tint = Color.LightGray
+                    )
+                }
+            }
+
+            if (!isPdf && !isPptx) {
+                IconButton(onClick = onAdjustFont) {
+                    Icon(
+                        imageVector = Icons.Default.FormatSize,
+                        contentDescription = "Adjust Font",
+                        tint = Color.White
+                    )
+                }
+            }
+
+            IconButton(onClick = onToggleBookmark) {
+                Icon(
+                    imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                    contentDescription = "Bookmark Page",
+                    tint = if (isBookmarked) GraphiteOrange else Color.LightGray
+                )
             }
         }
     }

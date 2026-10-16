@@ -505,11 +505,32 @@ object GraphiteRepository {
                 // New note from another device
                 localMap[remote.id] = remote.copy(userId = currentUid)
             } else {
+                // Preserve physical document files if local file exists on disk
+                val hasLocalFile = !local.filePath.isNullOrBlank() && File(local.filePath).exists()
+                val resolvedFilePath = if (hasLocalFile) local.filePath else (remote.filePath ?: local.filePath)
+                val resolvedMimeType = if (hasLocalFile) local.mimeType else (remote.mimeType ?: local.mimeType)
+                val resolvedFileName = if (hasLocalFile) local.originalFileName else (remote.originalFileName ?: local.originalFileName)
+                val resolvedPageCount = maxOf(local.pageCount, remote.pageCount)
+
                 // Conflict handling: Last-Write-Wins based on timestamps
                 if (remote.updatedAtMillis > local.updatedAtMillis) {
-                    localMap[remote.id] = remote.copy(userId = currentUid)
+                    localMap[remote.id] = remote.copy(
+                        userId = currentUid,
+                        filePath = resolvedFilePath,
+                        mimeType = resolvedMimeType,
+                        originalFileName = resolvedFileName,
+                        pageCount = resolvedPageCount
+                    )
                 } else if (remote.isDeleted && !local.isDeleted && remote.updatedAtMillis >= local.updatedAtMillis) {
                     localMap[remote.id] = local.copy(isDeleted = true, updatedAtMillis = remote.updatedAtMillis)
+                } else if (!hasLocalFile && remote.filePath != null) {
+                    // Update local file pointer if remote brought a materialized file
+                    localMap[remote.id] = local.copy(
+                        filePath = remote.filePath,
+                        mimeType = remote.mimeType ?: local.mimeType,
+                        originalFileName = remote.originalFileName ?: local.originalFileName,
+                        pageCount = resolvedPageCount
+                    )
                 }
             }
         }

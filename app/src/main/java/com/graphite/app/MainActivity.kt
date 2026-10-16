@@ -97,14 +97,7 @@ class MainActivity : ComponentActivity() {
                                         NavigationTab.NOTESHELF -> {
                                             NoteshelfScreen(
                                                 onOpenNotebook = { notebookId ->
-                                                    val note = GraphiteRepository.getNotebook(notebookId)
-                                                    val isPdf = note?.filePath?.endsWith(".pdf", ignoreCase = true) == true ||
-                                                            note?.mimeType?.contains("pdf", ignoreCase = true) == true
-                                                    if (isPdf) {
-                                                        currentDestination = ActiveDestination.ReaderView(notebookId)
-                                                    } else {
-                                                        currentDestination = ActiveDestination.CanvasEditor(notebookId)
-                                                    }
+                                                    currentDestination = ActiveDestination.CanvasEditor(notebookId)
                                                 }
                                             )
                                         }

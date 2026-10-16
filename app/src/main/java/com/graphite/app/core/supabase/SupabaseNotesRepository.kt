@@ -12,6 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.io.IOException
 
 class SupabaseNotesRepository(
@@ -58,7 +59,50 @@ class SupabaseNotesRepository(
                 }
 
                 val dtoList = json.decodeFromString<List<SupabaseNotebookDto>>(body)
+                val context = try { com.graphite.app.GraphiteApplication.instance } catch (_: Throwable) { null }
+
                 val notebooks = dtoList.map { dto ->
+                    var resolvedMimeType: String? = null
+                    var resolvedFileName: String? = null
+                    var resolvedPageCount = 1
+                    var resolvedFilePath: String? = null
+                    val cleanPreviewLines = mutableListOf<String>()
+
+                    for (line in dto.previewLines) {
+                        if (line.startsWith("[GRAPHITE_DOC:")) {
+                            val content = line.removePrefix("[GRAPHITE_DOC:").removeSuffix("]")
+                            val parts = content.split(';')
+                            for (p in parts) {
+                                if (p.startsWith("mime=")) resolvedMimeType = p.removePrefix("mime=")
+                                if (p.startsWith("name=")) resolvedFileName = p.removePrefix("name=")
+                                if (p.startsWith("pages=")) resolvedPageCount = p.removePrefix("pages=").toIntOrNull() ?: 1
+                            }
+                        } else if (line.startsWith("[GRAPHITE_DATA:") && context != null) {
+                            val b64 = line.removePrefix("[GRAPHITE_DATA:").removeSuffix("]")
+                            try {
+                                val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                                val notesDir = File(context.filesDir, "imported_notes").apply { mkdirs() }
+                                val safeName = "${dto.id}_${(resolvedFileName ?: "document.pdf").replace("[^a-zA-Z0-9._-]".toRegex(), "_")}"
+                                val targetFile = File(notesDir, safeName)
+                                if (!targetFile.exists() || targetFile.length() != bytes.size.toLong()) {
+                                    targetFile.writeBytes(bytes)
+                                }
+                                resolvedFilePath = targetFile.absolutePath
+                            } catch (_: Exception) {}
+                        } else {
+                            cleanPreviewLines.add(line)
+                        }
+                    }
+
+                    // Check if matching local file already exists in imported_notes
+                    if (resolvedFilePath == null && context != null && resolvedFileName != null) {
+                        val notesDir = File(context.filesDir, "imported_notes")
+                        val possibleFile = File(notesDir, "${dto.id}_${resolvedFileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}")
+                        if (possibleFile.exists()) {
+                            resolvedFilePath = possibleFile.absolutePath
+                        }
+                    }
+
                     NotebookItem(
                         id = dto.id,
                         userId = dto.userId,
@@ -71,10 +115,14 @@ class SupabaseNotesRepository(
                         } catch (_: Exception) {
                             PaperStyle.RULED
                         },
-                        previewLines = dto.previewLines,
+                        previewLines = cleanPreviewLines,
                         initialStrokes = InkSerialization.deserializeStrokes(dto.strokesJson),
                         isDeleted = dto.isDeleted,
-                        version = dto.version
+                        version = dto.version,
+                        filePath = resolvedFilePath,
+                        mimeType = resolvedMimeType,
+                        originalFileName = resolvedFileName,
+                        pageCount = resolvedPageCount
                     )
                 }
                 Result.success(notebooks)
@@ -100,13 +148,31 @@ class SupabaseNotesRepository(
             val session = requireAuthenticatedSession()
 
             val dtoList = notebooks.map { notebook ->
+                val effectivePreviewLines = if (!notebook.filePath.isNullOrBlank() && notebook.mimeType != null) {
+                    val f = File(notebook.filePath)
+                    val fileMetaHeader = "[GRAPHITE_DOC:mime=${notebook.mimeType};name=${notebook.originalFileName ?: f.name};pages=${notebook.pageCount}]"
+                    val existingCleanPreview = notebook.previewLines.filter { !it.startsWith("[GRAPHITE_DOC:") && !it.startsWith("[GRAPHITE_DATA:") }
+                    val linesWithMeta = mutableListOf(fileMetaHeader)
+                    // If file exists and size is <= 8MB, embed Base64 so second device materializes file
+                    if (f.exists() && f.length() in 1..(8 * 1024 * 1024)) {
+                        try {
+                            val b64 = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+                            linesWithMeta.add("[GRAPHITE_DATA:$b64]")
+                        } catch (_: Exception) {}
+                    }
+                    linesWithMeta.addAll(existingCleanPreview)
+                    linesWithMeta
+                } else {
+                    notebook.previewLines
+                }
+
                 SupabaseNotebookDto(
                     id = notebook.id,
                     userId = session.user.id,
                     title = notebook.title,
                     folderId = notebook.folderId,
                     paperStyle = notebook.paperStyle.name,
-                    previewLines = notebook.previewLines,
+                    previewLines = effectivePreviewLines,
                     strokesJson = InkSerialization.serializeStrokes(notebook.initialStrokes),
                     updatedAt = notebook.updatedAtFormatted,
                     updatedAtMillis = notebook.updatedAtMillis,
