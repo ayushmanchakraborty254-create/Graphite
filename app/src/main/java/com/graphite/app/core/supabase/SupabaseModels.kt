@@ -41,7 +41,7 @@ data class SupabaseSession(
     val tokenType: String = "bearer",
     @SerialName("expires_in")
     val expiresIn: Long = 3600,
-    val user: SupabaseUser,
+    val user: SupabaseUser = SupabaseUser(id = "user"),
     val expiresAtMillis: Long = System.currentTimeMillis() + (expiresIn * 1000L)
 ) {
     val isExpired: Boolean

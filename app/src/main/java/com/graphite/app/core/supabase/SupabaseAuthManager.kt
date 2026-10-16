@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -28,6 +30,7 @@ class SupabaseAuthManager(
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val refreshMutex = Mutex()
     private val _authState = MutableStateFlow<SupabaseAuthState>(SupabaseAuthState.Unauthenticated)
     val authState: StateFlow<SupabaseAuthState> = _authState.asStateFlow()
 
@@ -58,8 +61,78 @@ class SupabaseAuthManager(
                 expiresAtMillis = expiresAt
             )
             _authState.value = SupabaseAuthState.Authenticated(session)
+        } else if (!refreshToken.isNullOrBlank() && !userId.isNullOrBlank()) {
+            val session = SupabaseSession(
+                accessToken = "",
+                refreshToken = refreshToken,
+                user = SupabaseUser(id = userId, email = email),
+                expiresAtMillis = 0L
+            )
+            _authState.value = SupabaseAuthState.Authenticated(session)
         } else {
             _authState.value = SupabaseAuthState.Unauthenticated
+        }
+    }
+
+    /**
+     * Returns an active and unexpired SupabaseSession.
+     * If the current session has expired (or is close to expiring), it automatically
+     * refreshes the session in the background via Supabase GoTrue.
+     */
+    suspend fun getFreshSession(): Result<SupabaseSession> = withContext(ioDispatcher) {
+        val session = currentSession
+        if (session == null) {
+            val refreshToken = secureStorage.getString(KEY_REFRESH_TOKEN)
+            if (!refreshToken.isNullOrBlank()) {
+                return@withContext refreshSession()
+            }
+            return@withContext Result.failure(IllegalStateException("User is not authenticated"))
+        }
+
+        if (session.isExpired || session.accessToken.isBlank()) {
+            return@withContext refreshSession()
+        }
+
+        Result.success(session)
+    }
+
+    /**
+     * Explicitly refreshes the current session using the stored refresh_token.
+     * Thread-safe through Mutex lock to prevent duplicate concurrent refresh requests.
+     * Set [force] to true to force refresh regardless of local clock expiration (e.g. after HTTP 401).
+     */
+    suspend fun refreshSession(force: Boolean = false): Result<SupabaseSession> = withContext(ioDispatcher) {
+        refreshMutex.withLock {
+            val current = currentSession
+            if (!force && current != null && !current.isExpired && current.accessToken.isNotBlank()) {
+                return@withLock Result.success(current)
+            }
+
+            val refreshToken = current?.refreshToken
+                ?: secureStorage.getString(KEY_REFRESH_TOKEN)
+
+            if (refreshToken.isNullOrBlank()) {
+                return@withLock Result.failure(
+                    IllegalStateException("No refresh token available to refresh session")
+                )
+            }
+
+            try {
+                val payload = buildJsonObject {
+                    put("refresh_token", refreshToken)
+                }.toString()
+
+                val request = Request.Builder()
+                    .url("$baseUrl/auth/v1/token?grant_type=refresh_token")
+                    .header("apikey", publishableKey)
+                    .header("Content-Type", "application/json")
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+
+                executeAuthRequest(request)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
 
@@ -170,11 +243,35 @@ class SupabaseAuthManager(
             if (!response.isSuccessful) {
                 val errorMsg = parseErrorMessage(body) ?: "HTTP ${response.code}: Authentication request failed"
                 val exception = IOException(errorMsg)
-                _authState.value = SupabaseAuthState.Error(errorMsg)
+                if (response.code in listOf(400, 401) &&
+                    (body.contains("invalid_grant", ignoreCase = true) ||
+                     body.contains("refresh_token_not_found", ignoreCase = true))
+                ) {
+                    clearSession()
+                } else {
+                    _authState.value = SupabaseAuthState.Error(errorMsg)
+                }
                 return Result.failure(exception)
             }
 
-            val session = json.decodeFromString<SupabaseSession>(body)
+            val decodedSession = json.decodeFromString<SupabaseSession>(body)
+            val current = currentSession
+            val finalUser = if (decodedSession.user.id.isNotBlank() && decodedSession.user.id != "user") {
+                decodedSession.user
+            } else {
+                current?.user ?: SupabaseUser(
+                    id = secureStorage.getString(KEY_USER_ID) ?: "user",
+                    email = secureStorage.getString(KEY_USER_EMAIL)
+                )
+            }
+            val finalRefreshToken = decodedSession.refreshToken?.takeIf { it.isNotBlank() }
+                ?: current?.refreshToken
+                ?: secureStorage.getString(KEY_REFRESH_TOKEN)
+
+            val session = decodedSession.copy(
+                user = finalUser,
+                refreshToken = finalRefreshToken
+            )
             saveSessionToStorage(session)
             _authState.value = SupabaseAuthState.Authenticated(session)
             return Result.success(session)
@@ -182,10 +279,18 @@ class SupabaseAuthManager(
     }
 
     private fun saveSessionToStorage(session: SupabaseSession) {
+        val existingRefreshToken = secureStorage.getString(KEY_REFRESH_TOKEN)
+        val existingUserId = secureStorage.getString(KEY_USER_ID)
+        val existingEmail = secureStorage.getString(KEY_USER_EMAIL)
+
+        val refreshTokenToSave = session.refreshToken?.takeIf { it.isNotBlank() } ?: existingRefreshToken
+        val userIdToSave = session.user.id.takeIf { it.isNotBlank() && it != "user" } ?: existingUserId ?: session.user.id
+        val emailToSave = session.user.email?.takeIf { it.isNotBlank() } ?: existingEmail
+
         secureStorage.putString(KEY_ACCESS_TOKEN, session.accessToken)
-        secureStorage.putString(KEY_REFRESH_TOKEN, session.refreshToken)
-        secureStorage.putString(KEY_USER_ID, session.user.id)
-        secureStorage.putString(KEY_USER_EMAIL, session.user.email)
+        secureStorage.putString(KEY_REFRESH_TOKEN, refreshTokenToSave)
+        secureStorage.putString(KEY_USER_ID, userIdToSave)
+        secureStorage.putString(KEY_USER_EMAIL, emailToSave)
         secureStorage.putLong(KEY_EXPIRES_AT, session.expiresAtMillis)
     }
 

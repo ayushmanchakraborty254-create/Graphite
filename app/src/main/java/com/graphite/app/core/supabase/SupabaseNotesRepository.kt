@@ -38,19 +38,53 @@ class SupabaseNotesRepository(
         return session
     }
 
+    /**
+     * Validates that the user is authenticated and retrieves a fresh, unexpired session.
+     */
+    private suspend fun getAuthenticatedSession(): SupabaseSession {
+        val freshResult = authManager.getFreshSession()
+        val session = freshResult.getOrNull() ?: authManager.currentSession
+        if (session == null || !authManager.isAuthenticated()) {
+            throw SecurityException(
+                "Row Level Security Policy Violation: User must be authenticated before accessing notes."
+            )
+        }
+        return session
+    }
+
+    /**
+     * Executes an authenticated HTTP request, retrying once automatically with a refreshed token
+     * if Supabase/PostgREST responds with HTTP 401 (e.g. PGRST301 JWT expired).
+     */
+    private suspend fun executeWithRetry(
+        buildRequest: (token: String) -> Request
+    ): okhttp3.Response {
+        val session = getAuthenticatedSession()
+        val initialResponse = httpClient.newCall(buildRequest(session.accessToken)).execute()
+        if (initialResponse.code != 401) {
+            return initialResponse
+        }
+
+        // HTTP 401 received: Attempt forced token refresh and single retry
+        initialResponse.close()
+        val refreshResult = authManager.refreshSession(force = true)
+        val refreshedSession = refreshResult.getOrNull()
+            ?: throw IOException("Session expired (HTTP 401) and token refresh failed: ${refreshResult.exceptionOrNull()?.message ?: "Unknown error"}")
+
+        return httpClient.newCall(buildRequest(refreshedSession.accessToken)).execute()
+    }
+
     suspend fun fetchNotes(): Result<List<NotebookItem>> = withContext(ioDispatcher) {
         try {
-            val session = requireAuthenticatedSession()
-
-            val request = Request.Builder()
-                .url("$baseUrl/rest/v1/notebooks?select=*")
-                .header("apikey", publishableKey)
-                .header("Authorization", "Bearer ${session.accessToken}")
-                .header("Accept", "application/json")
-                .get()
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
+            executeWithRetry { token ->
+                Request.Builder()
+                    .url("$baseUrl/rest/v1/notebooks?select=*")
+                    .header("apikey", publishableKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Accept", "application/json")
+                    .get()
+                    .build()
+            }.use { response ->
                 val body = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
@@ -145,7 +179,8 @@ class SupabaseNotesRepository(
         if (notebooks.isEmpty()) return@withContext Result.success(emptyList())
 
         try {
-            val session = requireAuthenticatedSession()
+            val session = getAuthenticatedSession()
+            val userId = authManager.currentUserId ?: session.user.id
 
             val dtoList = notebooks.map { notebook ->
                 val effectivePreviewLines = if (!notebook.filePath.isNullOrBlank() && notebook.mimeType != null) {
@@ -168,7 +203,7 @@ class SupabaseNotesRepository(
 
                 SupabaseNotebookDto(
                     id = notebook.id,
-                    userId = session.user.id,
+                    userId = userId,
                     title = notebook.title,
                     folderId = notebook.folderId,
                     paperStyle = notebook.paperStyle.name,
@@ -183,16 +218,16 @@ class SupabaseNotesRepository(
 
             val payload = json.encodeToString(dtoList)
 
-            val request = Request.Builder()
-                .url("$baseUrl/rest/v1/notebooks")
-                .header("apikey", publishableKey)
-                .header("Authorization", "Bearer ${session.accessToken}")
-                .header("Content-Type", "application/json")
-                .header("Prefer", "resolution=merge-duplicates,return=representation")
-                .post(payload.toRequestBody("application/json".toMediaType()))
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
+            executeWithRetry { token ->
+                Request.Builder()
+                    .url("$baseUrl/rest/v1/notebooks")
+                    .header("apikey", publishableKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .header("Prefer", "resolution=merge-duplicates,return=representation")
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+            }.use { response ->
                 val body = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
@@ -208,16 +243,14 @@ class SupabaseNotesRepository(
 
     suspend fun deleteNote(notebookId: String): Result<Unit> = withContext(ioDispatcher) {
         try {
-            val session = requireAuthenticatedSession()
-
-            val request = Request.Builder()
-                .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
-                .header("apikey", publishableKey)
-                .header("Authorization", "Bearer ${session.accessToken}")
-                .delete()
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
+            executeWithRetry { token ->
+                Request.Builder()
+                    .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
+                    .header("apikey", publishableKey)
+                    .header("Authorization", "Bearer $token")
+                    .delete()
+                    .build()
+            }.use { response ->
                 if (!response.isSuccessful) {
                     val body = response.body?.string() ?: ""
                     return@withContext Result.failure(

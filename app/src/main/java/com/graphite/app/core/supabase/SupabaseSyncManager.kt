@@ -59,7 +59,8 @@ class SupabaseSyncManager(
      * 6. Completely isolated from Google Drive: NEVER invokes Google Drive API or creates Drive files.
      */
     suspend fun syncNotes(): Result<Int> = withContext(ioDispatcher) {
-        if (!authManager.isAuthenticated()) {
+        val freshSessionResult = authManager.getFreshSession()
+        if (freshSessionResult.isFailure && !authManager.isAuthenticated()) {
             _syncStatus.value = SupabaseSyncStatus.Unauthenticated
             return@withContext Result.failure(
                 SecurityException("Authentication required: Please sign in to sync notes with Supabase.")

@@ -118,4 +118,89 @@ class SupabaseAuthManagerTest {
         assertNull(secureStorage.getString("supabase_user_id"))
         assertEquals(SupabaseAuthState.Unauthenticated, authManager.authState.value)
     }
+
+    @Test
+    fun testRefreshSessionSuccessfullyUpdatesToken() = runBlocking {
+        secureStorage.putString("supabase_access_token", "expired_token")
+        secureStorage.putString("supabase_refresh_token", "valid_refresh_token")
+        secureStorage.putString("supabase_user_id", "user-uuid-123")
+        secureStorage.putString("supabase_user_email", "ayush@graphite.com")
+        secureStorage.putLong("supabase_expires_at", System.currentTimeMillis() - 10_000L)
+
+        val refreshResponseJson = """
+            {
+                "access_token": "freshly_refreshed_access_token",
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "refresh_token": "new_rotated_refresh_token",
+                "user": {
+                    "id": "user-uuid-123",
+                    "email": "ayush@graphite.com"
+                }
+            }
+        """.trimIndent()
+
+        val mockClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(refreshResponseJson.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }.build()
+
+        val authManager = SupabaseAuthManager(
+            secureStorage = secureStorage,
+            httpClient = mockClient,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val result = authManager.refreshSession()
+        assertTrue(result.isSuccess)
+        val refreshed = result.getOrThrow()
+        assertEquals("freshly_refreshed_access_token", refreshed.accessToken)
+        assertEquals("new_rotated_refresh_token", refreshed.refreshToken)
+        assertEquals("freshly_refreshed_access_token", secureStorage.getString("supabase_access_token"))
+        assertEquals("new_rotated_refresh_token", secureStorage.getString("supabase_refresh_token"))
+    }
+
+    @Test
+    fun testGetFreshSessionTriggersRefreshWhenExpired() = runBlocking {
+        secureStorage.putString("supabase_access_token", "expired_token")
+        secureStorage.putString("supabase_refresh_token", "valid_refresh_token")
+        secureStorage.putString("supabase_user_id", "user-uuid-123")
+        secureStorage.putLong("supabase_expires_at", System.currentTimeMillis() - 100_000L)
+
+        val refreshResponseJson = """
+            {
+                "access_token": "auto_refreshed_token",
+                "token_type": "bearer",
+                "expires_in": 3600
+            }
+        """.trimIndent()
+
+        val mockClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(refreshResponseJson.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }.build()
+
+        val authManager = SupabaseAuthManager(
+            secureStorage = secureStorage,
+            httpClient = mockClient,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val result = authManager.getFreshSession()
+        assertTrue(result.isSuccess)
+        assertEquals("auto_refreshed_token", result.getOrThrow().accessToken)
+        assertEquals("valid_refresh_token", result.getOrThrow().refreshToken)
+    }
 }

@@ -139,4 +139,108 @@ class SupabaseNotesRepositoryTest {
         assertEquals("Bearer valid_user_jwt_token", capturedAuthHeader)
         assertNotNull(capturedApiKeyHeader)
     }
+
+    @Test
+    fun test401ResponseTriggersAutomaticTokenRefreshAndRetry() = runBlocking {
+        secureStorage.putString("supabase_access_token", "expired_jwt_token")
+        secureStorage.putString("supabase_refresh_token", "valid_refresh_token")
+        secureStorage.putString("supabase_user_id", "user_123")
+        secureStorage.putString("supabase_user_email", "ayush@graphite.com")
+        secureStorage.putLong("supabase_expires_at", System.currentTimeMillis() + 3600_000L)
+
+        val refreshResponseJson = """
+            {
+                "access_token": "newly_refreshed_jwt_token",
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "refresh_token": "valid_refresh_token",
+                "user": {
+                    "id": "user_123",
+                    "email": "ayush@graphite.com"
+                }
+            }
+        """.trimIndent()
+
+        val notesResponseJson = """
+            [
+                {
+                    "id": "note_101",
+                    "user_id": "user_123",
+                    "title": "Recovered Note",
+                    "folder_id": "folder_1",
+                    "paper_style": "RULED",
+                    "preview_lines": [],
+                    "strokes_json": "[]",
+                    "updated_at": "16/10/26 4:00 pm"
+                }
+            ]
+        """.trimIndent()
+
+        val capturedTokens = mutableListOf<String>()
+
+        val mockClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val url = request.url.toString()
+                if (url.contains("/auth/v1/token")) {
+                    Response.Builder()
+                        .request(request)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(refreshResponseJson.toResponseBody("application/json".toMediaType()))
+                        .build()
+                } else if (url.contains("/rest/v1/notebooks")) {
+                    val authHeader = request.header("Authorization") ?: ""
+                    capturedTokens.add(authHeader)
+                    if (authHeader == "Bearer expired_jwt_token") {
+                        Response.Builder()
+                            .request(request)
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(401)
+                            .message("Unauthorized")
+                            .body("""{"code":"PGRST301","details":"No suitable key or JWT expired"}""".toResponseBody("application/json".toMediaType()))
+                            .build()
+                    } else {
+                        Response.Builder()
+                            .request(request)
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .body(notesResponseJson.toResponseBody("application/json".toMediaType()))
+                            .build()
+                    }
+                } else {
+                    Response.Builder()
+                        .request(request)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(404)
+                        .message("Not Found")
+                        .body("".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }.build()
+
+        val customAuthManager = SupabaseAuthManager(
+            secureStorage = secureStorage,
+            httpClient = mockClient,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val repository = SupabaseNotesRepository(
+            authManager = customAuthManager,
+            httpClient = mockClient,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val result = repository.fetchNotes()
+        assertTrue("fetchNotes should succeed after 401 retry", result.isSuccess)
+        val notes = result.getOrThrow()
+        assertEquals(1, notes.size)
+        assertEquals("note_101", notes[0].id)
+
+        // Verify that it initially tried with the expired token and then automatically retried with the refreshed token
+        assertEquals(listOf("Bearer expired_jwt_token", "Bearer newly_refreshed_jwt_token"), capturedTokens)
+        assertEquals("newly_refreshed_jwt_token", secureStorage.getString("supabase_access_token"))
+    }
 }
