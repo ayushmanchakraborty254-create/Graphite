@@ -3,9 +3,12 @@ package com.graphite.app.feature.noteshelf
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -89,6 +92,11 @@ fun NoteshelfScreen(
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var currentSortOption by remember { mutableStateOf("Date Modified (Newest)") }
     var isListView by remember { mutableStateOf(false) }
+
+    // Note Selection & Deletion state
+    var selectedNotebookIds by remember { mutableStateOf(setOf<String>()) }
+    var notesToDelete by remember { mutableStateOf<List<NotebookItem>?>(null) }
+    var isDeletingNotesCloud by remember { mutableStateOf(false) }
 
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -387,14 +395,74 @@ fun NoteshelfScreen(
                     .fillMaxHeight()
                     .padding(horizontal = if (isTablet) 18.dp else 14.dp, vertical = 12.dp)
             ) {
-            // Main Top Bar: Sidebar toggle, Category title, Action buttons (+) (Search) (More)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            if (selectedNotebookIds.isNotEmpty()) {
+                // Contextual Selection Action Bar with Delete (Bin) icon
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { selectedNotebookIds = emptySet() }) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel Selection",
+                                tint = Color.White
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${selectedNotebookIds.size} Selected",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val allFilteredIds = sortedNotebooks.map { it.id }.toSet()
+                        val allSelected = selectedNotebookIds.size == allFilteredIds.size && allFilteredIds.isNotEmpty()
+
+                        IconButton(
+                            onClick = {
+                                selectedNotebookIds = if (allSelected) emptySet() else allFilteredIds
+                            }
+                        ) {
+                            Icon(
+                                imageVector = if (allSelected) Icons.Default.CheckCircle else Icons.Default.SelectAll,
+                                contentDescription = if (allSelected) "Deselect All" else "Select All",
+                                tint = if (allSelected) GraphiteOrange else Color.White
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val toDelete = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
+                                if (toDelete.isNotEmpty()) {
+                                    notesToDelete = toDelete
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete Selected Notes",
+                                tint = Color(0xFFFF5252),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Main Top Bar: Sidebar toggle, Category title, Action buttons (+) (Search) (More)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { sidebarVisible = !sidebarVisible }) {
                         Icon(
@@ -567,6 +635,7 @@ fun NoteshelfScreen(
                     GoogleProfileTopBarIcon()
                 }
             }
+        }
 
             if (showSearchBar) {
                 OutlinedTextField(
@@ -663,68 +732,101 @@ fun NoteshelfScreen(
                         onOpenNotebook(newNote.id)
                     }
                 )
-            } else if (isListView) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(bottom = 24.dp)
-                ) {
-                    items(sortedNotebooks) { notebook ->
-                        NotebookListRow(
-                            notebook = notebook,
-                            onClick = { onOpenNotebook(notebook.id) },
-                            onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
-                            onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
-                            onRename = { showRenameDialogForNote = notebook },
-                            onMoveFolder = { showMoveFolderDialogForNote = notebook },
-                            onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
-                            onPermanentlyDelete = { GraphiteRepository.permanentlyDeleteNotebook(notebook.id) },
-                            onDelete = { GraphiteRepository.deleteNotebook(notebook.id) },
-                            onUploadToDrive = {
-                                selectedNotebookForUpload = notebook
-                                if (!driveManager.hasDrivePermission(context)) {
-                                    val intent = driveManager.createAuthorizationIntent(context)
-                                    driveAuthLauncher.launch(intent)
-                                } else {
-                                    scope.launch {
-                                        driveManager.startUploadFlow(context, notebook)
-                                    }
-                                }
-                            }
-                        )
+            } else {
+                val isSelectionMode = selectedNotebookIds.isNotEmpty()
+                val toggleNoteSelection = { noteId: String ->
+                    selectedNotebookIds = if (noteId in selectedNotebookIds) {
+                        selectedNotebookIds - noteId
+                    } else {
+                        selectedNotebookIds + noteId
                     }
                 }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 140.dp),
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = PaddingValues(bottom = 24.dp)
-                ) {
-                    items(sortedNotebooks) { notebook ->
-                        NotebookThumbnailCard(
-                            notebook = notebook,
-                            onClick = { onOpenNotebook(notebook.id) },
-                            onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
-                            onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
-                            onRename = { showRenameDialogForNote = notebook },
-                            onMoveFolder = { showMoveFolderDialogForNote = notebook },
-                            onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
-                            onPermanentlyDelete = { GraphiteRepository.permanentlyDeleteNotebook(notebook.id) },
-                            onDelete = { GraphiteRepository.deleteNotebook(notebook.id) },
-                            onUploadToDrive = {
-                                selectedNotebookForUpload = notebook
-                                if (!driveManager.hasDrivePermission(context)) {
-                                    val intent = driveManager.createAuthorizationIntent(context)
-                                    driveAuthLauncher.launch(intent)
-                                } else {
-                                    scope.launch {
-                                        driveManager.startUploadFlow(context, notebook)
+
+                if (isListView) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(bottom = 24.dp)
+                    ) {
+                        items(sortedNotebooks) { notebook ->
+                            NotebookListRow(
+                                notebook = notebook,
+                                isSelected = notebook.id in selectedNotebookIds,
+                                isSelectionMode = isSelectionMode,
+                                onClick = {
+                                    if (isSelectionMode) {
+                                        toggleNoteSelection(notebook.id)
+                                    } else {
+                                        onOpenNotebook(notebook.id)
+                                    }
+                                },
+                                onLongClick = {
+                                    toggleNoteSelection(notebook.id)
+                                },
+                                onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
+                                onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
+                                onRename = { showRenameDialogForNote = notebook },
+                                onMoveFolder = { showMoveFolderDialogForNote = notebook },
+                                onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
+                                onPermanentlyDelete = { notesToDelete = listOf(notebook) },
+                                onDelete = { notesToDelete = listOf(notebook) },
+                                onUploadToDrive = {
+                                    selectedNotebookForUpload = notebook
+                                    if (!driveManager.hasDrivePermission(context)) {
+                                        val intent = driveManager.createAuthorizationIntent(context)
+                                        driveAuthLauncher.launch(intent)
+                                    } else {
+                                        scope.launch {
+                                            driveManager.startUploadFlow(context, notebook)
+                                        }
                                     }
                                 }
-                            }
-                        )
+                            )
+                        }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 140.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(bottom = 24.dp)
+                    ) {
+                        items(sortedNotebooks) { notebook ->
+                            NotebookThumbnailCard(
+                                notebook = notebook,
+                                isSelected = notebook.id in selectedNotebookIds,
+                                isSelectionMode = isSelectionMode,
+                                onClick = {
+                                    if (isSelectionMode) {
+                                        toggleNoteSelection(notebook.id)
+                                    } else {
+                                        onOpenNotebook(notebook.id)
+                                    }
+                                },
+                                onLongClick = {
+                                    toggleNoteSelection(notebook.id)
+                                },
+                                onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
+                                onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
+                                onRename = { showRenameDialogForNote = notebook },
+                                onMoveFolder = { showMoveFolderDialogForNote = notebook },
+                                onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
+                                onPermanentlyDelete = { notesToDelete = listOf(notebook) },
+                                onDelete = { notesToDelete = listOf(notebook) },
+                                onUploadToDrive = {
+                                    selectedNotebookForUpload = notebook
+                                    if (!driveManager.hasDrivePermission(context)) {
+                                        val intent = driveManager.createAuthorizationIntent(context)
+                                        driveAuthLauncher.launch(intent)
+                                    } else {
+                                        scope.launch {
+                                            driveManager.startUploadFlow(context, notebook)
+                                        }
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -791,6 +893,45 @@ fun NoteshelfScreen(
             onSelectFolder = { folderId ->
                 GraphiteRepository.moveNotebookToFolder(note.id, folderId)
                 showMoveFolderDialogForNote = null
+            }
+        )
+    }
+
+    // Delete Note Choices Dialog
+    notesToDelete?.let { targetNotes ->
+        DeleteNoteChoiceDialog(
+            notes = targetNotes,
+            isDeleting = isDeletingNotesCloud,
+            onDismiss = {
+                if (!isDeletingNotesCloud) notesToDelete = null
+            },
+            onDeleteDeviceOnly = {
+                targetNotes.forEach { n ->
+                    GraphiteRepository.permanentlyDeleteNotebook(n.id)
+                }
+                selectedNotebookIds = selectedNotebookIds - targetNotes.map { it.id }.toSet()
+                notesToDelete = null
+                Toast.makeText(context, if (targetNotes.size == 1) "Deleted from device" else "Deleted ${targetNotes.size} notes from device", Toast.LENGTH_SHORT).show()
+            },
+            onDeleteCloudAndDevice = {
+                isDeletingNotesCloud = true
+                scope.launch {
+                    targetNotes.forEach { n ->
+                        try {
+                            syncManager.deleteNoteFromCloud(n.id)
+                        } catch (_: Exception) {}
+                        GraphiteRepository.permanentlyDeleteNotebook(n.id)
+                    }
+                    isDeletingNotesCloud = false
+                    selectedNotebookIds = selectedNotebookIds - targetNotes.map { it.id }.toSet()
+                    notesToDelete = null
+                    val msg = if (targetNotes.size == 1) {
+                        "Deleted from device & Supabase cloud"
+                    } else {
+                        "Deleted ${targetNotes.size} notes from device & Supabase cloud"
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
             }
         )
     }
@@ -934,10 +1075,14 @@ private fun QuickActionCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotebookThumbnailCard(
     notebook: NotebookItem,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onToggleStar: () -> Unit,
     onToggleBookmark: () -> Unit,
     onRename: () -> Unit,
@@ -956,7 +1101,17 @@ private fun NotebookThumbnailCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isSelected) Color(0xFF2A2016) else Color.Transparent)
+            .then(
+                if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
+                else Modifier
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Document Thumbnail Sheet matching Page 4
@@ -971,6 +1126,25 @@ private fun NotebookThumbnailCard(
             shape = RoundedCornerShape(6.dp)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .padding(4.dp)
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(GraphiteOrange)
+                            .align(Alignment.TopStart),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selected",
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+
                 if (isPdf) {
                     // PDF Badge & Document Layout
                     Column(
@@ -1200,10 +1374,14 @@ private fun NotebookThumbnailCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotebookListRow(
     notebook: NotebookItem,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onToggleStar: () -> Unit,
     onToggleBookmark: () -> Unit,
     onRename: () -> Unit,
@@ -1221,11 +1399,28 @@ private fun NotebookListRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFF141414))
-            .clickable(onClick = onClick)
+            .background(if (isSelected) Color(0xFF2A2016) else Color(0xFF141414))
+            .then(
+                if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
+                else Modifier
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (isSelectionMode) {
+            Icon(
+                imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                contentDescription = null,
+                tint = if (isSelected) GraphiteOrange else Color.Gray,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+        }
+
         Icon(
             imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
             contentDescription = null,
@@ -1284,6 +1479,10 @@ private fun NotebookListRow(
                         text = { Text("Restore", color = Color(0xFF81C784)) },
                         onClick = { menuExpanded = false; onRestore() }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Delete Permanently", color = Color(0xFFFF5252)) },
+                        onClick = { menuExpanded = false; onPermanentlyDelete() }
+                    )
                 } else {
                     DropdownMenuItem(
                         text = { Text("Move to Trash", color = Color(0xFFFF5252)) },
@@ -1293,6 +1492,109 @@ private fun NotebookListRow(
             }
         }
     }
+}
+
+@Composable
+private fun DeleteNoteChoiceDialog(
+    notes: List<NotebookItem>,
+    isDeleting: Boolean,
+    onDismiss: () -> Unit,
+    onDeleteDeviceOnly: () -> Unit,
+    onDeleteCloudAndDevice: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isDeleting) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = if (notes.size == 1) "Delete Note" else "Delete ${notes.size} Notes",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (isDeleting) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("Deleting from Supabase cloud database and device...", color = Color.LightGray, fontSize = 13.sp)
+                    }
+                } else {
+                    Text(
+                        text = if (notes.size == 1) {
+                            "Choose how you want to delete \"${notes.first().title}\":"
+                        } else {
+                            "Choose how you want to delete these ${notes.size} notes:"
+                        },
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+
+                    // Option 1: Delete from this device only
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF1E1E1E),
+                        border = BorderStroke(1.dp, Color(0xFF333333)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDeleteDeviceOnly() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Delete from this device only", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("Removes the local note file. The note remains safe in your Supabase cloud.", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    // Option 2: Delete from Cloud & Device
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF261818),
+                        border = BorderStroke(1.dp, Color(0xFF552222)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDeleteCloudAndDevice() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.CloudOff, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Delete from Cloud & Device", color = Color(0xFFFF7070), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("Purges the note from Supabase cloud database across all devices and removes it from this device.", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isDeleting) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant,
+        shape = RoundedCornerShape(14.dp)
+    )
 }
 
 @Composable

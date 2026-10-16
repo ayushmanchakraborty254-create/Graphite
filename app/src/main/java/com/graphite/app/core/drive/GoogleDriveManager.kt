@@ -146,6 +146,11 @@ interface DriveApiV3Uploader {
         fileName: String,
         parentFolderId: String? = null
     ): Result<DriveRemoteFile?> = Result.success(null)
+
+    suspend fun deleteFile(
+        accountEmail: String,
+        fileId: String
+    ): Result<Unit> = Result.success(Unit)
 }
 
 class DefaultDriveApiV3Uploader(
@@ -409,6 +414,20 @@ class DefaultDriveApiV3Uploader(
                 Result.success(null)
             }
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteFile(
+        accountEmail: String,
+        fileId: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            driveService.files().delete(fileId).setSupportsAllDrives(true).execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            SafeLogger.e("DefaultDriveApiV3Uploader", "Failed to delete file from Google Drive: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -1191,12 +1210,30 @@ class GoogleDriveManager(
         } else {
             emptyList()
         }
-        return (listOf(defaultFolder) + list).distinctBy { it.id }
+        val allFolders = listOf(defaultFolder) + list
+        val result = mutableListOf<DriveFolder>()
+        for (f in allFolders) {
+            val existingIdx = result.indexOfFirst {
+                it.id == f.id || it.name.trim().equals(f.name.trim(), ignoreCase = true)
+            }
+            if (existingIdx >= 0) {
+                val existing = result[existingIdx]
+                // If existing has a placeholder ID ("default_" or "custom_") but f has a real Drive ID, upgrade to real ID
+                if ((existing.id.startsWith("default_") || existing.id.startsWith("custom_")) &&
+                    (!f.id.startsWith("default_") && !f.id.startsWith("custom_"))
+                ) {
+                    result[existingIdx] = f
+                }
+            } else {
+                result.add(f)
+            }
+        }
+        return result
     }
 
     fun addCuratedBookshelfFolder(folder: DriveFolder) {
         val current = getCuratedBookshelfFolders().toMutableList()
-        val existingIndex = current.indexOfFirst { it.id == folder.id || it.name.equals(folder.name, ignoreCase = true) }
+        val existingIndex = current.indexOfFirst { it.id == folder.id || it.name.trim().equals(folder.name.trim(), ignoreCase = true) }
         if (existingIndex >= 0) {
             current[existingIndex] = folder
         } else {
@@ -1337,6 +1374,9 @@ class GoogleDriveManager(
                     currentFolder = createResult.getOrDefault(DriveFolder("folder_${targetName.replace(" ", "_")}", targetName))
                 }
                 setBookshelfSyncedFolder(currentFolder)
+                if (targetName.equals("Graphite Bookshelf", ignoreCase = true)) {
+                    setDefaultBookshelfFolder(currentFolder)
+                }
                 addCuratedBookshelfFolder(currentFolder)
             }
 
@@ -1514,6 +1554,41 @@ class GoogleDriveManager(
             GraphiteRepository.addBook(book.copy(driveFileId = res.fileId))
         }
         res
+    }
+
+    suspend fun deleteBookFromDrive(
+        context: Context,
+        book: Book
+    ): Result<Unit> = withContext(ioDispatcher) {
+        val accountEmail = getResolvedAccountEmail(context)
+        if (accountEmail.isNullOrBlank()) {
+            return@withContext Result.failure(IllegalStateException("Drive account not authorized"))
+        }
+
+        try {
+            val uploader = uploaderProvider(context)
+            var targetFileId = book.driveFileId
+
+            // If driveFileId is missing, locate the file by name in the synced folder
+            if (targetFileId.isNullOrBlank()) {
+                val folder = getBookshelfSyncedFolder()
+                val fileName = (book.filePath?.let { File(it).name } ?: "${book.title}.pdf")
+                val found = uploader.findFileByName(
+                    accountEmail = accountEmail,
+                    fileName = fileName,
+                    parentFolderId = folder.id.takeIf { !it.startsWith("default_") && !it.startsWith("custom_") }
+                ).getOrNull()
+                targetFileId = found?.id
+            }
+
+            if (!targetFileId.isNullOrBlank()) {
+                uploader.deleteFile(accountEmail, targetFileId)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            SafeLogger.e(TAG, "Failed to delete book from Drive: ${e.message}", e)
+            Result.failure(e)
+        }
     }
 
     private val _isSyncingNotes = MutableStateFlow(false)

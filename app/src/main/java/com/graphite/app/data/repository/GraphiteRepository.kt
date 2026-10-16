@@ -186,6 +186,13 @@ object GraphiteRepository {
     }
 
     fun deleteBook(id: String) {
+        val currentBook = _books.value.find { it.id == id }
+        currentBook?.filePath?.let { path ->
+            try {
+                val f = File(path)
+                if (f.exists()) f.delete()
+            } catch (_: Exception) {}
+        }
         _books.update { list -> list.filter { it.id != id } }
         _stats.update { it.copy(totalBooks = _books.value.size) }
         saveToDisk()
@@ -462,6 +469,13 @@ object GraphiteRepository {
     fun permanentlyDeleteNotebook(id: String) {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val toDelete = userList.find { it.id == id }
+        toDelete?.filePath?.let { path ->
+            try {
+                val f = File(path)
+                if (f.exists()) f.delete()
+            } catch (_: Exception) {}
+        }
         userList.removeAll { it.id == id }
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }

@@ -106,6 +106,10 @@ class SupabaseSyncManager(
         }
     }
 
+    suspend fun deleteNoteFromCloud(notebookId: String): Result<Unit> = withContext(ioDispatcher) {
+        notesRepository.deleteNote(notebookId)
+    }
+
     fun resetStatus() {
         _syncStatus.value = SupabaseSyncStatus.Idle
     }

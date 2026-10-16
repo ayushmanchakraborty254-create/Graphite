@@ -7,8 +7,11 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.auth.api.identity.Identity
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -80,6 +83,11 @@ fun BookshelfScreen(
     val isSyncingDrive by driveManager.isSyncingBookshelf.collectAsState()
     val driveSyncStatus by driveManager.bookshelfSyncStatus.collectAsState()
 
+    // Book Selection & Deletion state
+    var selectedBookIds by remember { mutableStateOf(setOf<String>()) }
+    var booksToDelete by remember { mutableStateOf<List<Book>?>(null) }
+    var isDeletingBooks by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         GraphiteRepository.cleanBookDuplicatesAndGhosts()
     }
@@ -127,14 +135,85 @@ fun BookshelfScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
         ) {
-            // Header Bar: Category selector, Sync button, Sort button, Profile
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 16.dp, bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            if (selectedBookIds.isNotEmpty()) {
+                // Contextual Selection Action Bar with Delete (Bin) icon
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { selectedBookIds = emptySet() }) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel Selection",
+                                tint = Color.White
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${selectedBookIds.size} Selected",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val currentCategoryFilteredIds = books.filter { book ->
+                            val matchesCategory = when (selectedCategory) {
+                                "Completed" -> book.progressPercent >= 100
+                                "Unread" -> book.progressPercent == 0
+                                "Favorites" -> book.isFavorite
+                                else -> true
+                            }
+                            val matchesSearch = if (searchQuery.isBlank()) true else {
+                                book.title.contains(searchQuery, ignoreCase = true) || book.author.contains(searchQuery, ignoreCase = true)
+                            }
+                            matchesCategory && matchesSearch
+                        }.map { it.id }.toSet()
+
+                        val allSelected = selectedBookIds.size == currentCategoryFilteredIds.size && currentCategoryFilteredIds.isNotEmpty()
+                        IconButton(
+                            onClick = {
+                                selectedBookIds = if (allSelected) emptySet() else currentCategoryFilteredIds
+                            }
+                        ) {
+                            Icon(
+                                imageVector = if (allSelected) Icons.Default.CheckCircle else Icons.Default.SelectAll,
+                                contentDescription = if (allSelected) "Deselect All" else "Select All",
+                                tint = if (allSelected) GraphiteOrange else Color.White
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val toDelete = books.filter { it.id in selectedBookIds }
+                                if (toDelete.isNotEmpty()) {
+                                    booksToDelete = toDelete
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete Selected Books",
+                                tint = Color(0xFFFF5252),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Header Bar: Category selector, Sync button, Sort button, Profile
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                 Box {
                     Row(
                         modifier = Modifier
@@ -265,8 +344,9 @@ fun BookshelfScreen(
                     GoogleProfileTopBarIcon()
                 }
             }
+        }
 
-            // Pill Search Bar: "Search Books"
+        // Pill Search Bar: "Search Books"
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -363,50 +443,83 @@ fun BookshelfScreen(
                         )
                     }
                 }
-            } else if (isGridView) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 130.dp),
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = PaddingValues(bottom = 88.dp)
-                ) {
-                    items(filteredBooks) { book ->
-                        BookshelfItemGridCard(
-                            book = book,
-                            onOpen = { onOpenBook(book.id) },
-                            onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
-                            onUploadToDrive = {
-                                scope.launch {
-                                    val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
-                                    val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
-                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            onDelete = { GraphiteRepository.deleteBook(book.id) }
-                        )
+            } else {
+                val isSelectionMode = selectedBookIds.isNotEmpty()
+                val toggleBookSelection = { bookId: String ->
+                    selectedBookIds = if (bookId in selectedBookIds) {
+                        selectedBookIds - bookId
+                    } else {
+                        selectedBookIds + bookId
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    contentPadding = PaddingValues(bottom = 88.dp)
-                ) {
-                    items(filteredBooks) { book ->
-                        BookshelfItemRow(
-                            book = book,
-                            onOpen = { onOpenBook(book.id) },
-                            onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
-                            onUploadToDrive = {
-                                scope.launch {
-                                    val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
-                                    val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
-                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            onDelete = { GraphiteRepository.deleteBook(book.id) }
-                        )
+
+                if (isGridView) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 130.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(bottom = 88.dp)
+                    ) {
+                        items(filteredBooks) { book ->
+                            BookshelfItemGridCard(
+                                book = book,
+                                isSelected = book.id in selectedBookIds,
+                                isSelectionMode = isSelectionMode,
+                                onOpen = {
+                                    if (isSelectionMode) {
+                                        toggleBookSelection(book.id)
+                                    } else {
+                                        onOpenBook(book.id)
+                                    }
+                                },
+                                onLongClick = {
+                                    toggleBookSelection(book.id)
+                                },
+                                onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
+                                onUploadToDrive = {
+                                    scope.launch {
+                                        val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                        val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                onDelete = { booksToDelete = listOf(book) }
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(bottom = 88.dp)
+                    ) {
+                        items(filteredBooks) { book ->
+                            BookshelfItemRow(
+                                book = book,
+                                isSelected = book.id in selectedBookIds,
+                                isSelectionMode = isSelectionMode,
+                                onOpen = {
+                                    if (isSelectionMode) {
+                                        toggleBookSelection(book.id)
+                                    } else {
+                                        onOpenBook(book.id)
+                                    }
+                                },
+                                onLongClick = {
+                                    toggleBookSelection(book.id)
+                                },
+                                onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
+                                onUploadToDrive = {
+                                    scope.launch {
+                                        val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                        val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                onDelete = { booksToDelete = listOf(book) }
+                            )
+                        }
                     }
                 }
             }
@@ -440,6 +553,43 @@ fun BookshelfScreen(
             onDismiss = { showDriveSyncDialog = false },
             onSyncCompleted = { report ->
                 importStatusMessage = report.message
+            }
+        )
+    }
+
+    // Delete Book Choices Dialog
+    booksToDelete?.let { targetBooks ->
+        DeleteBookChoiceDialog(
+            books = targetBooks,
+            isDeleting = isDeletingBooks,
+            onDismiss = {
+                if (!isDeletingBooks) booksToDelete = null
+            },
+            onDeleteDeviceOnly = {
+                targetBooks.forEach { b ->
+                    GraphiteRepository.deleteBook(b.id)
+                }
+                selectedBookIds = selectedBookIds - targetBooks.map { it.id }.toSet()
+                booksToDelete = null
+                Toast.makeText(context, if (targetBooks.size == 1) "Deleted from device" else "Deleted ${targetBooks.size} books from device", Toast.LENGTH_SHORT).show()
+            },
+            onDeleteCloudAndDevice = {
+                isDeletingBooks = true
+                scope.launch {
+                    targetBooks.forEach { b ->
+                        driveManager.deleteBookFromDrive(context, b)
+                        GraphiteRepository.deleteBook(b.id)
+                    }
+                    isDeletingBooks = false
+                    selectedBookIds = selectedBookIds - targetBooks.map { it.id }.toSet()
+                    booksToDelete = null
+                    val msg = if (targetBooks.size == 1) {
+                        "Deleted from device & Google Drive"
+                    } else {
+                        "Deleted ${targetBooks.size} books from device & Google Drive"
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
             }
         )
     }
@@ -641,8 +791,28 @@ private fun BookshelfDriveSyncDialog(
                         fontSize = 11.sp
                     )
 
+                    val displayCuratedFolders = remember(curatedFolders) {
+                        val result = mutableListOf<DriveFolder>()
+                        for (f in curatedFolders) {
+                            val idx = result.indexOfFirst {
+                                it.id == f.id || it.name.trim().equals(f.name.trim(), ignoreCase = true)
+                            }
+                            if (idx >= 0) {
+                                val existing = result[idx]
+                                if ((existing.id.startsWith("default_") || existing.id.startsWith("custom_")) &&
+                                    (!f.id.startsWith("default_") && !f.id.startsWith("custom_"))
+                                ) {
+                                    result[idx] = f
+                                }
+                            } else {
+                                result.add(f)
+                            }
+                        }
+                        result
+                    }
+
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        curatedFolders.forEach { folder ->
+                        displayCuratedFolders.forEach { folder ->
                             val isSelected = folder.id == activeFolder.id ||
                                     (folder.id.startsWith("default_") && activeFolder.id.startsWith("default_")) ||
                                     folder.name.equals(activeFolder.name, ignoreCase = true)
@@ -930,10 +1100,14 @@ private fun BookshelfDriveSyncDialog(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookshelfItemRow(
     book: Book,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     onOpen: () -> Unit,
+    onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     onUploadToDrive: () -> Unit,
     onDelete: () -> Unit
@@ -944,10 +1118,28 @@ private fun BookshelfItemRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onOpen)
-            .padding(vertical = 6.dp),
+            .background(if (isSelected) Color(0xFF2A2016) else Color.Transparent)
+            .then(
+                if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
+                else Modifier
+            )
+            .combinedClickable(
+                onClick = onOpen,
+                onLongClick = onLongClick
+            )
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (isSelectionMode) {
+            Icon(
+                imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                contentDescription = null,
+                tint = if (isSelected) GraphiteOrange else Color.Gray,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+        }
+
         // Book Cover
         BookCover(
             coverType = book.coverType,
@@ -1062,10 +1254,14 @@ private fun BookshelfItemRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookshelfItemGridCard(
     book: Book,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     onOpen: () -> Unit,
+    onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     onUploadToDrive: () -> Unit,
     onDelete: () -> Unit
@@ -1076,7 +1272,15 @@ private fun BookshelfItemGridCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onOpen)
+            .background(if (isSelected) Color(0xFF2A2016) else Color.Transparent)
+            .then(
+                if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
+                else Modifier
+            )
+            .combinedClickable(
+                onClick = onOpen,
+                onLongClick = onLongClick
+            )
             .padding(6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -1088,6 +1292,24 @@ private fun BookshelfItemGridCard(
                     .width(110.dp)
                     .height(150.dp)
             )
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(GraphiteOrange)
+                        .align(Alignment.TopStart),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Selected",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
             if (book.isFavorite) {
                 Icon(
                     imageVector = Icons.Default.Star,
@@ -1112,6 +1334,109 @@ private fun BookshelfItemGridCard(
             fontSize = 11.sp
         )
     }
+}
+
+@Composable
+private fun DeleteBookChoiceDialog(
+    books: List<Book>,
+    isDeleting: Boolean,
+    onDismiss: () -> Unit,
+    onDeleteDeviceOnly: () -> Unit,
+    onDeleteCloudAndDevice: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isDeleting) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = if (books.size == 1) "Delete Book" else "Delete ${books.size} Books",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (isDeleting) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("Deleting from Google Drive and device...", color = Color.LightGray, fontSize = 13.sp)
+                    }
+                } else {
+                    Text(
+                        text = if (books.size == 1) {
+                            "Choose how you want to delete \"${books.first().title}\":"
+                        } else {
+                            "Choose how you want to delete these ${books.size} books:"
+                        },
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+
+                    // Option 1: Delete from this device only
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF1E1E1E),
+                        border = BorderStroke(1.dp, Color(0xFF333333)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDeleteDeviceOnly() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.PhoneAndroid, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Delete from this device only", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("Removes the local file. The book remains safe in Google Drive.", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    // Option 2: Delete from Cloud & Device
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF261818),
+                        border = BorderStroke(1.dp, Color(0xFF552222)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDeleteCloudAndDevice() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.CloudOff, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Delete from Cloud & Device", color = Color(0xFFFF7070), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("Removes from this device AND permanently deletes the file from Google Drive.", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isDeleting) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant,
+        shape = RoundedCornerShape(14.dp)
+    )
 }
 
 @Composable
