@@ -81,11 +81,17 @@ class SupabaseSyncManager(
             val remoteNotes = remoteNotesResult.getOrThrow()
             val remoteMap = remoteNotes.associateBy { it.id }
 
-            // 2. Identify local notes that are genuinely newer than remote or local-only
+            // 2. Identify local notes that are genuinely newer than remote or local-only (prevent resurrecting cloud tombstones)
             val localNotes = graphiteRepository.getAllNotesForActiveUser()
             val pendingLocalNotesToUpload = localNotes.filter { local ->
                 val remote = remoteMap[local.id]
-                remote == null || local.updatedAtMillis > remote.updatedAtMillis
+                if (remote == null) {
+                    !local.isDeleted
+                } else if (remote.isDeleted) {
+                    false // Never re-upload if cloud already has a deletion tombstone
+                } else {
+                    local.updatedAtMillis > remote.updatedAtMillis
+                }
             }
 
             // 3. Upload only newer/dirty local notes to Supabase via idempotent upsert

@@ -8,6 +8,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -243,12 +245,21 @@ class SupabaseNotesRepository(
 
     suspend fun deleteNote(notebookId: String): Result<Unit> = withContext(ioDispatcher) {
         try {
+            val now = System.currentTimeMillis()
+            val patchBody = buildJsonObject {
+                put("is_deleted", true)
+                put("updated_at_millis", now)
+                put("updated_at", "Deleted")
+            }.toString()
+
             executeWithRetry { token ->
                 Request.Builder()
                     .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
                     .header("apikey", publishableKey)
                     .header("Authorization", "Bearer $token")
-                    .delete()
+                    .header("Content-Type", "application/json")
+                    .header("Prefer", "return=minimal")
+                    .patch(patchBody.toRequestBody("application/json".toMediaType()))
                     .build()
             }.use { response ->
                 if (!response.isSuccessful) {

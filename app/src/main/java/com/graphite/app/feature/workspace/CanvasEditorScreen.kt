@@ -240,7 +240,10 @@ fun CanvasEditorScreen(
                                 val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                                 val canvas = android.graphics.Canvas(bmp)
                                 canvas.drawColor(android.graphics.Color.WHITE)
-                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                val matrix = android.graphics.Matrix().apply {
+                                    setScale(w.toFloat() / page.width.toFloat(), h.toFloat() / page.height.toFloat())
+                                }
+                                page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 val ar = h.toFloat() / w.toFloat()
                                 page.close()
 
@@ -258,7 +261,10 @@ fun CanvasEditorScreen(
                                 val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.ARGB_8888)
                                 val canvas = android.graphics.Canvas(thumbBmp)
                                 canvas.drawColor(android.graphics.Color.WHITE)
-                                page.render(thumbBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                val thumbMatrix = android.graphics.Matrix().apply {
+                                    setScale(thumbW.toFloat() / page.width.toFloat(), thumbH.toFloat() / page.height.toFloat())
+                                }
+                                page.render(thumbBmp, null, thumbMatrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 page.close()
 
                                 withContext(Dispatchers.Main) {
@@ -299,7 +305,10 @@ fun CanvasEditorScreen(
                             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                             val canvas = android.graphics.Canvas(bmp)
                             canvas.drawColor(android.graphics.Color.WHITE)
-                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            val matrix = android.graphics.Matrix().apply {
+                                setScale(w.toFloat() / page.width.toFloat(), h.toFloat() / page.height.toFloat())
+                            }
+                            page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             page.close()
 
                             withContext(Dispatchers.Main) {
@@ -332,7 +341,10 @@ fun CanvasEditorScreen(
                             val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.ARGB_8888)
                             val canvas = android.graphics.Canvas(thumbBmp)
                             canvas.drawColor(android.graphics.Color.WHITE)
-                            page.render(thumbBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            val thumbMatrix = android.graphics.Matrix().apply {
+                                setScale(thumbW.toFloat() / page.width.toFloat(), thumbH.toFloat() / page.height.toFloat())
+                            }
+                            page.render(thumbBmp, null, thumbMatrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             page.close()
                             withContext(Dispatchers.Main) {
                                 pageThumbnails[p] = thumbBmp
@@ -484,7 +496,7 @@ fun CanvasEditorScreen(
                                     bitmap = pageBmp.asImageBitmap(),
                                     contentDescription = "PDF Page ${pageIdx + 1}",
                                     modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Fit
+                                    contentScale = ContentScale.FillBounds
                                 )
                             } else if (pageIdx < pdfPageCount) {
                                 // PDF page loading placeholder
@@ -588,15 +600,16 @@ fun CanvasEditorScreen(
                                         when (packet.action) {
                                             MotionActionType.DOWN -> {
                                                 activePageForStroke = pageIdx
-                                                val baseX = packet.x
-                                                val baseY = packet.y
+                                                val safeZoom = zoomScale.coerceAtLeast(0.01f)
+                                                val baseX = packet.x / safeZoom
+                                                val baseY = packet.y / safeZoom
                                                 if (selectedStudioTool == StudioTool.LASSO) {
                                                     lassoPoints = listOf(Offset(baseX, baseY))
                                                     selectedStrokeIndices = emptySet()
                                                     lassoBounds = null
                                                 } else if (isEffectiveEraser) {
-                                                    activeEraserCenter = Offset(packet.x, packet.y)
-                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f, pageIndex = pageIdx)
+                                                    activeEraserCenter = Offset(baseX, baseY)
+                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / safeZoom, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     activePoints = listOf(
@@ -605,29 +618,30 @@ fun CanvasEditorScreen(
                                                 }
                                             }
                                             MotionActionType.MOVE -> {
-                                                val baseX = packet.x
-                                                val baseY = packet.y
+                                                val safeZoom = zoomScale.coerceAtLeast(0.01f)
+                                                val baseX = packet.x / safeZoom
+                                                val baseY = packet.y / safeZoom
                                                 if (selectedStudioTool == StudioTool.LASSO) {
                                                     lassoPoints = lassoPoints + Offset(baseX, baseY)
                                                 } else if (isEffectiveEraser) {
-                                                    activeEraserCenter = Offset(packet.x, packet.y)
+                                                    activeEraserCenter = Offset(baseX, baseY)
                                                     for (h in 0 until motionEvent.historySize) {
                                                         workspaceViewModel.eraseAt(
-                                                            motionEvent.getHistoricalX(0, h),
-                                                            motionEvent.getHistoricalY(0, h),
-                                                            32f,
+                                                            motionEvent.getHistoricalX(0, h) / safeZoom,
+                                                            motionEvent.getHistoricalY(0, h) / safeZoom,
+                                                            32f / safeZoom,
                                                             pageIndex = pageIdx
                                                         )
                                                     }
-                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f, pageIndex = pageIdx)
+                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / safeZoom, pageIndex = pageIdx)
                                                 } else {
                                                     activeEraserCenter = null
                                                     val batch = ArrayList<InkPoint>(motionEvent.historySize + 1)
                                                     for (h in 0 until motionEvent.historySize) {
                                                         batch.add(
                                                             InkPoint(
-                                                                motionEvent.getHistoricalX(0, h),
-                                                                motionEvent.getHistoricalY(0, h),
+                                                                motionEvent.getHistoricalX(0, h) / safeZoom,
+                                                                motionEvent.getHistoricalY(0, h) / safeZoom,
                                                                 motionEvent.getHistoricalPressure(0, h).coerceIn(0.05f, 1f),
                                                                 motionEvent.getHistoricalEventTime(h)
                                                             )
@@ -686,6 +700,7 @@ fun CanvasEditorScreen(
                                     }
                             ) {
                                 val d = this.density
+                                val safeZoom = zoomScale.coerceAtLeast(0.01f)
 
                                 // Committed ink strokes for this specific page only
                                 uiState.strokes.forEachIndexed { idx, stroke ->
@@ -744,8 +759,8 @@ fun CanvasEditorScreen(
                                         path = lassoPath,
                                         color = Color(0xFF00BCD4),
                                         style = Stroke(
-                                            width = 2.dp.toPx(),
-                                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                                            width = 2.dp.toPx() / safeZoom,
+                                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f / safeZoom, 8f / safeZoom), 0f)
                                         )
                                     )
                                 }
@@ -763,8 +778,8 @@ fun CanvasEditorScreen(
                                             topLeft = Offset(b.left, b.top),
                                             size = androidx.compose.ui.geometry.Size(b.width, b.height),
                                             style = Stroke(
-                                                width = 1.5.dp.toPx(),
-                                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                                                width = 1.5.dp.toPx() / safeZoom,
+                                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f / safeZoom, 6f / safeZoom), 0f)
                                             )
                                         )
                                     }
@@ -774,14 +789,14 @@ fun CanvasEditorScreen(
                                 activeEraserCenter?.let { center ->
                                     drawCircle(
                                         color = Color(0xFFFF5252).copy(alpha = 0.35f),
-                                        radius = 28.dp.toPx(),
+                                        radius = 28.dp.toPx() / safeZoom,
                                         center = center
                                     )
                                     drawCircle(
                                         color = Color(0xFFFF5252),
-                                        radius = 28.dp.toPx(),
+                                        radius = 28.dp.toPx() / safeZoom,
                                         center = center,
-                                        style = Stroke(width = 2.dp.toPx())
+                                        style = Stroke(width = 2.dp.toPx() / safeZoom)
                                     )
                                 }
                             }

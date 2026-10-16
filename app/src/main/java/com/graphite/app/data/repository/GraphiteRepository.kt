@@ -515,7 +515,18 @@ object GraphiteRepository {
 
         for (remote in remoteNotes) {
             val local = localMap[remote.id]
-            if (local == null) {
+            if (remote.isDeleted) {
+                // If remote note is marked deleted, remove local note and clean up any physical file
+                if (local != null) {
+                    local.filePath?.let { path ->
+                        try {
+                            val f = File(path)
+                            if (f.exists()) f.delete()
+                        } catch (_: Exception) {}
+                    }
+                    localMap.remove(remote.id)
+                }
+            } else if (local == null) {
                 // New note from another device
                 localMap[remote.id] = remote.copy(userId = currentUid)
             } else {
@@ -535,8 +546,6 @@ object GraphiteRepository {
                         originalFileName = resolvedFileName,
                         pageCount = resolvedPageCount
                     )
-                } else if (remote.isDeleted && !local.isDeleted && remote.updatedAtMillis >= local.updatedAtMillis) {
-                    localMap[remote.id] = local.copy(isDeleted = true, updatedAtMillis = remote.updatedAtMillis)
                 } else if (!hasLocalFile && remote.filePath != null) {
                     // Update local file pointer if remote brought a materialized file
                     localMap[remote.id] = local.copy(
