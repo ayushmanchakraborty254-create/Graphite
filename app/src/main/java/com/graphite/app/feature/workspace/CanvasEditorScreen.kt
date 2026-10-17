@@ -93,6 +93,11 @@ enum class StudioTool {
     LASSO
 }
 
+enum class EditorInteractionMode {
+    PEN_MODE,   // Only Stylus draws; 1-finger scrolls; pinch-zoom
+    HAND_MODE   // Both Hand & Stylus draw; 2-finger scrolls; pinch-zoom
+}
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun CanvasEditorScreen(
@@ -128,6 +133,7 @@ fun CanvasEditorScreen(
     // Tool & Mode state
     var isReadOnlyMode by remember { mutableStateOf(false) } // ⊘ button
     var selectedStudioTool by remember { mutableStateOf(StudioTool.PEN) }
+    var interactionMode by remember { mutableStateOf(EditorInteractionMode.PEN_MODE) }
 
     // UI Drawer & Menu toggles
     var showPageDrawer by remember { mutableStateOf(false) }       // Top-left ⊞ (Image 4)
@@ -232,18 +238,19 @@ fun CanvasEditorScreen(
                                 totalPages = maxOf(totalPages, count)
                             }
 
-                            // Render first few pages immediately for instant sharp viewing
+                            // Render first few pages immediately in Full HD / 2K print resolution
                             for (p in 0 until minOf(count, 5)) {
                                 val page = renderer.openPage(p)
-                                val w = (page.width * 1.5f).toInt()
-                                val h = (page.height * 1.5f).toInt()
+                                val targetScale = (1800f / page.width.toFloat()).coerceIn(2.2f, 3.2f)
+                                val w = (page.width * targetScale).toInt()
+                                val h = (page.height * targetScale).toInt()
                                 val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                                 val canvas = android.graphics.Canvas(bmp)
                                 canvas.drawColor(android.graphics.Color.WHITE)
                                 val matrix = android.graphics.Matrix().apply {
                                     setScale(w.toFloat() / page.width.toFloat(), h.toFloat() / page.height.toFloat())
                                 }
-                                page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                                 val ar = h.toFloat() / w.toFloat()
                                 page.close()
 
@@ -300,15 +307,16 @@ fun CanvasEditorScreen(
                         val renderer = PdfRenderer(pfd)
                         if (currentPageIndex < renderer.pageCount) {
                             val page = renderer.openPage(currentPageIndex)
-                            val w = (page.width * 1.5f).toInt()
-                            val h = (page.height * 1.5f).toInt()
+                            val targetScale = (1800f / page.width.toFloat()).coerceIn(2.2f, 3.2f)
+                            val w = (page.width * targetScale).toInt()
+                            val h = (page.height * targetScale).toInt()
                             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                             val canvas = android.graphics.Canvas(bmp)
                             canvas.drawColor(android.graphics.Color.WHITE)
                             val matrix = android.graphics.Matrix().apply {
                                 setScale(w.toFloat() / page.width.toFloat(), h.toFloat() / page.height.toFloat())
                             }
-                            page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                             page.close()
 
                             withContext(Dispatchers.Main) {
@@ -390,9 +398,14 @@ fun CanvasEditorScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
+                .pointerInput(interactionMode, isReadOnlyMode) {
                     awaitEachGesture {
-                        var gestureMode = 0 // 0=undecided, 1=zoom, 2=scroll
+                        var lastCenter: Offset? = null
+                        var lastDist: Float? = null
+                        var scrollVelocityY = 0f
+                        var lastTime = 0L
+                        var totalDragY = 0f
+                        var isDragging1Finger = false
 
                         do {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -403,58 +416,110 @@ fun CanvasEditorScreen(
                                 it.type == PointerType.Stylus || it.type == PointerType.Eraser
                             }
 
-                            if (!hasStylus && pressed.size >= 2) {
+                            if (hasStylus || isReadOnlyMode) {
+                                // Stylus is active or read-only mode active: NEVER scroll from this detector!
+                                lastCenter = null
+                                lastDist = null
+                                scrollVelocityY = 0f
+                                isDragging1Finger = false
+                                totalDragY = 0f
+                            } else if (pressed.size >= 2) {
+                                // 2 OR MORE FINGERS:
+                                isDragging1Finger = false
+                                totalDragY = 0f
                                 val p0 = pressed[0].position
                                 val p1 = pressed[1].position
-                                val prev0 = pressed[0].previousPosition
-                                val prev1 = pressed[1].previousPosition
-
+                                val curCenter = (p0 + p1) / 2f
                                 val curDist = (p0 - p1).getDistance()
-                                val prevDist = (prev0 - prev1).getDistance()
-                                val pinchChange = kotlin.math.abs(curDist - prevDist)
+                                val now = System.currentTimeMillis()
 
-                                val dy0 = p0.y - prev0.y
-                                val dy1 = p1.y - prev1.y
-                                val avgDy = (dy0 + dy1) / 2f
-
-                                val dx0 = p0.x - prev0.x
-                                val dx1 = p1.x - prev1.x
-                                val avgDx = (dx0 + dx1) / 2f
-
-                                // Disambiguate gesture mode: lock to either zoom or scroll
-                                if (gestureMode == 0) {
-                                    if (pinchChange > 2.5f && curDist > 20f && prevDist > 20f) {
-                                        gestureMode = 1 // LOCKED TO ZOOM
-                                    } else if (kotlin.math.abs(avgDy) > 3.0f) {
-                                        gestureMode = 2 // LOCKED TO SCROLL
+                                if (lastCenter != null && lastDist != null && lastDist > 15f && curDist > 15f) {
+                                    // 1. Smooth simultaneous pinch-to-zoom (centered) - active in both modes
+                                    val factor = curDist / lastDist
+                                    val pinchDiff = kotlin.math.abs(curDist - lastDist)
+                                    if (factor in 0.85f..1.15f && pinchDiff > 0.8f) {
+                                        val oldZoom = zoomScale
+                                        val newZoom = (oldZoom * factor).coerceIn(0.25f, 4.0f)
+                                        zoomScale = newZoom
+                                        if (newZoom <= 1.0f) panX = 0f
                                     }
-                                }
 
-                                if (gestureMode == 1) {
-                                    // Pinch-to-zoom when fingers move apart or together (Strictly NO vertical scroll!)
-                                    if (prevDist > 10f && curDist > 10f && pinchChange > 0.5f) {
-                                        val factor = curDist / prevDist
-                                        if (factor in 0.7f..1.4f) {
-                                            zoomScale = (zoomScale * factor).coerceIn(0.25f, 4.0f)
-                                            if (zoomScale <= 1.0f) panX = 0f
+                                    // 2. In HAND_MODE: 2 fingers scroll the pages vertically!
+                                    if (interactionMode == EditorInteractionMode.HAND_MODE) {
+                                        val dy = curCenter.y - lastCenter.y
+                                        if (kotlin.math.abs(dy) > 0.1f) {
+                                            listState.dispatchRawDelta(-dy)
+                                            val dt = (now - lastTime).coerceAtLeast(1)
+                                            val instantV = (-dy / dt) * 1000f
+                                            scrollVelocityY = scrollVelocityY * 0.4f + instantV * 0.6f
                                         }
                                     }
-                                } else if (gestureMode == 2) {
-                                    // Two-finger scroll: swipe up/down (Strictly NO zoom changes!)
-                                    if (kotlin.math.abs(avgDy) > 0.5f) {
-                                        listState.dispatchRawDelta(-avgDy)
-                                    }
 
-                                    // Horizontal pan when zoomed in
-                                    if (zoomScale > 1f && kotlin.math.abs(avgDx) > 0.5f) {
-                                        panX = (panX + avgDx).coerceIn(-maxPanX, maxPanX)
+                                    // 3. Pan horizontally only when zoomed in
+                                    val dx = curCenter.x - lastCenter.x
+                                    if (zoomScale > 1f && kotlin.math.abs(dx) > 0.1f) {
+                                        panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
                                     }
                                 }
 
-                                // Consume touch events so child canvases don't receive two-finger events
+                                lastCenter = curCenter
+                                lastDist = curDist
+                                lastTime = now
+
+                                // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
+                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE) {
+                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically!
+                                val curPos = pressed[0].position
+                                val now = System.currentTimeMillis()
+
+                                if (lastCenter != null) {
+                                    val dy = curPos.y - lastCenter.y
+                                    totalDragY += kotlin.math.abs(dy)
+                                    if (totalDragY > 8f) {
+                                        isDragging1Finger = true
+                                    }
+                                    if (isDragging1Finger && kotlin.math.abs(dy) > 0.1f) {
+                                        listState.dispatchRawDelta(-dy)
+                                        val dt = (now - lastTime).coerceAtLeast(1)
+                                        val instantV = (-dy / dt) * 1000f
+                                        scrollVelocityY = scrollVelocityY * 0.4f + instantV * 0.6f
+                                    }
+                                }
+
+                                lastCenter = curPos
+                                lastTime = now
+                                lastDist = null
+
+                                // Consume the 1-finger touch so canvas does not ink
+                                pressed[0].consume()
                             } else {
-                                gestureMode = 0
+                                // Fingers lifted: fling momentum if swiped with velocity
+                                val shouldFling = (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
+                                        (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
+                                if (shouldFling && kotlin.math.abs(scrollVelocityY) > 180f) {
+                                    val flingAmount = (scrollVelocityY * 0.22f).coerceIn(-2000f, 2000f)
+                                    scope.launch {
+                                        var consumed = 0f
+                                        androidx.compose.animation.core.animate(
+                                            initialValue = 0f,
+                                            targetValue = flingAmount,
+                                            animationSpec = androidx.compose.animation.core.tween(
+                                                durationMillis = 350,
+                                                easing = androidx.compose.animation.core.FastOutSlowInEasing
+                                            )
+                                        ) { value, _ ->
+                                            val step = value - consumed
+                                            listState.dispatchRawDelta(step)
+                                            consumed = value
+                                        }
+                                    }
+                                }
+                                scrollVelocityY = 0f
+                                lastCenter = null
+                                lastDist = null
+                                isDragging1Finger = false
+                                totalDragY = 0f
                             }
                         } while (pressed.isNotEmpty())
                     }
@@ -467,31 +532,36 @@ fun CanvasEditorScreen(
                     .fillMaxSize()
                     .padding(top = 58.dp, bottom = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 items(totalPages) { pageIdx ->
-                    // Outer layout boundary holding the scaled footprint in LazyColumn
+                    // Centering wrapper row to guarantee page sheet remains centered across full width
                     Box(
-                        modifier = Modifier
-                            .offset { IntOffset(panX.roundToInt(), 0) }
-                            .width(scaledPageWidth)
-                            .height(scaledPageHeight),
-                        contentAlignment = Alignment.TopStart
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
                     ) {
-                        // The page card (white paper sheet + shadow + all contents scale as ONE unified unit)
-                        Card(
+                        // Outer layout boundary holding the scaled footprint in LazyColumn
+                        Box(
                             modifier = Modifier
-                                .requiredSize(basePageWidth, basePageHeight)
-                                .graphicsLayer {
-                                    scaleX = zoomScale
-                                    scaleY = zoomScale
-                                    transformOrigin = TransformOrigin(0f, 0f)
-                                }
-                                .shadow(6.dp, RoundedCornerShape(3.dp)),
-                            shape = RoundedCornerShape(3.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White)
+                                .offset { IntOffset(panX.roundToInt(), 0) }
+                                .width(scaledPageWidth)
+                                .height(scaledPageHeight),
+                            contentAlignment = Alignment.Center
                         ) {
+                            // The page card (white paper sheet + shadow + all contents scale as ONE unified unit)
+                            Card(
+                                modifier = Modifier
+                                    .requiredSize(basePageWidth, basePageHeight)
+                                    .graphicsLayer {
+                                        scaleX = zoomScale
+                                        scaleY = zoomScale
+                                        transformOrigin = TransformOrigin(0.5f, 0.5f)
+                                    }
+                                    .shadow(6.dp, RoundedCornerShape(3.dp)),
+                                shape = RoundedCornerShape(3.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color.White)
+                            ) {
                             Box(modifier = Modifier.fillMaxSize()) {
                                 // Layer A: Document content
                             val pageBmp = pdfBitmaps[pageIdx]
@@ -573,27 +643,45 @@ fun CanvasEditorScreen(
 
                                         val pointerCount = motionEvent.pointerCount
 
-                                        // Ignore any two-finger touches (handled by the viewport)
+                                        // Check if hardware stylus or eraser is on screen
                                         val hasHardwareStylus = (0 until pointerCount).any { idx ->
                                             val t = motionEvent.getToolType(idx)
                                             t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
                                         }
-                                        if (pointerCount >= 2 && !hasHardwareStylus) {
-                                            activePoints = emptyList()
-                                            lassoPoints = emptyList()
-                                            activeEraserCenter = null
-                                            return@pointerInteropFilter true
+
+                                        // 1. IN PEN_MODE: strictly ONLY hardware stylus draws! Hand/finger NEVER draws!
+                                        if (interactionMode == EditorInteractionMode.PEN_MODE) {
+                                            if (!hasHardwareStylus) {
+                                                // Any non-stylus touch (finger, hand, palm)
+                                                activePoints = emptyList()
+                                                lassoPoints = emptyList()
+                                                activeEraserCenter = null
+                                                return@pointerInteropFilter true
+                                            }
+                                        } else {
+                                            // 2. IN HAND_MODE: multi-finger touch (>= 2) aborts drawing and delegates to 2-finger scroll/pinch
+                                            if (pointerCount >= 2 && !hasHardwareStylus) {
+                                                activePoints = emptyList()
+                                                lassoPoints = emptyList()
+                                                activeEraserCenter = null
+                                                return@pointerInteropFilter true
+                                            }
                                         }
 
                                         val packet = StylusEventParser.parse(motionEvent, 0)
-                                        val isFingerOnMobile = !isTablet && (motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER || packet.toolType == StylusToolType.FINGER)
-                                        val accepted = isFingerOnMobile || palmFilter.shouldAcceptEvent(packet)
+
+                                        // In PEN_MODE: accepted strictly if hasHardwareStylus
+                                        // In HAND_MODE: accepted for both hand and stylus
+                                        val accepted = if (interactionMode == EditorInteractionMode.PEN_MODE) {
+                                            hasHardwareStylus
+                                        } else {
+                                            true
+                                        }
 
                                         workspaceViewModel.setStylusActive(
                                             packet.toolType == StylusToolType.STYLUS || packet.toolType == StylusToolType.ERASER
                                         )
 
-                                        // Reject finger touches & palm contact on tablet: STYLUS ONLY DRAWS!
                                         if (!accepted) {
                                             return@pointerInteropFilter true
                                         }
@@ -841,6 +929,7 @@ fun CanvasEditorScreen(
                 }
             }
         }
+    }
 
             // Floating Zoom Control Pill (Bottom Right)
             Card(
@@ -1062,6 +1151,39 @@ fun CanvasEditorScreen(
                             imageVector = Icons.Default.Block,
                             contentDescription = "Read-Only Mode Toggle",
                             tint = if (isReadOnlyMode) Color(0xFF29B6F6) else Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    // Interaction Mode toggle button (Pen Mode: Only Stylus draws vs Hand Mode: Hand & Stylus draw)
+                    IconButton(
+                        onClick = {
+                            interactionMode = if (interactionMode == EditorInteractionMode.PEN_MODE) {
+                                EditorInteractionMode.HAND_MODE
+                            } else {
+                                EditorInteractionMode.PEN_MODE
+                            }
+                            Toast.makeText(
+                                context,
+                                if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                    "Pen Mode: Only Stylus draws (1-finger scroll & pinch-zoom)"
+                                else
+                                    "Hand Mode: Draw with Hand & Stylus (2-finger scroll & pinch-zoom)",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                Icons.Default.Create
+                            else
+                                Icons.Default.TouchApp,
+                            contentDescription = "Interaction Mode Toggle",
+                            tint = if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                Color(0xFF29B6F6)
+                            else
+                                Color(0xFFFFB300),
                             modifier = Modifier.size(18.dp)
                         )
                     }

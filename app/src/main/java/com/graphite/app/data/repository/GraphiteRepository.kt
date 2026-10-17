@@ -299,7 +299,9 @@ object GraphiteRepository {
         title: String,
         paperStyle: PaperStyle = PaperStyle.RULED,
         folderId: String = "my_notes",
-        customId: String = UUID.randomUUID().toString()
+        customId: String = UUID.randomUUID().toString(),
+        mimeType: String? = null,
+        initialPreviewLines: List<String>? = null
     ): NotebookItem {
         val now = System.currentTimeMillis()
         val formatter = SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault())
@@ -311,10 +313,11 @@ object GraphiteRepository {
             title = title,
             folderId = folderId,
             paperStyle = paperStyle,
+            mimeType = mimeType,
             createdAtMillis = now,
             updatedAtMillis = now,
             updatedAtFormatted = formatter.format(Date(now)),
-            previewLines = listOf("New handwritten page")
+            previewLines = initialPreviewLines ?: listOf("New handwritten page")
         )
 
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
@@ -323,6 +326,30 @@ object GraphiteRepository {
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
         saveToDisk()
         return newNotebook
+    }
+
+    fun updateTextNotebook(id: String, title: String, lines: List<String>) {
+        val now = System.currentTimeMillis()
+        val formatter = SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault())
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val index = userList.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val existing = userList[index]
+            val updated = existing.copy(
+                title = title,
+                previewLines = lines,
+                updatedAtMillis = now,
+                updatedAtFormatted = formatter.format(Date(now)),
+                version = existing.version + 1
+            )
+            userList[index] = updated
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
+        }
     }
 
     fun updateNotebookStrokes(id: String, strokes: List<InkStroke>) {

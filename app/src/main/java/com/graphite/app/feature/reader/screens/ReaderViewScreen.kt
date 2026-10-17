@@ -3,6 +3,7 @@ package com.graphite.app.feature.reader.screens
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
 import android.os.BatteryManager
 import android.os.ParcelFileDescriptor
@@ -477,13 +478,17 @@ private fun PdfDocumentViewer(
 
                 if (currentPageIndex in 0 until count) {
                     val page = renderer.openPage(currentPageIndex)
-                    // Render page at sharp tablet resolution
-                    val width = (page.width * 1.8f).toInt()
-                    val height = (page.height * 1.8f).toInt()
+                    // Render page at Full HD / 2K vector resolution with RENDER_MODE_FOR_PRINT
+                    val targetScale = (2000f / page.width.toFloat()).coerceIn(2.2f, 3.2f)
+                    val width = (page.width * targetScale).toInt()
+                    val height = (page.height * targetScale).toInt()
                     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     val canvas = Canvas(bmp)
                     canvas.drawColor(android.graphics.Color.WHITE)
-                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    val matrix = Matrix().apply {
+                        postScale(targetScale, targetScale)
+                    }
+                    page.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                     page.close()
 
                     withContext(Dispatchers.Main) {

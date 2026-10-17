@@ -185,13 +185,14 @@ class SupabaseNotesRepository(
             val userId = authManager.currentUserId ?: session.user.id
 
             val dtoList = notebooks.map { notebook ->
-                val effectivePreviewLines = if (!notebook.filePath.isNullOrBlank() && notebook.mimeType != null) {
-                    val f = File(notebook.filePath)
-                    val fileMetaHeader = "[GRAPHITE_DOC:mime=${notebook.mimeType};name=${notebook.originalFileName ?: f.name};pages=${notebook.pageCount}]"
+                val effectivePreviewLines = if (notebook.mimeType != null) {
+                    val f = notebook.filePath?.let { File(it) }
+                    val namePart = if (f != null) ";name=${notebook.originalFileName ?: f.name}" else ""
+                    val fileMetaHeader = "[GRAPHITE_DOC:mime=${notebook.mimeType}$namePart;pages=${notebook.pageCount}]"
                     val existingCleanPreview = notebook.previewLines.filter { !it.startsWith("[GRAPHITE_DOC:") && !it.startsWith("[GRAPHITE_DATA:") }
                     val linesWithMeta = mutableListOf(fileMetaHeader)
                     // If file exists and size is <= 8MB, embed Base64 so second device materializes file
-                    if (f.exists() && f.length() in 1..(8 * 1024 * 1024)) {
+                    if (f != null && f.exists() && f.length() in 1..(8 * 1024 * 1024)) {
                         try {
                             val b64 = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
                             linesWithMeta.add("[GRAPHITE_DATA:$b64]")

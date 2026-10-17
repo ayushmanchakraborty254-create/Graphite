@@ -856,8 +856,16 @@ fun NoteshelfScreen(
     if (showNewNotebookDialog) {
         NewNotebookDialog(
             onDismiss = { showNewNotebookDialog = false },
-            onCreate = { title ->
-                val newNote = GraphiteRepository.createNotebook(title)
+            onCreate = { title, isTextNotebook ->
+                val newNote = if (isTextNotebook) {
+                    GraphiteRepository.createNotebook(
+                        title = title,
+                        mimeType = "text/keep",
+                        initialPreviewLines = listOf("[ ] New list item", "Add note description here...")
+                    )
+                } else {
+                    GraphiteRepository.createNotebook(title)
+                }
                 showNewNotebookDialog = false
                 onOpenNotebook(newNote.id)
             }
@@ -1097,6 +1105,7 @@ private fun NotebookThumbnailCard(
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
     val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pptx", ignoreCase = true) == true
+    val isKeepText = notebook.mimeType == "text/keep"
 
     Column(
         modifier = Modifier
@@ -1121,7 +1130,7 @@ private fun NotebookThumbnailCard(
                 .height(170.dp)
                 .shadow(4.dp, RoundedCornerShape(6.dp)),
             colors = CardDefaults.cardColors(
-                containerColor = if (isPdf) Color(0xFF211515) else Color(0xFFFAFAFA)
+                containerColor = if (isPdf) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
             ),
             shape = RoundedCornerShape(6.dp)
         ) {
@@ -1226,6 +1235,78 @@ private fun NotebookThumbnailCard(
                             color = Color.Gray,
                             fontSize = 11.sp
                         )
+                    }
+                } else if (isKeepText) {
+                    // Google Keep style checklist thumbnail
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color(0xFF333333))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text("LIST", color = Color(0xFFFFB74D), fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (notebook.isStarred) {
+                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
+                            }
+                        }
+
+                        notebook.previewLines.take(4).forEach { line ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            ) {
+                                if (line.startsWith("[x] ")) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckBox,
+                                        contentDescription = null,
+                                        tint = GraphiteOrange,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = line.removePrefix("[x] "),
+                                        color = Color.Gray,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough
+                                    )
+                                } else if (line.startsWith("[ ] ")) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckBoxOutlineBlank,
+                                        contentDescription = null,
+                                        tint = Color.LightGray,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = line.removePrefix("[ ] "),
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        maxLines = 1
+                                    )
+                                } else {
+                                    Text(
+                                        text = line,
+                                        color = Color.LightGray,
+                                        fontSize = 10.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Handwritten Lined Paper Notebook Layout
@@ -1668,27 +1749,124 @@ private fun TemplatesGrid(
 @Composable
 private fun NewNotebookDialog(
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit
+    onCreate: (title: String, isTextNotebook: Boolean) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
+    var isTextNotebook by remember { mutableStateOf(false) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New Notebook", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
-                label = { Text("Notebook Title", color = Color.Gray) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Notebook Title", color = Color.Gray) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = GraphiteOrange,
+                        unfocusedBorderColor = Color(0xFF444444)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 )
-            )
+
+                Text(
+                    text = "Notebook Type",
+                    color = Color.LightGray,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Handwritten Option Card
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { isTextNotebook = false },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (!isTextNotebook) Color(0xFF2C241E) else Color(0xFF1E1E1E)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.5.dp,
+                            if (!isTextNotebook) GraphiteOrange else Color(0xFF333333)
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Draw,
+                                contentDescription = null,
+                                tint = if (!isTextNotebook) GraphiteOrange else Color.Gray,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Handwritten",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Stylus & Paper",
+                                color = Color.Gray,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+
+                    // Text & Checklist Option Card
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { isTextNotebook = true },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isTextNotebook) Color(0xFF2C241E) else Color(0xFF1E1E1E)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.5.dp,
+                            if (isTextNotebook) GraphiteOrange else Color(0xFF333333)
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Checklist,
+                                contentDescription = null,
+                                tint = if (isTextNotebook) GraphiteOrange else Color.Gray,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Text & Lists",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Google Keep style",
+                                color = Color.Gray,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+            }
         },
         confirmButton = {
             Button(
-                onClick = { if (title.isNotBlank()) onCreate(title.trim()) },
+                onClick = { if (title.isNotBlank()) onCreate(title.trim(), isTextNotebook) },
                 colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
             ) {
                 Text("Create", color = Color.White)

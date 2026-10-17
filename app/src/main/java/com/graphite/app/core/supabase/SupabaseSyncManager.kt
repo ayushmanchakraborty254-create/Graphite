@@ -90,7 +90,7 @@ class SupabaseSyncManager(
                 } else if (remote.isDeleted) {
                     false // Never re-upload if cloud already has a deletion tombstone
                 } else {
-                    local.updatedAtMillis > remote.updatedAtMillis
+                    local.updatedAtMillis > remote.updatedAtMillis || (local.mimeType != null && remote.mimeType == null)
                 }
             }
 
@@ -103,9 +103,9 @@ class SupabaseSyncManager(
             // 4. Reconcile remote changes into local workspace (Last-Write-Wins and Tombstones)
             graphiteRepository.reconcileRemoteNotes(remoteNotes)
 
-            val totalSynced = maxOf(localNotes.size, remoteNotes.size)
-            _syncStatus.value = SupabaseSyncStatus.Success(totalSynced)
-            Result.success(totalSynced)
+            val activeNotesCount = graphiteRepository.getAllNotesForActiveUser().count { !it.isDeleted }
+            _syncStatus.value = SupabaseSyncStatus.Success(activeNotesCount)
+            Result.success(activeNotesCount)
         } catch (e: Exception) {
             val msg = e.message ?: "Failed to sync notes with Supabase"
             _syncStatus.value = SupabaseSyncStatus.Error(msg)

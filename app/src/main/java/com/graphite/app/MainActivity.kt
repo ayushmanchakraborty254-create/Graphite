@@ -126,12 +126,24 @@ class MainActivity : ComponentActivity() {
                                     BackHandler {
                                         currentDestination = ActiveDestination.MainTab(selectedTab)
                                     }
-                                    CanvasEditorScreen(
-                                        notebookId = destination.notebookId,
-                                        onNavigateBack = {
-                                            currentDestination = ActiveDestination.MainTab(selectedTab)
-                                        }
-                                    )
+                                    val openedNote = remember(destination.notebookId) {
+                                        GraphiteRepository.getNotebook(destination.notebookId)
+                                    }
+                                    if (openedNote?.mimeType == "text/keep") {
+                                        com.graphite.app.feature.workspace.KeepTextEditorScreen(
+                                            notebookId = destination.notebookId,
+                                            onNavigateBack = {
+                                                currentDestination = ActiveDestination.MainTab(selectedTab)
+                                            }
+                                        )
+                                    } else {
+                                        CanvasEditorScreen(
+                                            notebookId = destination.notebookId,
+                                            onNavigateBack = {
+                                                currentDestination = ActiveDestination.MainTab(selectedTab)
+                                            }
+                                        )
+                                    }
                                 }
                                 is ActiveDestination.Diagnostics -> {
                                     BackHandler {
