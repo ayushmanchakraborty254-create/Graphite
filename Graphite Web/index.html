@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graphite — The Best Note-Taking and E-Book Reader Open-Source App</title>
+  <meta name="description" content="Graphite is an open-source digital notebook and e-book reader featuring ultra-low-latency stylus inking, distraction-free PDF reading, AI voice dictation, and privacy-first cloud sync.">
+  <meta name="keywords" content="graphite, note taking app, ebook reader, pdf annotator, stylus inking, open source, android app, digital notebook, handwriting">
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="assets/logo-small.png">
+  <link rel="apple-touch-icon" href="assets/logo.png">
+
+  <!-- Open Graph / Meta -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Graphite — The Best Note-Taking and E-Book Reader Open-Source App">
+  <meta property="og:description" content="Fluid digital notebook, stylus precision handwriting, and powerful PDF / E-Book reader for Android and Web.">
+  <meta property="og:image" content="assets/logo.png">
+  
+  <!-- Google Site Verification (Placeholder for Google Search Console & OAuth verification) -->
+  <meta name="google-site-verification" content="google-site-verification-token">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Ambient background glow elements -->
+  <div class="ambient-glow">
+    <div class="glow-orb-1"></div>
+    <div class="glow-orb-2"></div>
+  </div>
+
+  <!-- Header Navigation -->
+  <header class="site-header">
+    <div class="nav-container">
+      <a href="#" class="nav-brand">
+        <div class="brand-icon-wrapper">
+          <img src="assets/logo-small.png" alt="Graphite Logo">
+        </div>
+        <div class="nav-brand-title">
+          <span>Graphite</span>
+          <span class="badge-version">v1.0.0</span>
+        </div>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#studio" class="active">Web Studio</a></li>
+        <li><a href="#reader">E-Book Reader</a></li>
+        <li><a href="#bookshelf">Bookshelf</a></li>
+        <li><a href="#download">Download APK</a></li>
+        <li><a href="privacy.html">Privacy</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="#studio" class="btn btn-secondary btn-sm" id="navTryStudio">✨ Open Studio</a>
+        <a href="downloads/Graphite-v1.0.0.apk" download="Graphite-v1.0.0.apk" class="btn btn-primary btn-sm">
+          <span>📥 Download APK</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero-section">
+    <div class="hero-pill">
+      <span class="dot"></span>
+      <span>Graphite v1.0.0 Stable Release is Live</span>
+    </div>
+
+    <h1 class="hero-title">
+      The Best Note-Taking &amp; <br>
+      <span class="highlight">E-Book Reader</span> Open-Source App
+    </h1>
+
+    <p class="hero-subtitle">
+      A fluid, privacy-first digital notebook and distraction-free document workstation. Engineered for students, researchers, and creators with ultra-low latency stylus inking, day/sepia/night reading modes, voice-to-text dictation, and sandboxed Google Drive backups.
+    </p>
+
+    <div class="hero-cta-group">
+      <a href="downloads/Graphite-v1.0.0.apk" download="Graphite-v1.0.0.apk" class="btn btn-primary btn-lg">
+        <span>📥 Download Android APK</span>
+        <span style="font-size: 0.8rem; opacity: 0.85;">(24 MB)</span>
+      </a>
+      <a href="#studio" class="btn btn-secondary btn-lg">
+        <span>⚡ Launch Web Studio</span>
+      </a>
+      <a href="https://github.com/ayushmanchakraborty254-create/Graphite" target="_blank" rel="noopener" class="btn btn-secondary btn-lg">
+        <span>⭐ GitHub Repository</span>
+      </a>
+    </div>
+
+    <div class="hero-stats">
+      <div class="stat-item">
+        <strong>&lt; 1ms</strong> <span>Inking Latency</span>
+      </div>
+      <div class="stat-item">
+        <strong>3:4</strong> <span>Canonical Proportions</span>
+      </div>
+      <div class="stat-item">
+        <strong>Local-First</strong> <span>Sandboxed Privacy</span>
+      </div>
+      <div class="stat-item">
+        <strong>100%</strong> <span>Free &amp; Open Source</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       Interactive Graphite Web Studio (Full App)
+       ========================================================================= -->
+  <section class="studio-section" id="studio">
+    <div class="studio-wrapper" id="studioWrapper">
+
+      <!-- Studio Header / Titlebar -->
+      <div class="studio-header">
+        <div class="studio-header-left">
+          <div class="window-dots">
+            <span class="window-dot dot-red"></span>
+            <span class="window-dot dot-yellow"></span>
+            <span class="window-dot dot-green"></span>
+          </div>
+
+          <div class="notebook-title-edit">
+            <span>📓</span>
+            <input type="text" id="notebookTitleInput" class="notebook-title-input" value="Physics &amp; Quantum Mechanics" title="Click to rename active notebook">
+          </div>
+        </div>
+
+        <!-- Studio App Tabs Switcher -->
+        <div class="studio-tabs">
+          <button class="studio-tab-btn active" data-tab="canvas">
+            <span>✍️ Notebook Canvas</span>
+          </button>
+          <button class="studio-tab-btn" data-tab="reader" id="readerTabBtn">
+            <span>📖 E-Book &amp; PDF Reader</span>
+          </button>
+          <button class="studio-tab-btn" data-tab="bookshelf" id="bookshelfTabBtn">
+            <span>📚 Bookshelf</span>
+          </button>
+          <button class="studio-tab-btn" data-tab="sync">
+            <span>☁️ Cloud &amp; Drive Sync</span>
+          </button>
+        </div>
+
+        <div class="studio-header-right">
+          <div class="sync-status-pill">
+            <span class="sync-pulse"></span>
+            <span id="syncStatusText">Synced to Local &amp; Cloud</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="btnFullscreenToggle" title="Toggle Fullscreen">⛶ Fullscreen</button>
+        </div>
+      </div>
+
+      <!-- Studio Toolbar (Active for Canvas View) -->
+      <div class="studio-toolbar" id="studioToolbar">
+        <!-- Tools Selection -->
+        <div class="toolbar-group">
+          <button class="tool-btn active" data-tool="pen" data-tip="Ballpoint Pen" title="Ballpoint Pen">🖊️</button>
+          <button class="tool-btn" data-tool="fountain" data-tip="Fountain Pen (Pressure/Velocity)" title="Fountain Pen">🖋️</button>
+          <button class="tool-btn" data-tool="highlighter" data-tip="Highlighter (Semi-transparent)" title="Highlighter">🖍️</button>
+          <button class="tool-btn" data-tool="precision-eraser" data-tip="Precision Pixel Eraser" title="Precision Eraser">🧽</button>
+          <button class="tool-btn" data-tool="stroke-eraser" data-tip="Vector Stroke Eraser" title="Stroke Eraser">🧹</button>
+          <button class="tool-btn" data-tool="text" data-tip="Add Movable Text Box" title="Text Box">🔤</button>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Color Palette -->
+        <div class="toolbar-group">
+          <div class="color-swatches">
+            <div class="color-swatch active" data-color="#121418" style="background: #121418;" title="Obsidian Black"></div>
+            <div class="color-swatch" data-color="#ff5e1e" style="background: #ff5e1e;" title="Graphite Orange"></div>
+            <div class="color-swatch" data-color="#3b82f6" style="background: #3b82f6;" title="Electric Blue"></div>
+            <div class="color-swatch" data-color="#10b981" style="background: #10b981;" title="Emerald Green"></div>
+            <div class="color-swatch" data-color="#f59e0b" style="background: #f59e0b;" title="Solar Amber"></div>
+            <div class="color-swatch" data-color="#8b5cf6" style="background: #8b5cf6;" title="Royal Violet"></div>
+            <div class="color-swatch" data-color="#ef4444" style="background: #ef4444;" title="Crimson Red"></div>
+          </div>
+          <input type="color" id="customColorInput" class="custom-color-input" value="#121418" title="Custom Color Picker">
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Stroke Width Control -->
+        <div class="toolbar-group">
+          <div class="stroke-size-control">
+            <span>Size</span>
+            <input type="range" id="strokeWidthSlider" class="stroke-slider" min="1" max="32" value="3" title="Brush Stroke Size">
+            <div class="stroke-preview-circle">
+              <div id="strokePreviewDot" class="stroke-preview-dot" style="width: 6px; height: 6px; background: #121418;"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Paper Template Selector -->
+        <div class="toolbar-group">
+          <select id="paperSelect" class="paper-selector" title="Paper Template">
+            <option value="paper-ruled">📝 Ruled Paper</option>
+            <option value="paper-grid">📐 Grid Paper</option>
+            <option value="paper-dotted">⠇ Dotted Paper</option>
+            <option value="paper-blank">📄 Blank Paper</option>
+            <option value="paper-dark-ruled">🌑 Dark Ruled Paper</option>
+          </select>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Undo, Redo, Clear -->
+        <div class="toolbar-group">
+          <button class="tool-btn" id="btnUndo" data-tip="Undo (Ctrl+Z)" disabled>↩️</button>
+          <button class="tool-btn" id="btnRedo" data-tip="Redo (Ctrl+Y)" disabled>↪️</button>
+          <button class="tool-btn" id="btnClearCanvas" data-tip="Clear Page">🗑️</button>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Voice Dictation & Exports -->
+        <div class="toolbar-group">
+          <button id="btnVoiceDictate" class="voice-dictate-btn" title="Smart Voice-to-Text Dictation">
+            <span>🎙️ Dictate</span>
+            <div class="voice-waves">
+              <span class="wave-bar"></span>
+              <span class="wave-bar"></span>
+              <span class="wave-bar"></span>
+              <span class="wave-bar"></span>
+            </div>
+          </button>
+          <button class="btn btn-secondary btn-sm" id="btnExportPng" title="Export as PNG Image">🖼️ PNG</button>
+          <button class="btn btn-secondary btn-sm" id="btnExportPdf" title="Export as PDF / Print">📑 PDF</button>
+        </div>
+      </div>
+
+      <!-- VIEW 1: Interactive Canvas Inking Studio -->
+      <div class="studio-view active" id="canvasView">
+        <div class="canvas-container paper-ruled" id="canvasContainer">
+          <canvas id="graphiteCanvas"></canvas>
+          <div class="text-box-layer" id="textBoxLayer"></div>
+
+          <div class="canvas-floating-status">
+            <span>✨ Stylus &amp; Touch Active</span>
+            <span>•</span>
+            <span>Sub-millisecond smoothing</span>
+            <span>•</span>
+            <span>Use 🔤 tool to drop floating notes</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 2: E-Book & PDF Reader -->
+      <div class="studio-view" id="readerView">
+        <div class="reader-container theme-day" id="readerContainer">
+          <div class="reader-controls-bar">
+            <!-- Theme Toggle -->
+            <div class="reader-theme-toggle">
+              <button class="theme-pill-btn active" data-theme="day">☀️ Day</button>
+              <button class="theme-pill-btn" data-theme="sepia">📜 Sepia</button>
+              <button class="theme-pill-btn" data-theme="night">🌙 Night</button>
+            </div>
+
+            <!-- Chapter Select -->
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 0.85rem; opacity: 0.8;">Chapter:</span>
+              <select id="chapterSelect" class="paper-selector"></select>
+            </div>
+
+            <!-- Typography & Upload Controls -->
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="btn btn-secondary btn-sm" id="btnFontMinus" title="Decrease Font Size">A-</button>
+              <button class="btn btn-secondary btn-sm" id="btnFontPlus" title="Increase Font Size">A+</button>
+              <button class="btn btn-secondary btn-sm" id="btnFontToggle" title="Toggle Serif / Sans">Serif</button>
+              <label class="btn btn-primary btn-sm" style="cursor: pointer;">
+                <span>📂 Upload PDF / Book</span>
+                <input type="file" id="docUploadInput" accept=".pdf,.txt,.epub" style="display: none;">
+              </label>
+            </div>
+          </div>
+
+          <!-- Book Reading Surface -->
+          <div class="reader-book-view font-serif" id="readerBookView">
+            <h2 class="reader-chapter-title" id="readerChapterTitle">Chapter 1: The Philosophy of Focused Reading</h2>
+            <div class="reader-chapter-sub" id="readerChapterSub">Designing for Deep Immersion and Zero Distraction</div>
+            <div id="readerChapterBody">
+              <!-- Content rendered dynamically via app.js -->
+            </div>
+          </div>
+
+          <!-- Reader Footer Navigation -->
+          <div class="reader-footer-nav">
+            <button class="btn btn-secondary btn-sm" id="btnPrevPage">← Previous</button>
+            <div class="reader-progress-wrapper">
+              <span style="font-size: 0.8rem;" id="readerProgressText">35% (1/3)</span>
+              <div class="reader-progress-bar">
+                <div class="reader-progress-fill" id="readerProgressFill"></div>
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnNextPage">Next →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 3: Bookshelf & 3:4 Cover Gallery -->
+      <div class="studio-view" id="bookshelfView">
+        <div class="bookshelf-view">
+          <div class="bookshelf-header">
+            <div>
+              <h2 class="bookshelf-title">Your Digital Bookshelf</h2>
+              <p style="color: var(--text-muted); font-size: 0.95rem; margin-top: 4px;">Standard 3:4 proportion notebooks stored in secure local sandboxed memory</p>
+            </div>
+            <button class="btn btn-primary" onclick="document.getElementById('newNotebookModal').classList.add('open')">
+              <span>+ New Notebook</span>
+            </button>
+          </div>
+
+          <div class="bookshelf-grid" id="bookshelfGrid">
+            <!-- Notebook cards rendered dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 4: Cloud Sync & Drive Manager -->
+      <div class="studio-view" id="syncView">
+        <div class="sync-view">
+          <div class="sync-grid">
+            <!-- Drive Backup Card -->
+            <div class="sync-card">
+              <div class="sync-card-header">
+                <div class="sync-card-icon">☁️</div>
+                <div>
+                  <h3 class="sync-card-title">Google Drive Sandboxed Backup</h3>
+                  <div class="sync-scope-badge">Scope: https://www.googleapis.com/auth/drive.file</div>
+                </div>
+              </div>
+              <p style="color: var(--text-muted); font-size: 0.92rem;">
+                Graphite uses the minimal sandboxed Google Drive scope. It can only create and access files that you explicitly upload using Graphite. It never reads or modifies any other files in your cloud storage.
+              </p>
+              <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn btn-primary btn-sm" id="btnExportBackup">📥 Export Backup JSON</button>
+                <label class="btn btn-secondary btn-sm" style="cursor: pointer;">
+                  <span>📤 Restore Backup JSON</span>
+                  <input type="file" id="importBackupInput" accept=".json" style="display: none;">
+                </label>
+              </div>
+            </div>
+
+            <!-- Real-time Status Card -->
+            <div class="sync-card">
+              <div class="sync-card-header">
+                <div class="sync-card-icon">⚡</div>
+                <div>
+                  <h3 class="sync-card-title">Cross-Device Synchronization</h3>
+                  <span style="color: var(--accent-emerald); font-size: 0.85rem; font-weight: 600;">● Real-time Active</span>
+                </div>
+              </div>
+              <p style="color: var(--text-muted); font-size: 0.92rem;">
+                Offline-first state engine. All notes, ink coordinates, and PDF annotations scale canonically so your notes appear identical across phones, tablets, and web browsers.
+              </p>
+              <div style="display: flex; gap: 10px; margin-top: auto;">
+                <button class="btn btn-secondary btn-sm" id="btnResetSampleData">🔄 Reset Sample Data</button>
+                <a href="privacy.html" class="btn btn-secondary btn-sm">🛡️ Privacy Policy</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       Features Deep Dive Grid
+       ========================================================================= -->
+  <section class="features-section" id="features">
+    <div class="section-header">
+      <span class="section-tag">Engineered for Excellence</span>
+      <h2 class="section-title">Every Feature Built for Pure Focus</h2>
+      <p class="section-subtitle">Discover why students, researchers, and book lovers choose Graphite as their primary digital workstation.</p>
+    </div>
+
+    <div class="features-grid">
+      <!-- Feature 1 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">✍️</div>
+        <h3 class="feature-title">Ultra-Low-Latency Stylus Inking</h3>
+        <p class="feature-desc">
+          Feel the tactile response of real pen on paper. Sub-millisecond stroke latency with natural pressure and velocity dynamics.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Ballpoint, Fountain Pen, and Chisel Highlighter</li>
+          <li><span class="check">✓</span> Precision pixel eraser and vector stroke eraser</li>
+          <li><span class="check">✓</span> Hardware S-Pen / stylus pressure sensitivity</li>
+        </ul>
+      </div>
+
+      <!-- Feature 2 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">📚</div>
+        <h3 class="feature-title">Advanced E-Book &amp; PDF Reader</h3>
+        <p class="feature-desc">
+          Distraction-free reading experience for textbooks, research papers, and literary classics with custom eye-care themes.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Day, Vintage Sepia, and OLED Night modes</li>
+          <li><span class="check">✓</span> Bookmarks, chapter jumping, and reading progress</li>
+          <li><span class="check">✓</span> Native import for PDF, DOCX, and PPTX</li>
+        </ul>
+      </div>
+
+      <!-- Feature 3 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">🎙️</div>
+        <h3 class="feature-title">Smart AI Voice-to-Text Dictation</h3>
+        <p class="feature-desc">
+          Speak your lecture notes, sudden ideas, or summaries. Real-time audio waveform visualization and sentence-boundary capitalization.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Continuous speech recognition with zero dropped words</li>
+          <li><span class="check">✓</span> Automatic sentence capitalization and punctuation</li>
+          <li><span class="check">✓</span> Instant insertion into canvas text notes</li>
+        </ul>
+      </div>
+
+      <!-- Feature 4 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">🔤</div>
+        <h3 class="feature-title">Dynamic Movable &amp; Resizable Notes</h3>
+        <p class="feature-desc">
+          Drop floating text cards anywhere across your handwriting. Fluidly drag, reposition, and resize notes without touching your drawing flow.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Smooth drag headers and corner resize handles</li>
+          <li><span class="check">✓</span> Rich typography (Outfit, Sans, Serif, Monospace)</li>
+          <li><span class="check">✓</span> Multiple floating cards saved per page</li>
+        </ul>
+      </div>
+
+      <!-- Feature 5 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">🎨</div>
+        <h3 class="feature-title">60+ Curated Covers &amp; 3:4 Auto-Fit</h3>
+        <p class="feature-desc">
+          Customize your notebook library with premium artwork. Import any photo with intelligent 3:4 aspect-ratio auto-crop.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Modern gradient, geometric, and minimalist designs</li>
+          <li><span class="check">✓</span> Ruled, Grid, Dotted, Blank, and Dark paper templates</li>
+          <li><span class="check">✓</span> Proportional canonical scaling across all viewports</li>
+        </ul>
+      </div>
+
+      <!-- Feature 6 -->
+      <div class="feature-card">
+        <div class="feature-icon-box">🔄</div>
+        <h3 class="feature-title">Privacy-First Cloud &amp; Drive Backup</h3>
+        <p class="feature-desc">
+          Your notes remain your sovereign property. Local-first storage with optional sandboxed Google Drive backups.
+        </p>
+        <ul class="feature-bullets">
+          <li><span class="check">✓</span> Minimal sandboxed <code>drive.file</code> scope</li>
+          <li><span class="check">✓</span> Fully offline-first operational capability</li>
+          <li><span class="check">✓</span> Zero third-party ad networks or trackers</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       Direct Download Section Banner
+       ========================================================================= -->
+  <section class="download-section" id="download">
+    <div class="download-banner">
+      <div class="download-text-content">
+        <h2 class="download-title">Download Graphite for Android</h2>
+        <p class="download-desc">
+          Get the official release APK directly. Install on your Android tablet, foldable, or smartphone in seconds.
+        </p>
+        <div class="download-meta-badges">
+          <span class="apk-badge">📦 Version: <strong>v1.0.0 Stable</strong></span>
+          <span class="apk-badge">⚡ Size: <strong>24.3 MB</strong></span>
+          <span class="apk-badge">🤖 Requires: <strong>Android 8.0+</strong></span>
+          <span class="apk-badge">🛡️ Verified: <strong>Direct Build</strong></span>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; align-items: center;">
+        <a href="downloads/Graphite-v1.0.0.apk" download="Graphite-v1.0.0.apk" class="btn btn-primary btn-lg" style="width: 100%;">
+          <span>📥 Download Graphite-v1.0.0.apk</span>
+        </a>
+        <a href="https://github.com/ayushmanchakraborty254-create/Graphite/releases/latest" target="_blank" rel="noopener" class="btn btn-secondary btn-sm" style="width: 100%;">
+          <span>View GitHub Releases →</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       New Notebook Modal
+       ========================================================================= -->
+  <div class="modal-overlay" id="newNotebookModal">
+    <div class="modal-box">
+      <button class="modal-close-btn" id="closeModalBtn">✕</button>
+      <h3 class="modal-title">Create New Notebook</h3>
+
+      <div>
+        <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Notebook Title</label>
+        <input type="text" id="newNotebookTitleInput" class="modal-input" placeholder="e.g. Organic Chemistry Lecture 4" value="New Notebook">
+      </div>
+
+      <div>
+        <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Paper Template</label>
+        <select id="newNotebookTemplateSelect" class="modal-input" style="background: #181d29; cursor: pointer;">
+          <option value="paper-ruled">📝 Ruled Paper</option>
+          <option value="paper-grid">📐 Grid Paper</option>
+          <option value="paper-dotted">⠇ Dotted Paper</option>
+          <option value="paper-blank">📄 Blank Paper</option>
+          <option value="paper-dark-ruled">🌑 Dark Ruled Paper</option>
+        </select>
+      </div>
+
+      <div>
+        <label style="display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">Select 3:4 Cover Design</label>
+        <div class="cover-select-grid" id="coverSelectGrid">
+          <!-- Filled dynamically via app.js -->
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 1rem;">
+        <button class="btn btn-secondary" id="cancelModalBtn">Cancel</button>
+        <button class="btn btn-primary" id="createNotebookConfirmBtn">Create &amp; Open</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       Footer
+       ========================================================================= -->
+  <footer class="site-footer">
+    <div class="footer-container">
+      <div class="footer-brand">
+        <div class="nav-brand" style="margin-bottom: 0.5rem;">
+          <div class="brand-icon-wrapper" style="width: 32px; height: 32px;">
+            <img src="assets/logo-small.png" alt="Graphite Logo">
+          </div>
+          <span>Graphite</span>
+        </div>
+        <p>The best note-taking and e-book reader open-source application. Designed for stylus precision, distraction-free reading, and privacy-first local cloud sync.</p>
+      </div>
+
+      <div class="footer-links-col">
+        <h4>Navigation</h4>
+        <ul>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#studio">Web Studio</a></li>
+          <li><a href="#reader">E-Book Reader</a></li>
+          <li><a href="#bookshelf">Bookshelf</a></li>
+          <li><a href="#download">Download APK</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-links-col">
+        <h4>Open Source</h4>
+        <ul>
+          <li><a href="https://github.com/ayushmanchakraborty254-create/Graphite" target="_blank" rel="noopener">GitHub Repository</a></li>
+          <li><a href="https://github.com/ayushmanchakraborty254-create/Graphite/releases" target="_blank" rel="noopener">Releases &amp; Changelog</a></li>
+          <li><a href="https://github.com/ayushmanchakraborty254-create/Graphite/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></li>
+          <li><a href="https://github.com/ayushmanchakraborty254-create/Graphite/issues" target="_blank" rel="noopener">Report an Issue</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-links-col">
+        <h4>Compliance &amp; Privacy</h4>
+        <ul>
+          <li><a href="privacy.html">Privacy Policy</a></li>
+          <li><a href="terms.html">Terms of Service</a></li>
+          <li><a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google Limited Use</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <p>&copy; 2026 Graphite Project. Open-source under the MIT License.</p>
+      <p>Built with love for students, researchers, and creators worldwide.</p>
+    </div>
+  </footer>
+
+  <!-- Main JavaScript Engine -->
+  <script src="app.js"></script>
+
+  <!-- Smooth Scroll Anchor Handler -->
+  <script>
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function (e) {
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          e.preventDefault();
+          target.scrollIntoView({ behavior: 'smooth' });
+        }
+      });
+    });
+
+    // Deep link directly to Reader or Bookshelf tab if clicked from navigation
+    document.querySelectorAll('a[href="#reader"]').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        document.getElementById('studio').scrollIntoView({ behavior: 'smooth' });
+        const readerBtn = document.getElementById('readerTabBtn');
+        if (readerBtn) readerBtn.click();
+      });
+    });
+    document.querySelectorAll('a[href="#bookshelf"]').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        document.getElementById('studio').scrollIntoView({ behavior: 'smooth' });
+        const shelfBtn = document.getElementById('bookshelfTabBtn');
+        if (shelfBtn) shelfBtn.click();
+      });
+    });
+    // Smart APK Download link handler (falls back to GitHub Release if local file is missing on static deploy)
+    document.querySelectorAll('a[download="Graphite-v1.0.0.apk"]').forEach(link => {
+      link.addEventListener('click', function(e) {
+        fetch(this.getAttribute('href'), { method: 'HEAD' })
+          .then(res => {
+            if (!res.ok) {
+              window.location.href = 'https://github.com/ayushmanchakraborty254-create/Graphite/releases/latest/download/Graphite-v1.0.0.apk';
+            }
+          })
+          .catch(() => {
+            window.location.href = 'https://github.com/ayushmanchakraborty254-create/Graphite/releases/latest/download/Graphite-v1.0.0.apk';
+          });
+      });
+    });
+  </script>
+</body>
+</html>
