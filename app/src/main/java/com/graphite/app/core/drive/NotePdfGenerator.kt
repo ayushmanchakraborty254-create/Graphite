@@ -168,7 +168,17 @@ object NotePdfGenerator {
                 isAntiAlias = true
             }
             var textY = height * 0.16f
-            for (line in notebook.previewLines.take(5)) {
+            val cleanLines = notebook.previewLines.mapNotNull { line ->
+                if (line.startsWith("[GRAPHITE_TEXTBOX:")) {
+                    val textPart = line.substringAfter("text=", "").substringBefore(";xRatio=")
+                    if (textPart.isNotBlank()) textPart else null
+                } else if (line.contains(".pdf", ignoreCase = true) || line.contains("PDF Document •", ignoreCase = true)) {
+                    null
+                } else {
+                    line
+                }
+            }
+            for (line in cleanLines.take(5)) {
                 canvas.drawText(line, width * 0.08f, textY, textPaint)
                 textY += width * 0.045f
             }

@@ -12,7 +12,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -26,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -274,30 +277,33 @@ private fun UploadToDriveDialog(
 
     val isUploadReady = destinationFolder != null && fileNameText.isNotBlank()
 
+    val configuration = LocalConfiguration.current
+    val isMobile = configuration.screenWidthDp < 600
+
     Dialog(
         onDismissRequest = onCancel,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .fillMaxHeight(0.88f)
+                .fillMaxWidth(if (isMobile) 0.95f else 0.92f)
+                .then(if (isMobile) Modifier.wrapContentHeight().padding(vertical = 24.dp) else Modifier.fillMaxHeight(0.88f))
                 .clip(RoundedCornerShape(16.dp)),
             color = Color(0xFF141414),
             tonalElevation = 6.dp
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 // Top App Bar matching Page 1 of PDF
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
                             Icon(
@@ -309,7 +315,7 @@ private fun UploadToDriveDialog(
                         Text(
                             text = "Upload to Drive",
                             color = Color.White,
-                            fontSize = 20.sp,
+                            fontSize = if (isMobile) 17.sp else 20.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
@@ -331,97 +337,106 @@ private fun UploadToDriveDialog(
                             disabledContainerColor = Color(0xFF2C2C2E),
                             disabledContentColor = Color(0xFF666666)
                         ),
-                        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp)
                     ) {
                         Text(
                             text = "Upload",
                             fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                            fontSize = 13.sp
                         )
                     }
                 }
 
                 HorizontalDivider(color = Color(0xFF262626), thickness = 0.5.dp)
 
-                // Main body: Two columns on tablet landscape
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Left Column: Note Preview Card
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF1C1C1E))
-                            .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (previewBitmap != null) {
-                            Image(
-                                bitmap = previewBitmap.asImageBitmap(),
-                                contentDescription = "Note Preview",
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(8.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Fit
-                            )
-                        } else {
-                            NoteFallbackPreview(notebook)
-                        }
-                    }
-
-                    // Right Column: File name, Location, Account, Actions
+                if (isMobile) {
+                    // Mobile Portrait Layout (Adaptive single column with comfortable margins)
                     Column(
                         modifier = Modifier
-                            .weight(1.2f)
-                            .fillMaxHeight(),
-                        verticalArrangement = Arrangement.Center
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        // File name OutlinedTextField
-                        OutlinedTextField(
-                            value = fileNameText,
-                            onValueChange = { fileNameText = it },
-                            label = { Text("File name", color = Color(0xFFAAAAAA), fontSize = 12.sp) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.PictureAsPdf,
-                                    contentDescription = null,
-                                    tint = Color(0xFFEF5350)
-                                )
-                            },
-                            trailingIcon = {
-                                if (fileNameText.isNotEmpty()) {
-                                    IconButton(onClick = { fileNameText = "" }) {
-                                        Icon(
-                                            imageVector = Icons.Default.Cancel,
-                                            contentDescription = "Clear",
-                                            tint = Color(0xFF888888)
-                                        )
-                                    }
-                                }
-                            },
-                            singleLine = true,
+                        // Section 1: Note preview thumbnail + File name field
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF8AB4F8),
-                                unfocusedBorderColor = Color(0xFF444444),
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedContainerColor = Color(0xFF1A1A1A),
-                                unfocusedContainerColor = Color(0xFF1A1A1A)
-                            )
-                        )
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 72.dp, height = 98.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF1C1C1E))
+                                    .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(8.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (previewBitmap != null) {
+                                    Image(
+                                        bitmap = previewBitmap.asImageBitmap(),
+                                        contentDescription = "Note Preview",
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(4.dp)
+                                            .clip(RoundedCornerShape(6.dp)),
+                                        contentScale = ContentScale.Fit
+                                    )
+                                } else {
+                                    NoteFallbackPreview(notebook)
+                                }
+                            }
 
-                        Spacer(modifier = Modifier.height(18.dp))
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = fileNameText,
+                                    onValueChange = { fileNameText = it },
+                                    label = { Text("File name", color = Color(0xFFAAAAAA), fontSize = 11.sp) },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.PictureAsPdf,
+                                            contentDescription = null,
+                                            tint = Color(0xFFEF5350),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        if (fileNameText.isNotEmpty()) {
+                                            IconButton(onClick = { fileNameText = "" }, modifier = Modifier.size(24.dp)) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Cancel,
+                                                    contentDescription = "Clear",
+                                                    tint = Color(0xFF888888),
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = Color(0xFF8AB4F8),
+                                        unfocusedBorderColor = Color(0xFF444444),
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedContainerColor = Color(0xFF1A1A1A),
+                                        unfocusedContainerColor = Color(0xFF1A1A1A)
+                                    )
+                                )
+                                Text(
+                                    text = "PDF Document • Ready to upload",
+                                    color = Color(0xFF888888),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(start = 2.dp)
+                                )
+                            }
+                        }
 
-                        // Location OutlinedSelectableRow with explicit Change/Select action
+                        // Section 2: Location selector (Full width)
                         OutlinedSelectableRow(
                             label = "Location",
                             icon = Icons.Default.Folder,
@@ -437,7 +452,6 @@ private fun UploadToDriveDialog(
                         )
 
                         if (destinationFolder == null) {
-                            Spacer(modifier = Modifier.height(6.dp))
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(start = 4.dp)
@@ -457,9 +471,7 @@ private fun UploadToDriveDialog(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(18.dp))
-
-                        // Account OutlinedSelectableRow
+                        // Section 3: Account selector (Full width)
                         OutlinedSelectableRow(
                             label = "Account",
                             icon = Icons.Default.AccountCircle,
@@ -468,25 +480,23 @@ private fun UploadToDriveDialog(
                             onClick = { /* Account profile */ }
                         )
 
-                        Spacer(modifier = Modifier.height(26.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
 
-                        // Bottom Actions: Cancel & Upload
+                        // Section 4: Bottom Action Buttons
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             OutlinedButton(
                                 onClick = onCancel,
-                                shape = RoundedCornerShape(20.dp),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Gray),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray),
                                 border = BorderStroke(1.dp, Color(0xFF444444)),
-                                modifier = Modifier.height(42.dp)
+                                modifier = Modifier.weight(1f).height(46.dp)
                             ) {
-                                Text("Cancel", fontSize = 13.sp)
+                                Text("Cancel", fontSize = 14.sp)
                             }
-
-                            Spacer(modifier = Modifier.width(14.dp))
 
                             Button(
                                 onClick = {
@@ -497,18 +507,185 @@ private fun UploadToDriveDialog(
                                     }
                                 },
                                 enabled = isUploadReady,
-                                shape = RoundedCornerShape(20.dp),
+                                shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF8AB4F8),
                                     contentColor = Color(0xFF0F172A),
                                     disabledContainerColor = Color(0xFF2C2C2E),
                                     disabledContentColor = Color(0xFF666666)
                                 ),
-                                modifier = Modifier.height(42.dp)
+                                modifier = Modifier.weight(1.2f).height(46.dp)
                             ) {
                                 Icon(imageVector = Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Upload", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Upload", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
+                        }
+                    }
+                } else {
+                    // Tablet Landscape Layout (Two side-by-side columns)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(28.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Left Column: Note Preview Card
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF1C1C1E))
+                                .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (previewBitmap != null) {
+                                Image(
+                                    bitmap = previewBitmap.asImageBitmap(),
+                                    contentDescription = "Note Preview",
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(8.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Fit
+                                )
+                            } else {
+                                NoteFallbackPreview(notebook)
+                            }
+                        }
+
+                        // Right Column: File name, Location, Account, Actions
+                        Column(
+                            modifier = Modifier
+                                .weight(1.2f)
+                                .fillMaxHeight(),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            OutlinedTextField(
+                                value = fileNameText,
+                                onValueChange = { fileNameText = it },
+                                label = { Text("File name", color = Color(0xFFAAAAAA), fontSize = 12.sp) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.PictureAsPdf,
+                                        contentDescription = null,
+                                        tint = Color(0xFFEF5350)
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (fileNameText.isNotEmpty()) {
+                                        IconButton(onClick = { fileNameText = "" }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Cancel,
+                                                contentDescription = "Clear",
+                                                tint = Color(0xFF888888)
+                                            )
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF8AB4F8),
+                                    unfocusedBorderColor = Color(0xFF444444),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = Color(0xFF1A1A1A),
+                                    unfocusedContainerColor = Color(0xFF1A1A1A)
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.height(18.dp))
+
+                            OutlinedSelectableRow(
+                                label = "Location",
+                                icon = Icons.Default.Folder,
+                                iconTint = if (destinationFolder != null) Color(0xFF64B5F6) else Color(0xFFFFB74D),
+                                valueText = when {
+                                    destinationFolder == null -> "Choose destination folder..."
+                                    destinationFolder.id == "root" -> "My Drive (Root)"
+                                    else -> destinationFolder.name
+                                },
+                                actionText = if (destinationFolder != null) "Change" else "Select",
+                                isHighlighted = destinationFolder == null,
+                                onClick = onChooseFolder
+                            )
+
+                            if (destinationFolder == null) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFFB74D),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Please choose a destination folder to enable upload",
+                                        color = Color(0xFFFFB74D),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(18.dp))
+
+                            OutlinedSelectableRow(
+                                label = "Account",
+                                icon = Icons.Default.AccountCircle,
+                                iconTint = Color(0xFF81C784),
+                                valueText = accountEmail ?: "ayushman.chakraborty254@gmail.com",
+                                onClick = { /* Account profile */ }
+                            )
+
+                            Spacer(modifier = Modifier.height(26.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = onCancel,
+                                    shape = RoundedCornerShape(20.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Gray),
+                                    border = BorderStroke(1.dp, Color(0xFF444444)),
+                                    modifier = Modifier.height(42.dp)
+                                ) {
+                                    Text("Cancel", fontSize = 13.sp)
+                                }
+
+                                Spacer(modifier = Modifier.width(14.dp))
+
+                                Button(
+                                    onClick = {
+                                        val trimmed = fileNameText.trim()
+                                        val finalName = if (trimmed.endsWith(".pdf", ignoreCase = true)) trimmed else "$trimmed.pdf"
+                                        if (destinationFolder != null) {
+                                            onConfirmUpload(destinationFolder, finalName)
+                                        }
+                                    },
+                                    enabled = isUploadReady,
+                                    shape = RoundedCornerShape(20.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF8AB4F8),
+                                        contentColor = Color(0xFF0F172A),
+                                        disabledContainerColor = Color(0xFF2C2C2E),
+                                        disabledContentColor = Color(0xFF666666)
+                                    ),
+                                    modifier = Modifier.height(42.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Upload", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
                             }
                         }
                     }
