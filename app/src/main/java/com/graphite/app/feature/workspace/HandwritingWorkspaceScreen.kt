@@ -237,6 +237,9 @@ fun HandwritingWorkspaceScreen(
                             y += gridSpacing
                         }
                     }
+                    else -> {
+                        // Templates rendered with specialized rules
+                    }
                 }
 
                 // 2. Render Committed Strokes with Catmull-Rom to Cubic Bezier Splines

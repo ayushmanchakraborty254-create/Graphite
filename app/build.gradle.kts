@@ -38,11 +38,20 @@ android {
         val googleWebClientId = localProperties.getProperty("GOOGLE_WEB_CLIENT_ID")
             ?: (project.findProperty("GOOGLE_WEB_CLIENT_ID") as? String)
             ?: "112205897708-1tlgt3qt2vhpg0pcepag877ponpgdtk3.apps.googleusercontent.com"
+        val geminiApiKey = localProperties.getProperty("GEMINI_API_KEY")
+            ?: (project.findProperty("GEMINI_API_KEY") as? String)
+            ?: ""
+        val groqApiKey = localProperties.getProperty("GROQ_API_KEY")
+            ?: (project.findProperty("GROQ_API_KEY") as? String)
+            ?: ""
 
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"$supabasePublishableKey\"")
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"$googleWebClientId\"")
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+        buildConfigField("String", "GROQ_API_KEY", "\"$groqApiKey\"")
     }
+
 
     buildTypes {
         release {

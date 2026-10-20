@@ -233,6 +233,9 @@ object NotePdfGenerator {
             PaperStyle.BLANK -> {
                 // No lines
             }
+            else -> {
+                // Default / Education / Music templates
+            }
         }
     }
 

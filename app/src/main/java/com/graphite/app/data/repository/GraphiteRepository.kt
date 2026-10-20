@@ -301,7 +301,9 @@ object GraphiteRepository {
         folderId: String = "my_notes",
         customId: String = UUID.randomUUID().toString(),
         mimeType: String? = null,
-        initialPreviewLines: List<String>? = null
+        initialPreviewLines: List<String>? = null,
+        cover: NotebookCover = NotebookCover(),
+        password: String? = null
     ): NotebookItem {
         val now = System.currentTimeMillis()
         val formatter = SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault())
@@ -317,7 +319,10 @@ object GraphiteRepository {
             createdAtMillis = now,
             updatedAtMillis = now,
             updatedAtFormatted = formatter.format(Date(now)),
-            previewLines = initialPreviewLines ?: listOf("New handwritten page")
+            previewLines = initialPreviewLines ?: emptyList(),
+            cover = cover,
+            isLocked = !password.isNullOrBlank(),
+            password = password
         )
 
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
@@ -326,6 +331,22 @@ object GraphiteRepository {
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
         saveToDisk()
         return newNotebook
+    }
+
+    fun setNotebookPassword(id: String, password: String?) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == id }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(
+                isLocked = !password.isNullOrBlank(),
+                password = password,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
     }
 
     fun updateTextNotebook(id: String, title: String, lines: List<String>) {
@@ -592,10 +613,46 @@ object GraphiteRepository {
         saveToDisk()
     }
 
-    fun addFolder(name: String) {
-        val newFolder = FolderItem(UUID.randomUUID().toString(), name, 0)
+    fun addFolder(name: String, parentId: String? = null) {
+        val newFolder = FolderItem(UUID.randomUUID().toString(), name, 0, parentId = parentId)
         _folders.update { it + newFolder }
+        saveToDisk()
     }
+
+    fun moveNotebooksToFolder(notebookIds: Set<String>, folderId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        var modified = false
+        for (i in userList.indices) {
+            val note = userList[i]
+            if (note.id in notebookIds) {
+                userList[i] = note.copy(folderId = folderId, updatedAtMillis = System.currentTimeMillis())
+                modified = true
+            }
+        }
+        if (modified) {
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
+    }
+
+    fun addVoiceClipToNotebook(notebookId: String, clip: com.graphite.app.core.voice.VoiceClip) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == notebookId }
+        if (idx != -1) {
+            val note = userList[idx]
+            val updatedClips = note.voiceNotes + clip
+            userList[idx] = note.copy(
+                voiceNotes = updatedClips,
+                hasRecordings = true,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
+    }
+
 
     fun normalizeBookTitle(raw: String): String {
         var t = raw.trim()
@@ -777,6 +834,34 @@ object GraphiteRepository {
             put("filePath", item.filePath)
             put("mimeType", item.mimeType)
             put("originalFileName", item.originalFileName)
+            put("password", item.password)
+
+            // Cover
+            val coverObj = JSONObject().apply {
+                put("category", item.cover.category)
+                put("colorHex", item.cover.colorHex)
+                put("name", item.cover.name)
+                item.cover.bandColorHex?.let { put("bandColorHex", it) }
+                item.cover.patternType?.let { put("patternType", it) }
+                item.cover.customImageUri?.let { put("customImageUri", it) }
+            }
+            put("cover", coverObj)
+
+            // Voice notes
+            val voiceArr = JSONArray()
+            item.voiceNotes.forEach { clip ->
+                val cObj = JSONObject().apply {
+                    put("id", clip.id)
+                    put("filePath", clip.filePath)
+                    put("title", clip.title)
+                    put("durationSeconds", clip.durationSeconds)
+                    put("createdAtFormatted", clip.createdAtFormatted)
+                    put("transcription", clip.transcription)
+                    put("pageIndex", clip.pageIndex)
+                }
+                voiceArr.put(cObj)
+            }
+            put("voiceNotes", voiceArr)
         }
     }
 
@@ -788,6 +873,39 @@ object GraphiteRepository {
                 preview.add(previewArr.optString(i))
             }
         }
+        val pwd = if (json.has("password") && !json.isNull("password")) json.getString("password") else null
+
+        val coverObj = json.optJSONObject("cover")
+        val cover = if (coverObj != null) {
+            NotebookCover(
+                category = coverObj.optString("category", "PLAIN"),
+                colorHex = coverObj.optLong("colorHex", 0xFF45A5B5),
+                name = coverObj.optString("name", "Teal"),
+                bandColorHex = if (coverObj.has("bandColorHex")) coverObj.optLong("bandColorHex") else null,
+                patternType = if (coverObj.has("patternType")) coverObj.optString("patternType") else null,
+                customImageUri = if (coverObj.has("customImageUri")) coverObj.optString("customImageUri") else null
+            )
+        } else NotebookCover()
+
+        val voiceNotes = mutableListOf<com.graphite.app.core.voice.VoiceClip>()
+        val voiceArr = json.optJSONArray("voiceNotes")
+        if (voiceArr != null) {
+            for (i in 0 until voiceArr.length()) {
+                val cObj = voiceArr.optJSONObject(i) ?: continue
+                voiceNotes.add(
+                    com.graphite.app.core.voice.VoiceClip(
+                        id = cObj.optString("id", UUID.randomUUID().toString()),
+                        filePath = cObj.optString("filePath", ""),
+                        title = cObj.optString("title", "Voice Note"),
+                        durationSeconds = cObj.optInt("durationSeconds", 1),
+                        createdAtFormatted = cObj.optString("createdAtFormatted", ""),
+                        transcription = if (cObj.has("transcription") && !cObj.isNull("transcription")) cObj.getString("transcription") else null,
+                        pageIndex = cObj.optInt("pageIndex", 0)
+                    )
+                )
+            }
+        }
+
         return NotebookItem(
             id = json.optString("id", UUID.randomUUID().toString()),
             title = json.optString("title", "Untitled Note"),
@@ -801,15 +919,35 @@ object GraphiteRepository {
             isDeleted = json.optBoolean("isDeleted", false),
             isBookmarked = json.optBoolean("isBookmarked", false),
             hasPhotos = json.optBoolean("hasPhotos", false),
-            hasRecordings = json.optBoolean("hasRecordings", false),
-            isLocked = json.optBoolean("isLocked", false),
+            hasRecordings = json.optBoolean("hasRecordings", false) || voiceNotes.isNotEmpty(),
+            isLocked = json.optBoolean("isLocked", false) || !pwd.isNullOrBlank(),
             version = json.optLong("version", 1L),
             userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null,
             previewLines = preview,
             filePath = if (json.has("filePath") && !json.isNull("filePath")) json.getString("filePath") else null,
             mimeType = if (json.has("mimeType") && !json.isNull("mimeType")) json.getString("mimeType") else null,
-            originalFileName = if (json.has("originalFileName") && !json.isNull("originalFileName")) json.getString("originalFileName") else null
+            originalFileName = if (json.has("originalFileName") && !json.isNull("originalFileName")) json.getString("originalFileName") else null,
+            cover = cover,
+            voiceNotes = voiceNotes,
+            password = pwd
         )
+    }
+
+    fun deleteVoiceClipFromNotebook(notebookId: String, clipId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == notebookId }
+        if (idx != -1) {
+            val note = userList[idx]
+            val updatedClips = note.voiceNotes.filter { it.id != clipId }
+            userList[idx] = note.copy(
+                voiceNotes = updatedClips,
+                hasRecordings = updatedClips.isNotEmpty(),
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
     }
 
     fun bookToJson(book: Book): JSONObject {

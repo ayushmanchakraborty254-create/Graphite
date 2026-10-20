@@ -234,7 +234,7 @@ class FileImportManager(
             val disambiguatedTitle = graphiteRepository.disambiguateNoteTitle(rawTitle)
 
             val previewLines = when {
-                isPdf -> listOf(displayName, "PDF Document • $pageCount pages") + parsed.paragraphs.take(8)
+                isPdf -> emptyList() // PDFs render natively via PdfRenderer; do not inject title/page count overlays
                 ext.lowercase() in listOf("docx", "doc") -> {
                     listOf(displayName, "DOCX • $pageCount pages") + (if (parsed.paragraphs.isNotEmpty()) parsed.paragraphs.take(15) else emptyList())
                 }

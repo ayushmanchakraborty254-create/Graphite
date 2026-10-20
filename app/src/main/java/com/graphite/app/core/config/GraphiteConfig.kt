@@ -36,6 +36,13 @@ object GraphiteConfig {
         clientId
     }
 
+    val geminiApiKey: String
+        get() = BuildConfig.GEMINI_API_KEY.trim()
+
+    val groqApiKey: String
+        get() = BuildConfig.GROQ_API_KEY.trim()
+
+
     /**
      * Strict validation ensuring that the key is safe for client-side embedding
      * and is never a service-role or secret key.

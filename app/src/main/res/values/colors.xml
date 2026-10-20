@@ -4,4 +4,5 @@
     <color name="white">#FFFFFFFF</color>
     <color name="orange_accent">#FF7A30</color>
     <color name="background_dark">#FF121212</color>
+    <color name="ic_launcher_background">#FF101012</color>
 </resources>

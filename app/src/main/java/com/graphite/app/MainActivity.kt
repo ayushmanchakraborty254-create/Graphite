@@ -28,21 +28,37 @@ import com.graphite.app.feature.workspace.CanvasEditorScreen
 import android.content.Intent
 import com.graphite.app.core.drive.GoogleDriveUploadWorkflow
 import com.graphite.app.data.repository.GraphiteRepository
+import android.net.Uri
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.background
+import androidx.compose.ui.unit.dp
+import com.graphite.app.feature.workspace.VoiceNotebookScreen
 
 sealed interface ActiveDestination {
     data class MainTab(val tab: NavigationTab) : ActiveDestination
     data class ReaderView(val bookId: String) : ActiveDestination
     data class CanvasEditor(val notebookId: String) : ActiveDestination
+    data class SplitScreen(val docAId: String, val docBId: String) : ActiveDestination
     data object Diagnostics : ActiveDestination
 }
 
 class MainActivity : ComponentActivity() {
 
+    private val sharedUriToOpen = mutableStateOf<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         handleDeepLinkIntent(intent)
+        handleShareIntent(intent)
         setContent {
+
             GraphiteTheme {
                 var currentDestination by remember {
                     mutableStateOf<ActiveDestination>(ActiveDestination.MainTab(NavigationTab.RECENT))
@@ -50,6 +66,25 @@ class MainActivity : ComponentActivity() {
                 var selectedTab by rememberSaveable { mutableStateOf(NavigationTab.RECENT) }
 
                 val isRootTab = currentDestination is ActiveDestination.MainTab
+                val context = androidx.compose.ui.platform.LocalContext.current
+                val sharedUri by sharedUriToOpen
+
+                LaunchedEffect(sharedUri) {
+                    val uri = sharedUri ?: return@LaunchedEffect
+                    try {
+                        val result = GraphiteApplication.instance.fileImportManager.importToNotes(context, uri)
+                        when (result) {
+                            is com.graphite.app.core.importer.ImportResult.SuccessNotebook -> {
+                                currentDestination = ActiveDestination.CanvasEditor(result.notebook.id)
+                            }
+                            is com.graphite.app.core.importer.ImportResult.SuccessBook -> {
+                                currentDestination = ActiveDestination.ReaderView(result.book.id)
+                            }
+                            else -> {}
+                        }
+                    } catch (_: Exception) {}
+                    sharedUriToOpen.value = null
+                }
 
                 GoogleDriveUploadWorkflow(GraphiteApplication.instance.googleDriveManager)
 
@@ -98,6 +133,9 @@ class MainActivity : ComponentActivity() {
                                             NoteshelfScreen(
                                                 onOpenNotebook = { notebookId ->
                                                     currentDestination = ActiveDestination.CanvasEditor(notebookId)
+                                                },
+                                                onOpenSplitScreen = { docA, docB ->
+                                                    currentDestination = ActiveDestination.SplitScreen(docA, docB)
                                                 }
                                             )
                                         }
@@ -129,20 +167,76 @@ class MainActivity : ComponentActivity() {
                                     val openedNote = remember(destination.notebookId) {
                                         GraphiteRepository.getNotebook(destination.notebookId)
                                     }
-                                    if (openedNote?.mimeType == "text/keep") {
-                                        com.graphite.app.feature.workspace.KeepTextEditorScreen(
-                                            notebookId = destination.notebookId,
-                                            onNavigateBack = {
-                                                currentDestination = ActiveDestination.MainTab(selectedTab)
-                                            }
-                                        )
-                                    } else {
-                                        CanvasEditorScreen(
-                                            notebookId = destination.notebookId,
-                                            onNavigateBack = {
-                                                currentDestination = ActiveDestination.MainTab(selectedTab)
-                                            }
-                                        )
+                                    when (openedNote?.mimeType) {
+                                        "text/keep" -> {
+                                            com.graphite.app.feature.workspace.KeepTextEditorScreen(
+                                                notebookId = destination.notebookId,
+                                                onNavigateBack = {
+                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                }
+                                            )
+                                        }
+                                        "application/x-graphite-voice" -> {
+                                            VoiceNotebookScreen(
+                                                notebookId = destination.notebookId,
+                                                onNavigateBack = {
+                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                }
+                                            )
+                                        }
+                                        else -> {
+                                            CanvasEditorScreen(
+                                                notebookId = destination.notebookId,
+                                                onNavigateBack = {
+                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                is ActiveDestination.SplitScreen -> {
+                                    BackHandler {
+                                        currentDestination = ActiveDestination.MainTab(selectedTab)
+                                    }
+                                    Row(modifier = Modifier.fillMaxSize()) {
+                                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                            CanvasEditorScreen(
+                                                notebookId = destination.docAId,
+                                                onNavigateBack = {
+                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                }
+                                            )
+                                        }
+                                        // 2mm Distinct Split-Screen Separator Gap with Accent Center Line & Handle Pill
+                                        Box(
+                                            modifier = Modifier
+                                                .width(8.dp)
+                                                .fillMaxHeight()
+                                                .background(androidx.compose.ui.graphics.Color(0xFF141416)),
+                                            contentAlignment = androidx.compose.ui.Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(2.dp)
+                                                    .fillMaxHeight()
+                                                    .background(androidx.compose.ui.graphics.Color(0xFF55555C))
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(4.dp)
+                                                    .height(36.dp)
+                                                    .clip(RoundedCornerShape(2.dp))
+                                                    .background(Color(0xFF888890))
+                                            )
+                                        }
+                                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                            CanvasEditorScreen(
+                                                notebookId = destination.docBId,
+                                                onNavigateBack = {
+                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                                 is ActiveDestination.Diagnostics -> {
@@ -166,12 +260,33 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDeepLinkIntent(intent)
+        handleShareIntent(intent)
     }
 
     private fun handleDeepLinkIntent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "graphite" && data.host == "oauth2callback") {
             GraphiteApplication.instance.googleDriveManager.handlePickerRedirect(data, null)
+        }
+    }
+
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        val uri: Uri? = when (action) {
+            Intent.ACTION_SEND -> {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                } ?: intent.data
+            }
+            Intent.ACTION_VIEW -> intent.data
+            else -> null
+        }
+        if (uri != null) {
+            sharedUriToOpen.value = uri
         }
     }
 }

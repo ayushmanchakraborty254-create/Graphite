@@ -102,10 +102,93 @@ class SupabaseNotesRepository(
                     var resolvedFileName: String? = null
                     var resolvedPageCount = 1
                     var resolvedFilePath: String? = null
+                    var resolvedIsStarred = false
+                    var resolvedIsBookmarked = false
+                    var resolvedIsLocked = false
+                    var resolvedPassword: String? = null
+                    var resolvedCover = com.graphite.app.data.model.NotebookCover()
+                    val resolvedVoiceNotes = mutableListOf<com.graphite.app.core.voice.VoiceClip>()
                     val cleanPreviewLines = mutableListOf<String>()
 
                     for (line in dto.previewLines) {
-                        if (line.startsWith("[GRAPHITE_DOC:")) {
+                        if (line.startsWith("[GRAPHITE_META:")) {
+                            val content = line.removePrefix("[GRAPHITE_META:").removeSuffix("]")
+                            val parts = content.split(';')
+                            var covCat = "PLAIN"
+                            var covCol = 0xFF45A5B5
+                            var covName = "Teal"
+                            var covBand: Long? = null
+                            var covPat: String? = null
+                            var covImg: String? = null
+
+                            for (p in parts) {
+                                if (p.startsWith("starred=")) resolvedIsStarred = p.removePrefix("starred=").toBoolean()
+                                if (p.startsWith("bookmark=")) resolvedIsBookmarked = p.removePrefix("bookmark=").toBoolean()
+                                if (p.startsWith("locked=")) resolvedIsLocked = p.removePrefix("locked=").toBoolean()
+                                if (p.startsWith("pwd=")) resolvedPassword = p.removePrefix("pwd=")
+                                if (p.startsWith("cov_cat=")) covCat = p.removePrefix("cov_cat=")
+                                if (p.startsWith("cov_col=")) covCol = p.removePrefix("cov_col=").toLongOrNull() ?: 0xFF45A5B5
+                                if (p.startsWith("cov_name=")) covName = p.removePrefix("cov_name=")
+                                if (p.startsWith("cov_band=")) covBand = p.removePrefix("cov_band=").toLongOrNull()
+                                if (p.startsWith("cov_pat=")) covPat = p.removePrefix("cov_pat=")
+                                if (p.startsWith("cov_img=")) covImg = p.removePrefix("cov_img=")
+                            }
+                            resolvedCover = com.graphite.app.data.model.NotebookCover(
+                                category = covCat,
+                                colorHex = covCol,
+                                name = covName,
+                                bandColorHex = covBand,
+                                patternType = covPat,
+                                customImageUri = covImg
+                            )
+                        } else if (line.startsWith("[GRAPHITE_VOICE:")) {
+                            val content = line.removePrefix("[GRAPHITE_VOICE:").removeSuffix("]")
+                            val parts = content.split(';')
+                            var vId = java.util.UUID.randomUUID().toString()
+                            var vPage = 0
+                            var vTitle = "Voice Note"
+                            var vDur = 1
+                            var vCreated = ""
+                            var vTrans: String? = null
+                            var vData = ""
+                            for (p in parts) {
+                                if (p.startsWith("id=")) vId = p.removePrefix("id=")
+                                if (p.startsWith("page=")) vPage = p.removePrefix("page=").toIntOrNull() ?: 0
+                                if (p.startsWith("title=")) vTitle = p.removePrefix("title=")
+                                if (p.startsWith("dur=")) vDur = p.removePrefix("dur=").toIntOrNull() ?: 1
+                                if (p.startsWith("created=")) vCreated = p.removePrefix("created=")
+                                if (p.startsWith("trans=")) {
+                                    val t = p.removePrefix("trans=")
+                                    if (t.isNotBlank()) vTrans = t
+                                }
+                                if (p.startsWith("data=")) vData = p.removePrefix("data=")
+                            }
+                            var localAudioPath = ""
+                            if (context != null) {
+                                val voiceDir = File(context.filesDir, "voice_notes").apply { mkdirs() }
+                                val targetFile = File(voiceDir, "voice_${dto.id}_$vId.m4a")
+                                if (vData.isNotBlank() && (!targetFile.exists() || targetFile.length() == 0L)) {
+                                    try {
+                                        val bytes = android.util.Base64.decode(vData, android.util.Base64.NO_WRAP)
+                                        targetFile.writeBytes(bytes)
+                                    } catch (_: Exception) {}
+                                }
+                                if (targetFile.exists()) {
+                                    localAudioPath = targetFile.absolutePath
+                                }
+                            }
+                            resolvedVoiceNotes.add(
+                                com.graphite.app.core.voice.VoiceClip(
+                                    id = vId,
+                                    filePath = localAudioPath,
+                                    title = vTitle,
+                                    durationSeconds = vDur,
+                                    createdAtFormatted = vCreated,
+                                    transcription = vTrans,
+                                    pageIndex = vPage
+                                )
+                            )
+                        } else if (line.startsWith("[GRAPHITE_DOC:")) {
                             val content = line.removePrefix("[GRAPHITE_DOC:").removeSuffix("]")
                             val parts = content.split(';')
                             for (p in parts) {
@@ -154,6 +237,13 @@ class SupabaseNotesRepository(
                         previewLines = cleanPreviewLines,
                         initialStrokes = InkSerialization.deserializeStrokes(dto.strokesJson),
                         isDeleted = dto.isDeleted,
+                        isStarred = resolvedIsStarred,
+                        isBookmarked = resolvedIsBookmarked,
+                        isLocked = resolvedIsLocked,
+                        password = resolvedPassword,
+                        cover = resolvedCover,
+                        voiceNotes = resolvedVoiceNotes,
+                        hasRecordings = resolvedVoiceNotes.isNotEmpty(),
                         version = dto.version,
                         filePath = resolvedFilePath,
                         mimeType = resolvedMimeType,
@@ -185,24 +275,52 @@ class SupabaseNotesRepository(
             val userId = authManager.currentUserId ?: session.user.id
 
             val dtoList = notebooks.map { notebook ->
-                val effectivePreviewLines = if (notebook.mimeType != null) {
+                val metaParts = mutableListOf<String>()
+                metaParts.add("starred=${notebook.isStarred}")
+                metaParts.add("bookmark=${notebook.isBookmarked}")
+                metaParts.add("locked=${notebook.isLocked}")
+                if (!notebook.password.isNullOrBlank()) metaParts.add("pwd=${notebook.password}")
+                metaParts.add("cov_cat=${notebook.cover.category}")
+                metaParts.add("cov_col=${notebook.cover.colorHex}")
+                metaParts.add("cov_name=${notebook.cover.name}")
+                notebook.cover.bandColorHex?.let { metaParts.add("cov_band=$it") }
+                notebook.cover.patternType?.let { metaParts.add("cov_pat=$it") }
+                notebook.cover.customImageUri?.let { metaParts.add("cov_img=$it") }
+                val metaHeader = "[GRAPHITE_META:${metaParts.joinToString(";")}]"
+
+                val existingCleanPreview = notebook.previewLines.filter {
+                    !it.startsWith("[GRAPHITE_META:") && !it.startsWith("[GRAPHITE_VOICE:") && !it.startsWith("[GRAPHITE_DOC:") && !it.startsWith("[GRAPHITE_DATA:")
+                }
+
+                val effectivePreviewLines = mutableListOf(metaHeader)
+
+                // Embed voice notes
+                notebook.voiceNotes.forEach { clip ->
+                    val f = File(clip.filePath)
+                    val base64 = if (f.exists() && f.length() in 1..(6 * 1024 * 1024)) {
+                        try {
+                            android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+                        } catch (_: Exception) { "" }
+                    } else ""
+                    val vLine = "[GRAPHITE_VOICE:id=${clip.id};page=${clip.pageIndex};title=${clip.title};dur=${clip.durationSeconds};created=${clip.createdAtFormatted};trans=${clip.transcription ?: ""};data=$base64]"
+                    effectivePreviewLines.add(vLine)
+                }
+
+                if (notebook.mimeType != null) {
                     val f = notebook.filePath?.let { File(it) }
                     val namePart = if (f != null) ";name=${notebook.originalFileName ?: f.name}" else ""
                     val fileMetaHeader = "[GRAPHITE_DOC:mime=${notebook.mimeType}$namePart;pages=${notebook.pageCount}]"
-                    val existingCleanPreview = notebook.previewLines.filter { !it.startsWith("[GRAPHITE_DOC:") && !it.startsWith("[GRAPHITE_DATA:") }
-                    val linesWithMeta = mutableListOf(fileMetaHeader)
+                    effectivePreviewLines.add(fileMetaHeader)
                     // If file exists and size is <= 8MB, embed Base64 so second device materializes file
                     if (f != null && f.exists() && f.length() in 1..(8 * 1024 * 1024)) {
                         try {
                             val b64 = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
-                            linesWithMeta.add("[GRAPHITE_DATA:$b64]")
+                            effectivePreviewLines.add("[GRAPHITE_DATA:$b64]")
                         } catch (_: Exception) {}
                     }
-                    linesWithMeta.addAll(existingCleanPreview)
-                    linesWithMeta
-                } else {
-                    notebook.previewLines
                 }
+
+                effectivePreviewLines.addAll(existingCleanPreview)
 
                 SupabaseNotebookDto(
                     id = notebook.id,

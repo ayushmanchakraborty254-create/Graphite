@@ -30,7 +30,11 @@ class GraphiteApplication : Application() {
     lateinit var fileImportManager: com.graphite.app.core.importer.FileImportManager
         private set
 
+    lateinit var voiceRecorderManager: com.graphite.app.core.voice.VoiceRecorderManager
+        private set
+
     override fun onCreate() {
+
         super.onCreate()
         instance = this
 
@@ -50,9 +54,11 @@ class GraphiteApplication : Application() {
             supabaseAuthManager = supabaseAuthManager,
             supabaseSyncManager = supabaseSyncManager
         )
+        voiceRecorderManager = com.graphite.app.core.voice.VoiceRecorderManager(this)
 
         com.graphite.app.data.repository.GraphiteRepository.initStorage(this)
     }
+
 
     companion object {
         lateinit var instance: GraphiteApplication

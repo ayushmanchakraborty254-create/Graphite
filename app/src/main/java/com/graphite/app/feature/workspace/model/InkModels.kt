@@ -12,8 +12,17 @@ enum class PaperStyle {
     BLANK,
     RULED,
     DOTTED,
-    GRID
+    GRID,
+    HEXAGONAL_GRID,
+    CORNELL_A,
+    CORNELL_B,
+    LEGAL,
+    ENGINEERING_GRID,
+    MUSIC_SCORE,
+    GUITAR_TABLATURE,
+    GUITAR_SCORE
 }
+
 
 data class InkPoint(
     val x: Float,
@@ -73,13 +82,23 @@ data class InkStroke(
     }
 
     fun intersectsPoint(px: Float, py: Float, radius: Float): Boolean {
-        if (!boundingBox.contains(px, py, radius)) return false
+        val strokeHalfWidth = (baseWidth * 0.5f).coerceAtLeast(1f)
+        val effectiveRadius = radius + strokeHalfWidth
+        if (!boundingBox.contains(px, py, effectiveRadius)) return false
 
-        val radiusSq = radius * radius
+        val effRadiusSq = effectiveRadius * effectiveRadius
+        if (points.size <= 1) {
+            if (points.isEmpty()) return false
+            val p = points[0]
+            val dx = px - p.x
+            val dy = py - p.y
+            return (dx * dx + dy * dy) <= effRadiusSq
+        }
+
         for (i in 0 until points.size - 1) {
             val p1 = points[i]
             val p2 = points[i + 1]
-            if (distanceSqToSegment(px, py, p1.x, p1.y, p2.x, p2.y) <= radiusSq) {
+            if (distanceSqToSegment(px, py, p1.x, p1.y, p2.x, p2.y) <= effRadiusSq) {
                 return true
             }
         }

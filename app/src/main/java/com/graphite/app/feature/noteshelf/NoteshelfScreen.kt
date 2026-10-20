@@ -1,8 +1,21 @@
 package com.graphite.app.feature.noteshelf
 
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import com.graphite.app.data.model.NotebookCover
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -55,6 +68,7 @@ import kotlinx.coroutines.launch
 fun NoteshelfScreen(
     onOpenNotebook: (String) -> Unit,
     onNavigateBack: (() -> Unit)? = null,
+    onOpenSplitScreen: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val notebooks by GraphiteRepository.notebooks.collectAsState()
@@ -86,8 +100,24 @@ fun NoteshelfScreen(
 
     var showNewNotebookDialog by remember { mutableStateOf(false) }
     var showNewFolderDialog by remember { mutableStateOf(false) }
+    var selectedParentFolderForSubfolder by remember { mutableStateOf<FolderItem?>(null) }
     var showRenameDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
     var showMoveFolderDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
+    var showMoveMultiFolderDialog by remember { mutableStateOf(false) }
+    var showCreationOptionsSheet by remember { mutableStateOf(false) }
+
+    var pendingUnlockNote by remember { mutableStateOf<NotebookItem?>(null) }
+    var noteToChangePassword by remember { mutableStateOf<NotebookItem?>(null) }
+    var splitScreenDocA by remember { mutableStateOf<NotebookItem?>(null) }
+    var showSplitDocPicker by remember { mutableStateOf(false) }
+
+    val handleOpenNote: (NotebookItem) -> Unit = { notebook ->
+        if (notebook.isLocked && !notebook.password.isNullOrBlank()) {
+            pendingUnlockNote = notebook
+        } else {
+            onOpenNotebook(notebook.id)
+        }
+    }
 
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var currentSortOption by remember { mutableStateOf("Date Modified (Newest)") }
@@ -151,7 +181,7 @@ fun NoteshelfScreen(
     val baseNotes = if (selectedCategory == "Trash") {
         allNotesWithDeleted.filter { it.isDeleted }
     } else {
-        allNotesWithDeleted.filter { !it.isDeleted }
+        notebooks.filter { !it.isDeleted }
     }
 
     val categoryFiltered = when (selectedCategory) {
@@ -160,7 +190,7 @@ fun NoteshelfScreen(
         "Unfiled" -> baseNotes.filter { it.folderId.isBlank() || it.folderId == "unfiled" }
         "Trash" -> baseNotes
         "Photos" -> baseNotes.filter { it.hasPhotos || it.previewLines.any { l -> l.contains("image", true) || l.contains("photo", true) } }
-        "Recordings" -> baseNotes.filter { it.hasRecordings || it.previewLines.any { l -> l.contains("audio", true) || l.contains("recording", true) } }
+        "Recordings" -> baseNotes.filter { it.hasRecordings || it.voiceNotes.isNotEmpty() || it.previewLines.any { l -> l.contains("[GRAPHITE_VOICE:") || l.contains("audio", true) || l.contains("recording", true) } }
         "Bookmarks" -> baseNotes.filter { it.isBookmarked }
         "Templates" -> emptyList()
         else -> baseNotes.filter { it.folderId == selectedCategory }
@@ -269,17 +299,27 @@ fun NoteshelfScreen(
             SidebarItem(
                 title = "Templates",
                 icon = Icons.Default.Palette,
-                badgeText = "New",
                 isSelected = selectedCategory == "Templates",
                 onClick = {
                     selectedCategory = "Templates"
                     if (!isTablet) sidebarVisible = false
                 }
             )
+            val recordingsCount = notebooks.count { !it.isDeleted && (it.hasRecordings || it.voiceNotes.isNotEmpty() || it.previewLines.any { l -> l.contains("[GRAPHITE_VOICE:") }) }
+            SidebarItem(
+                title = "Recordings",
+                icon = Icons.Default.GraphicEq,
+                count = recordingsCount.takeIf { it > 0 },
+                isSelected = selectedCategory == "Recordings",
+                onClick = {
+                    selectedCategory = "Recordings"
+                    if (!isTablet) sidebarVisible = false
+                }
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Collapsible Folders Section
+            // Folders & Subfolders Section
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -299,25 +339,74 @@ fun NoteshelfScreen(
                 )
             }
 
-            folders.forEach { folder ->
+            val rootFolders = folders.filter { it.parentId == null }
+            rootFolders.forEach { folder ->
                 val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
-                SidebarItem(
-                    title = folder.name,
-                    icon = Icons.Default.Folder,
-                    count = noteCount,
-                    isSelected = selectedCategory == folder.id,
-                    onClick = {
-                        selectedCategory = folder.id
-                        if (!isTablet) sidebarVisible = false
+                val subfolders = folders.filter { it.parentId == folder.id }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        SidebarItem(
+                            title = folder.name,
+                            icon = Icons.Default.Folder,
+                            count = noteCount,
+                            isSelected = selectedCategory == folder.id,
+                            onClick = {
+                                selectedCategory = folder.id
+                                if (!isTablet) sidebarVisible = false
+                            }
+                        )
                     }
-                )
+                    IconButton(
+                        onClick = {
+                            selectedParentFolderForSubfolder = folder
+                            showNewFolderDialog = true
+                        },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CreateNewFolder,
+                            contentDescription = "Add Subfolder",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                // Render subfolders indented
+                subfolders.forEach { subfolder ->
+                    val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        SidebarItem(
+                            title = subfolder.name,
+                            icon = Icons.Default.FolderOpen,
+                            count = subNoteCount,
+                            isSelected = selectedCategory == subfolder.id,
+                            onClick = {
+                                selectedCategory = subfolder.id
+                                if (!isTablet) sidebarVisible = false
+                            }
+                        )
+                    }
+                }
             }
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .clickable { showNewFolderDialog = true }
+                    .clickable {
+                        selectedParentFolderForSubfolder = null
+                        showNewFolderDialog = true
+                    }
                     .padding(vertical = 8.dp, horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -335,44 +424,6 @@ fun NoteshelfScreen(
                     fontWeight = FontWeight.Medium
                 )
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Content Section
-            Text(
-                text = "Content",
-                color = Color.Gray,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(vertical = 4.dp)
-            )
-            SidebarItem(
-                title = "Photos",
-                icon = Icons.Default.Image,
-                isSelected = selectedCategory == "Photos",
-                onClick = {
-                    selectedCategory = "Photos"
-                    if (!isTablet) sidebarVisible = false
-                }
-            )
-            SidebarItem(
-                title = "Recordings",
-                icon = Icons.Default.Mic,
-                isSelected = selectedCategory == "Recordings",
-                onClick = {
-                    selectedCategory = "Recordings"
-                    if (!isTablet) sidebarVisible = false
-                }
-            )
-            SidebarItem(
-                title = "Bookmarks",
-                icon = Icons.Default.BookmarkBorder,
-                isSelected = selectedCategory == "Bookmarks",
-                onClick = {
-                    selectedCategory = "Bookmarks"
-                    if (!isTablet) sidebarVisible = false
-                }
-            )
         }
     }
 
@@ -422,6 +473,26 @@ fun NoteshelfScreen(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (selectedNotebookIds.size == 2 && onOpenSplitScreen != null) {
+                            val twoIds = selectedNotebookIds.toList()
+                            Button(
+                                onClick = {
+                                    val idA = twoIds[0]
+                                    val idB = twoIds[1]
+                                    selectedNotebookIds = emptySet()
+                                    onOpenSplitScreen(idA, idB)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(end = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Splitscreen, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Split View (2)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
                         val allFilteredIds = sortedNotebooks.map { it.id }.toSet()
                         val allSelected = selectedNotebookIds.size == allFilteredIds.size && allFilteredIds.isNotEmpty()
 
@@ -434,6 +505,17 @@ fun NoteshelfScreen(
                                 imageVector = if (allSelected) Icons.Default.CheckCircle else Icons.Default.SelectAll,
                                 contentDescription = if (allSelected) "Deselect All" else "Select All",
                                 tint = if (allSelected) GraphiteOrange else Color.White
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { showMoveMultiFolderDialog = true }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DriveFileMove,
+                                contentDescription = "Move Selected to Folder",
+                                tint = Color(0xFF64B5F6),
+                                modifier = Modifier.size(24.dp)
                             )
                         }
 
@@ -492,7 +574,7 @@ fun NoteshelfScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { showNewNotebookDialog = true }) {
+                    IconButton(onClick = { showCreationOptionsSheet = true }) {
                         Icon(
                             imageVector = Icons.Default.AddCircle,
                             contentDescription = "Add Notebook",
@@ -654,7 +736,7 @@ fun NoteshelfScreen(
                 )
             }
 
-            // Quick Creation Action Cards Row (Quick Note, Notebook, Import File)
+            // Quick Creation Action Cards Row (Quick Note, Notebook, Voice Note)
             if (selectedCategory != "Templates" && selectedCategory != "Trash") {
                 Row(
                     modifier = Modifier
@@ -673,28 +755,11 @@ fun NoteshelfScreen(
                         }
                     )
                     QuickActionCard(
-                        title = "Notebook",
+                        title = "New Notebook",
                         icon = Icons.Default.Book,
                         iconTint = Color(0xFF81C784),
                         modifier = Modifier.weight(1f),
-                        onClick = { showNewNotebookDialog = true }
-                    )
-                    QuickActionCard(
-                        title = "Import File",
-                        icon = Icons.Default.FileDownload,
-                        iconTint = Color(0xFF64B5F6),
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            fileImportLauncher.launch(
-                                arrayOf(
-                                    "application/pdf",
-                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                    "application/json",
-                                    "*/*"
-                                )
-                            )
-                        }
+                        onClick = { showCreationOptionsSheet = true }
                     )
                 }
             }
@@ -742,7 +807,49 @@ fun NoteshelfScreen(
                     }
                 }
 
-                if (isListView) {
+                if (sortedNotebooks.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(top = 60.dp),
+                        contentAlignment = Alignment.TopCenter
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF222226)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (selectedCategory == "Recordings") Icons.Default.GraphicEq else Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = if (selectedCategory == "Recordings") Color(0xFF00BCD4) else Color.Gray,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (selectedCategory == "Recordings") "No audio recordings yet" else "No notebooks found",
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = if (selectedCategory == "Recordings") "Voice notes and audio clips recorded in your notebooks will appear here." else "Tap New Notebook or Quick Note above to create one.",
+                                color = Color.Gray,
+                                fontSize = 13.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                } else if (isListView) {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -757,12 +864,14 @@ fun NoteshelfScreen(
                                     if (isSelectionMode) {
                                         toggleNoteSelection(notebook.id)
                                     } else {
-                                        onOpenNotebook(notebook.id)
+                                        handleOpenNote(notebook)
                                     }
                                 },
                                 onLongClick = {
                                     toggleNoteSelection(notebook.id)
                                 },
+                                onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
+                                onSetPassword = { noteToChangePassword = notebook },
                                 onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
                                 onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
                                 onRename = { showRenameDialogForNote = notebook },
@@ -801,12 +910,14 @@ fun NoteshelfScreen(
                                     if (isSelectionMode) {
                                         toggleNoteSelection(notebook.id)
                                     } else {
-                                        onOpenNotebook(notebook.id)
+                                        handleOpenNote(notebook)
                                     }
                                 },
                                 onLongClick = {
                                     toggleNoteSelection(notebook.id)
                                 },
+                                onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
+                                onSetPassword = { noteToChangePassword = notebook },
                                 onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
                                 onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
                                 onRename = { showRenameDialogForNote = notebook },
@@ -851,34 +962,226 @@ fun NoteshelfScreen(
                 }
             }
         }
+        // Orange Circular (+) FAB matching PDF Page 9
+        FloatingActionButton(
+            onClick = { showCreationOptionsSheet = true },
+            containerColor = GraphiteOrange,
+            contentColor = Color.White,
+            shape = CircleShape,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(24.dp)
+                .size(56.dp)
+                .shadow(8.dp, CircleShape)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "New Notebook or Document",
+                modifier = Modifier.size(28.dp)
+            )
+        }
     }
 
     if (showNewNotebookDialog) {
-        NewNotebookDialog(
+        NewHandwrittenNotebookModal(
             onDismiss = { showNewNotebookDialog = false },
-            onCreate = { title, isTextNotebook ->
-                val newNote = if (isTextNotebook) {
-                    GraphiteRepository.createNotebook(
-                        title = title,
-                        mimeType = "text/keep",
-                        initialPreviewLines = listOf("[ ] New list item", "Add note description here...")
-                    )
-                } else {
-                    GraphiteRepository.createNotebook(title)
-                }
+            onCreate = { title, cover, template, password ->
+                val newNote = GraphiteRepository.createNotebook(
+                    title = title,
+                    cover = cover,
+                    paperStyle = template,
+                    password = password
+                )
                 showNewNotebookDialog = false
                 onOpenNotebook(newNote.id)
             }
         )
     }
 
+    pendingUnlockNote?.let { note ->
+        NotebookUnlockDialog(
+            notebook = note,
+            onDismiss = { pendingUnlockNote = null },
+            onSuccess = {
+                pendingUnlockNote = null
+                onOpenNotebook(note.id)
+            }
+        )
+    }
+
+    noteToChangePassword?.let { note ->
+        SetPasswordDialog(
+            notebook = note,
+            onDismiss = { noteToChangePassword = null },
+            onSave = { newPwd ->
+                GraphiteRepository.setNotebookPassword(note.id, newPwd)
+                noteToChangePassword = null
+                Toast.makeText(context, if (newPwd.isNullOrBlank()) "Password removed" else "Password updated", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    if (showSplitDocPicker && splitScreenDocA != null && onOpenSplitScreen != null) {
+        SplitScreenDocPickerDialog(
+            firstDoc = splitScreenDocA!!,
+            allNotes = sortedNotebooks,
+            onDismiss = { showSplitDocPicker = false; splitScreenDocA = null },
+            onSelectSecondDoc = { docB ->
+                val docAId = splitScreenDocA!!.id
+                val docBId = docB.id
+                showSplitDocPicker = false
+                splitScreenDocA = null
+                onOpenSplitScreen(docAId, docBId)
+            }
+        )
+    }
+
     if (showNewFolderDialog) {
         NewFolderDialog(
-            onDismiss = { showNewFolderDialog = false },
-            onCreate = { name ->
-                GraphiteRepository.addFolder(name)
+            parentFolder = selectedParentFolderForSubfolder,
+            onDismiss = {
                 showNewFolderDialog = false
+                selectedParentFolderForSubfolder = null
+            },
+            onCreate = { name ->
+                GraphiteRepository.addFolder(name, selectedParentFolderForSubfolder?.id)
+                showNewFolderDialog = false
+                selectedParentFolderForSubfolder = null
             }
+        )
+    }
+
+    if (showMoveMultiFolderDialog && selectedNotebookIds.isNotEmpty()) {
+        MoveNoteFolderDialog(
+            folders = folders,
+            currentFolderId = "",
+            onDismiss = { showMoveMultiFolderDialog = false },
+            onSelectFolder = { folderId ->
+                val count = selectedNotebookIds.size
+                GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
+                selectedNotebookIds = emptySet()
+                showMoveMultiFolderDialog = false
+                Toast.makeText(context, "Moved $count notes to folder", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    if (showCreationOptionsSheet) {
+        AlertDialog(
+            onDismissRequest = { showCreationOptionsSheet = false },
+            title = {
+                Text(
+                    text = "Create or Import",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                showCreationOptionsSheet = false
+                                showNewNotebookDialog = true
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Book, contentDescription = null, tint = Color(0xFF81C784), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text("Handwritten Notebook", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Stylus canvas with custom cover & paper templates", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                showCreationOptionsSheet = false
+                                val count = notebooks.count { it.mimeType == "text/keep" } + 1
+                                val textNote = GraphiteRepository.createNotebook(
+                                    title = "Text Note $count",
+                                    mimeType = "text/keep",
+                                    initialPreviewLines = listOf("Tap to start typing your note...")
+                                )
+                                onOpenNotebook(textNote.id)
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Notes, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text("Text Note", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Rich text, checklists & typed markdown note", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                showCreationOptionsSheet = false
+                                fileImportLauncher.launch(
+                                    arrayOf(
+                                        "application/pdf",
+                                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                        "application/json",
+                                        "*/*"
+                                    )
+                                )
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text("Import Document", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Import PDF, Word (.docx), PPTX or files", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                showCreationOptionsSheet = false
+                                selectedParentFolderForSubfolder = null
+                                showNewFolderDialog = true
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text("New Folder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Create a folder or subfolder for organizing notes", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCreationOptionsSheet = false }) {
+                    Text("Close", color = Color.LightGray)
+                }
+            },
+            containerColor = Color(0xFF222222)
         )
     }
 
@@ -1083,6 +1386,51 @@ private fun QuickActionCard(
     }
 }
 
+@Composable
+private fun PdfThumbnailImage(filePath: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var bitmap by remember(filePath) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(filePath) {
+        withContext(Dispatchers.IO) {
+            try {
+                val pfd: ParcelFileDescriptor? = if (filePath.startsWith("content://")) {
+                    context.contentResolver.openFileDescriptor(android.net.Uri.parse(filePath), "r")
+                } else {
+                    val file = File(filePath)
+                    if (file.exists()) ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) else null
+                }
+                if (pfd != null) {
+                    val renderer = PdfRenderer(pfd)
+                    if (renderer.pageCount > 0) {
+                        val page = renderer.openPage(0)
+                        val w = 260
+                        val h = (260 * (page.height.toFloat() / page.width.toFloat())).toInt().coerceIn(100, 400)
+                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        val canvas = android.graphics.Canvas(bmp)
+                        canvas.drawColor(android.graphics.Color.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        page.close()
+                        renderer.close()
+                        pfd.close()
+                        bitmap = bmp
+                    } else {
+                        renderer.close()
+                        pfd.close()
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap!!.asImageBitmap(),
+            contentDescription = "PDF Cover",
+            contentScale = ContentScale.Crop,
+            modifier = modifier.fillMaxSize()
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotebookThumbnailCard(
@@ -1098,7 +1446,9 @@ private fun NotebookThumbnailCard(
     onRestore: () -> Unit,
     onPermanentlyDelete: () -> Unit,
     onDelete: () -> Unit,
-    onUploadToDrive: () -> Unit
+    onUploadToDrive: () -> Unit,
+    onOpenSplitScreen: (() -> Unit)? = null,
+    onSetPassword: (() -> Unit)? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
@@ -1155,46 +1505,90 @@ private fun NotebookThumbnailCard(
                 }
 
                 if (isPdf) {
-                    // PDF Badge & Document Layout
+                    if (!notebook.filePath.isNullOrEmpty() && (File(notebook.filePath).exists() || notebook.filePath.startsWith("content://"))) {
+                        PdfThumbnailImage(notebook.filePath)
+                    } else {
+                        // PDF Badge & Document Layout
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color(0xFFD32F2F))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("PDF", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Icon(
+                                imageVector = Icons.Default.PictureAsPdf,
+                                contentDescription = "PDF File",
+                                tint = Color(0xFFEF5350),
+                                modifier = Modifier.size(46.dp)
+                            )
+
+                            Text(
+                                text = "${notebook.pageCount} pages",
+                                color = Color.LightGray,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                } else if (notebook.mimeType == "application/x-graphite-voice") {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
+                            .background(Color(0xFF1E1710))
                             .padding(10.dp),
                         verticalArrangement = Arrangement.SpaceBetween,
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            horizontalArrangement = Arrangement.Start
                         ) {
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
-                                    .background(Color(0xFFD32F2F))
+                                    .background(GraphiteOrange)
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Text("PDF", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                            }
-                            if (notebook.isStarred) {
-                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(16.dp))
+                                Text("VOICE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             }
                         }
 
                         Icon(
-                            imageVector = Icons.Default.PictureAsPdf,
-                            contentDescription = "PDF File",
-                            tint = Color(0xFFEF5350),
-                            modifier = Modifier.size(46.dp)
+                            imageVector = Icons.Default.GraphicEq,
+                            contentDescription = "Voice Note",
+                            tint = GraphiteOrange,
+                            modifier = Modifier.size(44.dp)
                         )
 
                         Text(
-                            text = "${notebook.pageCount} pages",
-                            color = Color.LightGray,
+                            text = "${notebook.voiceNotes.size} clips",
+                            color = Color(0xFFFFCC80),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium
                         )
                     }
+                } else if (notebook.cover.category != "NONE") {
+                    NotebookCoverView(
+                        cover = notebook.cover,
+                        modifier = Modifier.fillMaxSize(),
+                        isThumbnail = true
+                    )
                 } else if (isDoc) {
                     // Word / PPTX Document Layout
                     val isPpt = notebook.filePath?.endsWith(".pptx", true) == true
@@ -1327,6 +1721,45 @@ private fun NotebookThumbnailCard(
                     }
                 }
 
+                // Lock Badge (top left when not in multi-selection mode)
+                if (notebook.isLocked && !isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(4.dp)
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.65f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Locked Note",
+                            tint = Color(0xFFFFD54F),
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                }
+
+                // Quick Star Icon on bottom-left - High-contrast elevated circular button
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(4.dp)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { onToggleStar() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (notebook.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = "Star Notebook",
+                        tint = if (notebook.isStarred) Color(0xFFFFD54F) else Color.White,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
                 // Cloud Upload Badge Icon (top right)
                 IconButton(
                     onClick = onUploadToDrive,
@@ -1372,6 +1805,26 @@ private fun NotebookThumbnailCard(
                             onClick()
                         }
                     )
+                    if (onOpenSplitScreen != null) {
+                        DropdownMenuItem(
+                            text = { Text("Open in Split Screen", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = GraphiteOrange) },
+                            onClick = {
+                                menuExpanded = false
+                                onOpenSplitScreen()
+                            }
+                        )
+                    }
+                    if (onSetPassword != null) {
+                        DropdownMenuItem(
+                            text = { Text(if (notebook.isLocked) "Change/Remove Password" else "Password Protection", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFFD54F)) },
+                            onClick = {
+                                menuExpanded = false
+                                onSetPassword()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text(if (notebook.isStarred) "Unstar" else "Star", color = Color.White) },
                         onClick = {
@@ -1463,6 +1916,8 @@ private fun NotebookListRow(
     isSelectionMode: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onOpenSplitScreen: (() -> Unit)? = null,
+    onSetPassword: (() -> Unit)? = null,
     onToggleStar: () -> Unit,
     onToggleBookmark: () -> Unit,
     onRename: () -> Unit,
@@ -1519,6 +1974,10 @@ private fun NotebookListRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (notebook.isLocked) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
+                }
                 if (notebook.isStarred) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
@@ -1530,6 +1989,19 @@ private fun NotebookListRow(
                 fontSize = 11.sp
             )
         }
+
+        IconButton(
+            onClick = onToggleStar,
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                imageVector = if (notebook.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                contentDescription = "Star Note",
+                tint = if (notebook.isStarred) Color(0xFFFFD54F) else Color.Gray,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
         Box {
             IconButton(onClick = { menuExpanded = true }) {
                 Icon(Icons.Default.MoreVert, contentDescription = null, tint = Color.Gray)
@@ -1543,18 +2015,41 @@ private fun NotebookListRow(
                     text = { Text(if (isPdf) "Open PDF" else "Open Note", color = Color.White) },
                     onClick = { menuExpanded = false; onClick() }
                 )
+                if (onOpenSplitScreen != null) {
+                    DropdownMenuItem(
+                        text = { Text("Open in Split Screen", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = GraphiteOrange) },
+                        onClick = { menuExpanded = false; onOpenSplitScreen() }
+                    )
+                }
+                if (onSetPassword != null) {
+                    DropdownMenuItem(
+                        text = { Text(if (notebook.isLocked) "Change/Remove Password" else "Password Protection", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFFD54F)) },
+                        onClick = { menuExpanded = false; onSetPassword() }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text(if (notebook.isStarred) "Unstar" else "Star", color = Color.White) },
                     onClick = { menuExpanded = false; onToggleStar() }
+                )
+                DropdownMenuItem(
+                    text = { Text(if (notebook.isBookmarked) "Remove Bookmark" else "Bookmark", color = Color.White) },
+                    onClick = { menuExpanded = false; onToggleBookmark() }
                 )
                 DropdownMenuItem(
                     text = { Text("Rename", color = Color.White) },
                     onClick = { menuExpanded = false; onRename() }
                 )
                 DropdownMenuItem(
+                    text = { Text("Move to Folder", color = Color.White) },
+                    onClick = { menuExpanded = false; onMoveFolder() }
+                )
+                DropdownMenuItem(
                     text = { Text("Upload to Drive", color = GraphiteOrange) },
                     onClick = { menuExpanded = false; onUploadToDrive() }
                 )
+                HorizontalDivider(color = Color(0xFF333333))
                 if (notebook.isDeleted) {
                     DropdownMenuItem(
                         text = { Text("Restore", color = Color(0xFF81C784)) },
@@ -1883,13 +2378,14 @@ private fun NewNotebookDialog(
 
 @Composable
 private fun NewFolderDialog(
+    parentFolder: FolderItem? = null,
     onDismiss: () -> Unit,
     onCreate: (String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New Folder", color = Color.White, fontWeight = FontWeight.Bold) },
+        title = { Text(if (parentFolder != null) "New Subfolder in \"${parentFolder.name}\"" else "New Folder", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
                 value = name,
@@ -1984,6 +2480,304 @@ private fun MoveNoteFolderDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("• ${folder.name}", color = if (currentFolderId == folder.id) GraphiteOrange else Color.White)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+fun NotebookUnlockDialog(
+    notebook: NotebookItem,
+    onDismiss: () -> Unit,
+    onSuccess: () -> Unit
+) {
+    var enteredPassword by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Locked Notebook", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "\"${notebook.title}\" is protected with a password. Enter password to unlock.",
+                    color = Color.LightGray,
+                    fontSize = 13.sp
+                )
+                OutlinedTextField(
+                    value = enteredPassword,
+                    onValueChange = {
+                        enteredPassword = it
+                        errorMessage = null
+                    },
+                    label = { Text("Password", color = Color.Gray) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    isError = errorMessage != null,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = GraphiteOrange,
+                        unfocusedBorderColor = GraphiteOutline,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+                if (errorMessage != null) {
+                    Text(errorMessage!!, color = Color(0xFFFF5252), fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (notebook.password == enteredPassword) {
+                        onSuccess()
+                    } else {
+                        errorMessage = "Incorrect password. Please try again."
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+            ) {
+                Text("Unlock", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+fun SetPasswordDialog(
+    notebook: NotebookItem,
+    onDismiss: () -> Unit,
+    onSave: (String?) -> Unit
+) {
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var currentPasswordInput by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val hasExistingPassword = !notebook.password.isNullOrBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(if (hasExistingPassword) "Password Protection" else "Set Note Password", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (hasExistingPassword) {
+                    Text(
+                        text = "This notebook currently has a password. Enter current password to change or remove it.",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = currentPasswordInput,
+                        onValueChange = {
+                            currentPasswordInput = it
+                            errorMessage = null
+                        },
+                        label = { Text("Current Password", color = Color.Gray) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = GraphiteOrange,
+                            unfocusedBorderColor = GraphiteOutline,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                }
+
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = {
+                        newPassword = it
+                        errorMessage = null
+                    },
+                    label = { Text(if (hasExistingPassword) "New Password (or blank to remove)" else "New Password", color = Color.Gray) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = GraphiteOrange,
+                        unfocusedBorderColor = GraphiteOutline,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                if (newPassword.isNotBlank()) {
+                    OutlinedTextField(
+                        value = confirmPassword,
+                        onValueChange = {
+                            confirmPassword = it
+                            errorMessage = null
+                        },
+                        label = { Text("Confirm New Password", color = Color.Gray) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = GraphiteOrange,
+                            unfocusedBorderColor = GraphiteOutline,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                }
+
+                if (errorMessage != null) {
+                    Text(errorMessage!!, color = Color(0xFFFF5252), fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (hasExistingPassword && currentPasswordInput != notebook.password) {
+                        errorMessage = "Current password does not match."
+                        return@Button
+                    }
+                    if (newPassword.isNotBlank() && newPassword != confirmPassword) {
+                        errorMessage = "Passwords do not match."
+                        return@Button
+                    }
+                    onSave(newPassword.ifBlank { null })
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+            ) {
+                Text(if (hasExistingPassword && newPassword.isBlank()) "Remove Password" else "Save Password", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+fun SplitScreenDocPickerDialog(
+    firstDoc: NotebookItem,
+    allNotes: List<NotebookItem>,
+    onDismiss: () -> Unit,
+    onSelectSecondDoc: (NotebookItem) -> Unit
+) {
+    val candidateNotes = remember(allNotes, firstDoc) {
+        allNotes.filter { it.id != firstDoc.id && !it.isDeleted }
+    }
+    var searchQuery by remember { mutableStateOf("") }
+    val filtered = candidateNotes.filter { it.title.contains(searchQuery, ignoreCase = true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Select Second Document", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                Text(
+                    text = "Doc 1: ${firstDoc.title}",
+                    color = GraphiteOrange,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search notes...", color = Color.Gray, fontSize = 13.sp) },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = GraphiteOrange,
+                        unfocusedBorderColor = GraphiteOutline,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                if (filtered.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Text("No other documents found", color = Color.Gray, fontSize = 13.sp)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(filtered) { doc ->
+                            val isPdf = doc.mimeType?.contains("pdf", ignoreCase = true) == true ||
+                                    doc.filePath?.endsWith(".pdf", ignoreCase = true) == true
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF222222))
+                                    .clickable { onSelectSecondDoc(doc) }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
+                                    contentDescription = null,
+                                    tint = if (isPdf) Color(0xFFEF5350) else GraphiteOrange,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = doc.title,
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = doc.updatedAtFormatted,
+                                        color = Color.Gray,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

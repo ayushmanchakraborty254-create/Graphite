@@ -55,6 +55,7 @@ fun KeepTextEditorScreen(
     var noteBody by remember { mutableStateOf("") }
     var checklistItems by remember { mutableStateOf<List<ChecklistItem>>(emptyList()) }
     var showCheckedItems by remember { mutableStateOf(true) }
+    var showVoiceDialog by remember { mutableStateOf(false) }
 
     // Parse existing previewLines into checklist items and body text
     LaunchedEffect(notebookId) {
@@ -138,6 +139,13 @@ fun KeepTextEditorScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { showVoiceDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "Voice to Text",
+                            tint = GraphiteOrange
+                        )
+                    }
                     IconButton(onClick = {
                         checklistItems = checklistItems + ChecklistItem(text = "")
                     }) {
@@ -405,5 +413,40 @@ fun KeepTextEditorScreen(
                 )
             }
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                val recorder = com.graphite.app.GraphiteApplication.instance.voiceRecorderManager
+                if (recorder.isRecording.value) {
+                    val clip = recorder.stopRecording()
+                    if (clip != null) {
+                        GraphiteRepository.addVoiceClipToNotebook(notebookId, clip)
+                    }
+                }
+                recorder.stopPlayback()
+            } catch (_: Exception) {}
+        }
+    }
+
+    if (showVoiceDialog) {
+        VoiceNoteDialog(
+            notebookId = notebookId,
+            onDismiss = { showVoiceDialog = false },
+            onSaveVoiceClip = { clip ->
+                GraphiteRepository.addVoiceClipToNotebook(notebookId, clip)
+            },
+            onTextTranscribed = { text ->
+                if (checklistItems.isNotEmpty()) {
+                    val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val newItems = lines.map { ChecklistItem(text = it.removePrefix("- ").removePrefix("* ")) }
+                    checklistItems = checklistItems + newItems
+                } else {
+                    noteBody = if (noteBody.isBlank()) text else "$noteBody\n\n$text"
+                }
+                saveNote()
+            }
+        )
     }
 }

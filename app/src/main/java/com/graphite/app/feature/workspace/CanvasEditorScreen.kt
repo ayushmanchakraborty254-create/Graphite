@@ -13,10 +13,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -35,6 +38,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -90,7 +99,8 @@ enum class StudioTool {
     PEN,
     HIGHLIGHTER,
     ERASER,
-    LASSO
+    LASSO,
+    TEXT
 }
 
 enum class EditorInteractionMode {
@@ -103,10 +113,14 @@ enum class EditorInteractionMode {
 fun CanvasEditorScreen(
     notebookId: String,
     onNavigateBack: () -> Unit,
+    onSplitScreen: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
     workspaceViewModel: WorkspaceViewModel = viewModel(key = "canvas_editor_$notebookId")
 ) {
-    val notebook = remember(notebookId) { GraphiteRepository.getNotebook(notebookId) }
+    val allNotebooks by GraphiteRepository.notebooks.collectAsState()
+    val notebook = remember(notebookId, allNotebooks) {
+        allNotebooks.firstOrNull { it.id == notebookId } ?: GraphiteRepository.getNotebook(notebookId)
+    }
     val uiState by workspaceViewModel.uiState.collectAsState()
 
     val context = LocalContext.current
@@ -141,6 +155,9 @@ fun CanvasEditorScreen(
     var showDocumentMenu by remember { mutableStateOf(false) }     // Top-right ⋮ (Image 3)
     var showColorPaletteDialog by remember { mutableStateOf(false) } // Left palette +
     var showStrokeWidthDialog by remember { mutableStateOf(false) } // Left palette size slider
+    var showVoiceDialog by remember { mutableStateOf(false) }
+    var showSplitScreenPicker by remember { mutableStateOf(false) }
+    var showMobilePalette by remember { mutableStateOf(false) }
 
     // Sub-dialogs
     var showTemplateDialog by remember { mutableStateOf(false) }
@@ -172,13 +189,161 @@ fun CanvasEditorScreen(
     var activePoints by remember { mutableStateOf<List<InkPoint>>(emptyList()) }
     var activeEraserCenter by remember { mutableStateOf<Offset?>(null) }
 
-    // Lasso selection state
+    // Transient stroke buffer to eliminate any frame flicker/blink during UP gesture before ViewModel emits updated strokes
+    var pendingTransientStrokes by remember { mutableStateOf<List<InkStroke>>(emptyList()) }
+
+    LaunchedEffect(uiState.strokes) {
+        if (pendingTransientStrokes.isNotEmpty()) {
+            pendingTransientStrokes = pendingTransientStrokes.filter { pending ->
+                uiState.strokes.none { it.id == pending.id }
+            }
+        }
+    }
+
+    // Tool sizes & persistent eraser state (remembered across all notes and PDFs)
+    var brushStrokeWidth by remember { mutableFloatStateOf(uiState.selectedStrokeWidth) }
+    var highlighterStrokeWidth by remember { mutableFloatStateOf(16f) }
+
+    val eraserPrefs = remember { context.getSharedPreferences("graphite_eraser_prefs", Context.MODE_PRIVATE) }
+    val savedEraserModeName = remember { eraserPrefs.getString("eraser_mode", WorkspaceViewModel.EraserModeType.WHOLE_STROKE.name) }
+    val initialEraserMode = remember {
+        try {
+            WorkspaceViewModel.EraserModeType.valueOf(savedEraserModeName ?: WorkspaceViewModel.EraserModeType.WHOLE_STROKE.name)
+        } catch (_: Exception) {
+            WorkspaceViewModel.EraserModeType.WHOLE_STROKE
+        }
+    }
+    val initialEraserRadius = remember { eraserPrefs.getFloat("eraser_radius", 28f) }
+
+    var eraserRadius by remember { mutableFloatStateOf(initialEraserRadius) }
+    var eraserMode by remember { mutableStateOf(initialEraserMode) }
+
+    LaunchedEffect(eraserRadius, eraserMode) {
+        eraserPrefs.edit()
+            .putString("eraser_mode", eraserMode.name)
+            .putFloat("eraser_radius", eraserRadius)
+            .apply()
+    }
+
+    // Lasso selection & drag state
     var lassoPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var selectedStrokeIndices by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var lassoBounds by remember { mutableStateOf<Rect?>(null) }
+    var isDraggingLasso by remember { mutableStateOf(false) }
+    var lassoDragStart by remember { mutableStateOf(Offset.Zero) }
+    var lassoDragOffset by remember { mutableStateOf(Offset.Zero) }
+
+    // Voice recording in note state
+    var showVoiceNoteRecorder by remember { mutableStateOf(false) }
+    var isTranscribingVoice by remember { mutableStateOf(false) }
+    var transcribedTextResult by remember { mutableStateOf<String?>(null) }
+    var voiceRecordingFile by remember { mutableStateOf<java.io.File?>(null) }
+    var showAudioNotesDialog by remember { mutableStateOf(false) }
+    var voiceDialogAudioOnly by remember { mutableStateOf(false) }
+
+    // Canvas Text Box state
+    var localTextBoxes by remember { mutableStateOf<List<CanvasTextBox>>(emptyList()) }
+    var editingTextBoxId by remember { mutableStateOf<String?>(null) }
+    var textToolTapDownX by remember { mutableFloatStateOf(0f) }
+    var textToolTapDownY by remember { mutableFloatStateOf(0f) }
+
+    // Synchronize text boxes from repository preview lines & auto-migrate any legacy raw preview lines into interactive Layer C CanvasTextBoxes!
+    LaunchedEffect(notebook?.previewLines) {
+        val lines = notebook?.previewLines ?: emptyList()
+        val parsed = lines.mapNotNull { CanvasTextBox.deserialize(it) }
+
+        val isPdfDoc = notebook?.mimeType == "application/pdf" ||
+                       notebook?.filePath?.endsWith(".pdf", ignoreCase = true) == true ||
+                       notebook?.originalFileName?.endsWith(".pdf", ignoreCase = true) == true
+
+        // Clean out any PDF title / page count junk boxes that were previously generated on import
+        val cleanedParsed = if (isPdfDoc) {
+            parsed.filterNot { box ->
+                val t = box.text.trim()
+                t.endsWith(".pdf", ignoreCase = true) ||
+                t.startsWith("PDF Document •", ignoreCase = true) ||
+                t.equals(notebook?.title?.trim(), ignoreCase = true) ||
+                t.equals(notebook?.originalFileName?.trim(), ignoreCase = true) ||
+                (box.pageIndex == 0 && (t.startsWith("Paper Name:") || t.startsWith("Paper Code:") || t.startsWith("Question Bank") || t.startsWith("Dr. SUD")))
+            }
+        } else {
+            parsed
+        }
+
+        // Find any unparsed raw preview text lines (such as from previous voice dictations)
+        val rawLines = if (isPdfDoc) {
+            emptyList()
+        } else {
+            lines.filter { line ->
+                !line.startsWith("[GRAPHITE_META:") &&
+                !line.startsWith("[GRAPHITE_DOC:") &&
+                !line.startsWith("[GRAPHITE_DATA:") &&
+                !line.startsWith("[GRAPHITE_VOICE:") &&
+                !line.startsWith("[GRAPHITE_TEXTBOX:") &&
+                !line.startsWith("[GRAPHITE_PAGE_W:") &&
+                line.trim().isNotEmpty()
+            }
+        }
+
+        if (cleanedParsed.size != parsed.size || rawLines.isNotEmpty()) {
+            val migratedBoxes = mutableListOf<CanvasTextBox>()
+            val remainingLines = lines.filterNot { rawLines.contains(it) }.toMutableList()
+
+            rawLines.forEachIndexed { idx, line ->
+                val pIdx = if (line.startsWith("[PAGE:")) {
+                    line.substringAfter("[PAGE:").substringBefore("]").toIntOrNull() ?: 0
+                } else 0
+                val cleanText = if (line.startsWith("[PAGE:")) line.substringAfter("]").trim() else line.trim()
+                if (cleanText.isNotEmpty()) {
+                    migratedBoxes.add(
+                        CanvasTextBox(
+                            id = java.util.UUID.randomUUID().toString(),
+                            pageIndex = pIdx,
+                            xRatio = 0.08f,
+                            yRatio = (0.08f + (idx * 0.06f)).coerceIn(0.06f, 0.85f),
+                            text = cleanText,
+                            fontSizeSp = 16f,
+                            colorHex = "#1F1F1F"
+                        )
+                    )
+                }
+            }
+            val allBoxes = cleanedParsed + migratedBoxes
+            val serialized = allBoxes.map { it.serialize() }
+            val newLines = remainingLines.filterNot { it.startsWith("[GRAPHITE_TEXTBOX:") } + serialized
+            GraphiteRepository.updateNotebookLines(notebookId, newLines)
+            localTextBoxes = allBoxes
+        } else if (editingTextBoxId == null) {
+            localTextBoxes = cleanedParsed
+        }
+    }
+
+    fun saveTextBoxes(newBoxes: List<CanvasTextBox>) {
+        localTextBoxes = newBoxes
+        val repoNote = GraphiteRepository.getNotebook(notebookId)
+        val baseLines = repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()
+        val currentLines = baseLines
+            .filterNot { it.startsWith("[GRAPHITE_TEXTBOX:") }
+            .toMutableList()
+        val serialized = newBoxes.map { it.serialize() }
+        currentLines.addAll(serialized)
+        GraphiteRepository.updateNotebookLines(notebookId, currentLines)
+    }
+
+    // Auto-prune empty text boxes whenever switching away from the Text Tool
+    LaunchedEffect(selectedStudioTool) {
+        if (selectedStudioTool != StudioTool.TEXT) {
+            editingTextBoxId = null
+            val cleaned = localTextBoxes.filterNot { it.text.trim().isEmpty() }
+            if (cleaned.size != localTextBoxes.size) {
+                saveTextBoxes(cleaned)
+            }
+        }
+    }
 
     val palmFilter = remember { PalmRejectionFilter(uiState.inputPolicy) }
     palmFilter.policy = uiState.inputPolicy
+
 
     // Activity Launchers for Add Menu
     val docPickerLauncher = rememberLauncherForActivityResult(
@@ -368,6 +533,17 @@ fun CanvasEditorScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            try {
+                val recorder = com.graphite.app.GraphiteApplication.instance.voiceRecorderManager
+                if (recorder.isRecording.value) {
+                    val clip = recorder.stopRecording()
+                    if (clip != null) {
+                        GraphiteRepository.addVoiceClipToNotebook(notebookId, clip)
+                    }
+                }
+                recorder.stopPlayback()
+            } catch (_: Exception) {}
+
             pdfBitmaps.values.forEach { it.recycle() }
             pdfBitmaps.clear()
             pageThumbnails.values.forEach { it.recycle() }
@@ -389,6 +565,7 @@ fun CanvasEditorScreen(
         // ==========================================
         val basePageWidth = (screenWidth - 24.dp).coerceAtLeast(320.dp)
         val basePageHeight = basePageWidth * pdfAspectRatio
+        val canonicalScale = (basePageWidth.value / 720f).coerceIn(0.50f, 1.25f)
         val scaledPageWidth = basePageWidth * zoomScale
         val scaledPageHeight = basePageHeight * zoomScale
         val maxPanX = with(density) {
@@ -398,7 +575,7 @@ fun CanvasEditorScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(interactionMode, isReadOnlyMode) {
+                .pointerInput(interactionMode, isReadOnlyMode, selectedStudioTool) {
                     awaitEachGesture {
                         var lastCenter: Offset? = null
                         var lastDist: Float? = null
@@ -416,8 +593,9 @@ fun CanvasEditorScreen(
                                 it.type == PointerType.Stylus || it.type == PointerType.Eraser
                             }
 
-                            if (hasStylus || isReadOnlyMode) {
-                                // Stylus is active or read-only mode active: NEVER scroll from this detector!
+                            val isTextTool = selectedStudioTool == StudioTool.TEXT
+                            if (hasStylus || isReadOnlyMode || isTextTool) {
+                                // Stylus is active, read-only active, or text tool active: NEVER scroll from this detector!
                                 lastCenter = null
                                 lastDist = null
                                 scrollVelocityY = 0f
@@ -603,33 +781,50 @@ fun CanvasEditorScreen(
                                 }
                             } else {
                                 // Notebook Paper Template (Ruled, Grid, Dotted, Blank)
-                                PaperTemplateCanvas(paperStyle = uiState.paperStyle)
+                                PaperTemplateCanvas(paperStyle = uiState.paperStyle, pageScale = canonicalScale)
+                            }
 
-                                val sampleExercises = listOf(
-                                    "1)Write programs to demonstrate importing of math module and show the various functions in math module.",
-                                    "2)Write programs to demonstrate importing of random module and show the various functions in random module.",
-                                    "3)Write programs to demonstrate importing of statistics module and show the various functions in statistics module."
-                                )
-                                val displayLines = if (notebook?.previewLines.isNullOrEmpty()) sampleExercises else notebook!!.previewLines
-
-                                if (pageIdx == 0) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .padding(horizontal = 36.dp, vertical = 36.dp)
-                                    ) {
-                                        displayLines.forEach { line ->
-                                            Text(
-                                                text = line,
-                                                color = Color(0xFF1F1F1F),
-                                                fontSize = 14.sp,
-                                                lineHeight = 26.sp,
-                                                fontFamily = FontFamily.Default,
-                                                modifier = Modifier.padding(vertical = 8.dp)
-                                            )
+                            // Layer A2: Tap Detector for Text Tool (Spawns or finishes an interactive text box on touched page position)
+                            if (selectedStudioTool == StudioTool.TEXT) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .pointerInput(selectedStudioTool, pageIdx, editingTextBoxId) {
+                                            detectTapGestures { tapOffset ->
+                                                if (editingTextBoxId != null) {
+                                                    // Tapping outside finishes current editing session:
+                                                    // Auto-saves if text was typed, auto-deletes if blank!
+                                                    val cur = localTextBoxes.find { it.id == editingTextBoxId }
+                                                    val cleaned = if (cur != null && cur.text.trim().isEmpty()) {
+                                                        localTextBoxes.filterNot { it.id == editingTextBoxId }
+                                                    } else {
+                                                        localTextBoxes
+                                                    }
+                                                    editingTextBoxId = null
+                                                    saveTextBoxes(cleaned)
+                                                } else {
+                                                    // Prune any previous empty boxes before creating a new one
+                                                    val cleaned = localTextBoxes.filterNot { it.text.trim().isEmpty() }
+                                                    val pageBaseWPx = size.width.toFloat().coerceAtLeast(1f)
+                                                    val pageBaseHPx = size.height.toFloat().coerceAtLeast(1f)
+                                                    val xRatio = (tapOffset.x / pageBaseWPx).coerceIn(0.04f, 0.85f)
+                                                    val yRatio = (tapOffset.y / pageBaseHPx).coerceIn(0.04f, 0.90f)
+                                                    val newBox = CanvasTextBox(
+                                                        id = java.util.UUID.randomUUID().toString(),
+                                                        pageIndex = pageIdx,
+                                                        xRatio = xRatio,
+                                                        yRatio = yRatio,
+                                                        text = "",
+                                                        fontSizeSp = 15f,
+                                                        colorHex = "#1F1F1F"
+                                                    )
+                                                    val updated = cleaned + newBox
+                                                    saveTextBoxes(updated)
+                                                    editingTextBoxId = newBox.id
+                                                }
+                                            }
                                         }
-                                    }
-                                }
+                                )
                             }
 
                             // Layer B: Ink Strokes Canvas
@@ -638,6 +833,11 @@ fun CanvasEditorScreen(
                                     .fillMaxSize()
                                     .pointerInteropFilter { motionEvent ->
                                         if (isReadOnlyMode) {
+                                            return@pointerInteropFilter false
+                                        }
+
+                                        // Yield touch events so text input and buttons can receive taps in TEXT mode
+                                        if (selectedStudioTool == StudioTool.TEXT) {
                                             return@pointerInteropFilter false
                                         }
 
@@ -696,12 +896,20 @@ fun CanvasEditorScreen(
                                                 val baseX = packet.x / safeZoom
                                                 val baseY = packet.y / safeZoom
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    lassoPoints = listOf(Offset(baseX, baseY))
-                                                    selectedStrokeIndices = emptySet()
-                                                    lassoBounds = null
+                                                    if (selectedStrokeIndices.isNotEmpty() && lassoBounds != null && lassoBounds!!.contains(Offset(baseX, baseY))) {
+                                                        isDraggingLasso = true
+                                                        lassoDragStart = Offset(baseX, baseY)
+                                                        lassoDragOffset = Offset.Zero
+                                                    } else {
+                                                        selectedStrokeIndices = emptySet()
+                                                        lassoBounds = null
+                                                        isDraggingLasso = false
+                                                        lassoPoints = listOf(Offset(baseX, baseY))
+                                                    }
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(baseX, baseY)
-                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / safeZoom, pageIndex = pageIdx)
+                                                    val effRadius = (eraserRadius * density.density) / safeZoom
+                                                    workspaceViewModel.eraseAt(baseX, baseY, effRadius, pageIndex = pageIdx, mode = eraserMode)
                                                 } else {
                                                     activeEraserCenter = null
                                                     activePoints = listOf(
@@ -714,18 +922,24 @@ fun CanvasEditorScreen(
                                                 val baseX = packet.x / safeZoom
                                                 val baseY = packet.y / safeZoom
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    lassoPoints = lassoPoints + Offset(baseX, baseY)
+                                                    if (isDraggingLasso) {
+                                                        lassoDragOffset = Offset(baseX - lassoDragStart.x, baseY - lassoDragStart.y)
+                                                    } else {
+                                                        lassoPoints = lassoPoints + Offset(baseX, baseY)
+                                                    }
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = Offset(baseX, baseY)
+                                                    val effRadius = (eraserRadius * density.density) / safeZoom
                                                     for (h in 0 until motionEvent.historySize) {
                                                         workspaceViewModel.eraseAt(
                                                             motionEvent.getHistoricalX(0, h) / safeZoom,
                                                             motionEvent.getHistoricalY(0, h) / safeZoom,
-                                                            32f / safeZoom,
-                                                            pageIndex = pageIdx
+                                                            effRadius,
+                                                            pageIndex = pageIdx,
+                                                            mode = eraserMode
                                                         )
                                                     }
-                                                    workspaceViewModel.eraseAt(baseX, baseY, 32f / safeZoom, pageIndex = pageIdx)
+                                                    workspaceViewModel.eraseAt(baseX, baseY, effRadius, pageIndex = pageIdx, mode = eraserMode)
                                                 } else {
                                                     activeEraserCenter = null
                                                     val batch = ArrayList<InkPoint>(motionEvent.historySize + 1)
@@ -747,22 +961,38 @@ fun CanvasEditorScreen(
                                             }
                                             MotionActionType.UP, MotionActionType.CANCEL -> {
                                                 if (selectedStudioTool == StudioTool.LASSO) {
-                                                    if (lassoPoints.size > 2) {
-                                                        val minX = lassoPoints.minOf { it.x }
-                                                        val maxX = lassoPoints.maxOf { it.x }
-                                                        val minY = lassoPoints.minOf { it.y }
-                                                        val maxY = lassoPoints.maxOf { it.y }
-                                                        val rect = Rect(minX, minY, maxX, maxY)
-                                                        lassoBounds = rect
-
+                                                    if (isDraggingLasso) {
+                                                        if (lassoDragOffset != Offset.Zero) {
+                                                            workspaceViewModel.translateStrokes(selectedStrokeIndices, lassoDragOffset.x, lassoDragOffset.y)
+                                                            lassoBounds = lassoBounds?.let { b ->
+                                                                Rect(b.left + lassoDragOffset.x, b.top + lassoDragOffset.y, b.right + lassoDragOffset.x, b.bottom + lassoDragOffset.y)
+                                                            }
+                                                        }
+                                                        isDraggingLasso = false
+                                                        lassoDragOffset = Offset.Zero
+                                                    } else if (lassoPoints.size > 2) {
                                                         val selected = mutableSetOf<Int>()
                                                         uiState.strokes.forEachIndexed { idx, s ->
                                                             if (s.pageIndex == pageIdx) {
-                                                                val intersects = s.points.any { p -> rect.contains(Offset(p.x, p.y)) }
-                                                                if (intersects) selected.add(idx)
+                                                                val isContained = s.points.any { p -> isPointInPolygon(Offset(p.x, p.y), lassoPoints) }
+                                                                if (isContained) selected.add(idx)
                                                             }
                                                         }
                                                         selectedStrokeIndices = selected
+                                                        if (selected.isNotEmpty()) {
+                                                            val selectedStrokes = uiState.strokes.filterIndexed { i, _ -> i in selected }
+                                                            val pts = selectedStrokes.flatMap { it.points }
+                                                            if (pts.isNotEmpty()) {
+                                                                val minX = pts.minOf { it.x } - 8f
+                                                                val maxX = pts.maxOf { it.x } + 8f
+                                                                val minY = pts.minOf { it.y } - 8f
+                                                                val maxY = pts.maxOf { it.y } + 8f
+                                                                lassoBounds = Rect(minX, minY, maxX, maxY)
+                                                            }
+                                                        } else {
+                                                            lassoBounds = null
+                                                        }
+                                                        lassoPoints = emptyList()
                                                     }
                                                 } else if (isEffectiveEraser) {
                                                     activeEraserCenter = null
@@ -772,8 +1002,8 @@ fun CanvasEditorScreen(
                                                     } else uiState.selectedColor
 
                                                     val strokeWidth = if (selectedStudioTool == StudioTool.HIGHLIGHTER) {
-                                                        uiState.selectedStrokeWidth * 3.5f
-                                                    } else uiState.selectedStrokeWidth
+                                                        highlighterStrokeWidth
+                                                    } else brushStrokeWidth
 
                                                     val newStroke = InkStroke(
                                                         points = activePoints,
@@ -782,6 +1012,8 @@ fun CanvasEditorScreen(
                                                         toolType = InkToolType.PEN,
                                                         pageIndex = pageIdx
                                                     )
+                                                    // Immediately buffer locally to eliminate 1-frame blink before ViewModel StateFlow commits
+                                                    pendingTransientStrokes = pendingTransientStrokes + newStroke
                                                     workspaceViewModel.addStroke(newStroke)
                                                     activePoints = emptyList()
                                                 }
@@ -794,15 +1026,31 @@ fun CanvasEditorScreen(
                                 val d = this.density
                                 val safeZoom = zoomScale.coerceAtLeast(0.01f)
 
+                                // Cross-device dynamic scaling: prevent tablet handwriting from being cropped on mobile screens
+                                val pageStrokes = uiState.strokes.filter { it.pageIndex == pageIdx && it.points.isNotEmpty() }
+                                val maxPointX = pageStrokes.flatMap { it.points }.maxOfOrNull { it.x } ?: 0f
+                                val fitScale = if (maxPointX > size.width && maxPointX > 0f) {
+                                    (size.width / (maxPointX + 16f * d)).coerceIn(0.25f, 1f)
+                                } else 1.0f
+
                                 // Committed ink strokes for this specific page only
                                 uiState.strokes.forEachIndexed { idx, stroke ->
                                     if (stroke.pageIndex == pageIdx && stroke.points.isNotEmpty()) {
-                                        val path = BezierSplineInterpolator.createSplinePath(stroke.points)
                                         val isSelectedByLasso = selectedStrokeIndices.contains(idx)
                                         val strokeColor = if (isSelectedByLasso) Color(0xFF00BCD4) else stroke.color
-                                        val avgPressure = stroke.points.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                        val effectiveOffset = if (isSelectedByLasso && isDraggingLasso) lassoDragOffset else Offset.Zero
+                                        val pts = if (effectiveOffset != Offset.Zero || fitScale < 1f) {
+                                            stroke.points.map { pt ->
+                                                pt.copy(
+                                                    x = (pt.x + effectiveOffset.x) * fitScale,
+                                                    y = (pt.y + effectiveOffset.y) * fitScale
+                                                )
+                                            }
+                                        } else stroke.points
+                                        val path = BezierSplineInterpolator.createSplinePath(pts)
+                                        val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
                                         val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                            stroke.baseWidth * d,
+                                            stroke.baseWidth * canonicalScale * d * fitScale,
                                             avgPressure
                                         )
                                         drawPath(
@@ -817,13 +1065,37 @@ fun CanvasEditorScreen(
                                     }
                                 }
 
+                                // Render any transient strokes awaiting emission (zero-blink guarantee)
+                                pendingTransientStrokes.forEach { transientStroke ->
+                                    if (transientStroke.pageIndex == pageIdx && transientStroke.points.isNotEmpty() && uiState.strokes.none { it.id == transientStroke.id }) {
+                                        val pts = if (fitScale < 1f) {
+                                            transientStroke.points.map { pt ->
+                                                pt.copy(x = pt.x * fitScale, y = pt.y * fitScale)
+                                            }
+                                        } else transientStroke.points
+                                        val path = BezierSplineInterpolator.createSplinePath(pts)
+                                        val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                        val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
+                                            transientStroke.baseWidth * canonicalScale * d * fitScale,
+                                            avgPressure
+                                        )
+                                        drawPath(
+                                            path = path,
+                                            color = transientStroke.color,
+                                            style = Stroke(
+                                                width = effectiveWidth,
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
+                                    }
+                                }
+
                                 // Live in-progress stroke
                                 if (activePoints.isNotEmpty() && activePageForStroke == pageIdx) {
                                     val activePath = BezierSplineInterpolator.createSplinePath(activePoints)
                                     val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
-                                    val baseW = if (selectedStudioTool == StudioTool.HIGHLIGHTER) {
-                                        uiState.selectedStrokeWidth * 3.5f
-                                    } else uiState.selectedStrokeWidth
+                                    val baseW = (if (selectedStudioTool == StudioTool.HIGHLIGHTER) highlighterStrokeWidth else brushStrokeWidth) * canonicalScale
                                     val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
                                         baseW * d,
                                         currentPressure
@@ -857,17 +1129,18 @@ fun CanvasEditorScreen(
                                     )
                                 }
 
-                                // Lasso Bounding Box
+                                // Lasso Bounding Box (with drag translation visual)
                                 lassoBounds?.let { b ->
                                     if (activePageForStroke == pageIdx && selectedStrokeIndices.isNotEmpty()) {
+                                        val effTopLeft = Offset(b.left + lassoDragOffset.x, b.top + lassoDragOffset.y)
                                         drawRect(
-                                            color = Color(0xFF00BCD4).copy(alpha = 0.1f),
-                                            topLeft = Offset(b.left, b.top),
+                                            color = Color(0xFF00BCD4).copy(alpha = 0.08f),
+                                            topLeft = effTopLeft,
                                             size = androidx.compose.ui.geometry.Size(b.width, b.height)
                                         )
                                         drawRect(
                                             color = Color(0xFF00BCD4),
-                                            topLeft = Offset(b.left, b.top),
+                                            topLeft = effTopLeft,
                                             size = androidx.compose.ui.geometry.Size(b.width, b.height),
                                             style = Stroke(
                                                 width = 1.5.dp.toPx() / safeZoom,
@@ -879,14 +1152,15 @@ fun CanvasEditorScreen(
 
                                 // Eraser reticle
                                 activeEraserCenter?.let { center ->
+                                    val rPx = (eraserRadius * density.density) / safeZoom
                                     drawCircle(
                                         color = Color(0xFFFF5252).copy(alpha = 0.35f),
-                                        radius = 28.dp.toPx() / safeZoom,
+                                        radius = rPx,
                                         center = center
                                     )
                                     drawCircle(
                                         color = Color(0xFFFF5252),
-                                        radius = 28.dp.toPx() / safeZoom,
+                                        radius = rPx,
                                         center = center,
                                         style = Stroke(width = 2.dp.toPx() / safeZoom)
                                     )
@@ -924,6 +1198,85 @@ fun CanvasEditorScreen(
                                     }
                                 }
                             }
+
+                            // Layer C: Canvas Text Boxes on pageIdx
+                            val pageBoxes = localTextBoxes.filter { it.pageIndex == pageIdx }
+                            val pageBaseW = with(density) { basePageWidth.toPx() }
+                            val pageBaseH = with(density) { basePageHeight.toPx() }
+
+                            pageBoxes.forEach { box ->
+                                CanvasTextBoxOverlayItem(
+                                    box = box,
+                                    isEditing = editingTextBoxId == box.id,
+                                    isTextToolActive = selectedStudioTool == StudioTool.TEXT,
+                                    basePageWidthPx = pageBaseW,
+                                    basePageHeightPx = pageBaseH,
+                                    pageScale = canonicalScale,
+                                    onStartEditing = {
+                                        selectedStudioTool = StudioTool.TEXT
+                                        editingTextBoxId = box.id
+                                    },
+                                    onFinishEditing = { updatedBox ->
+                                        editingTextBoxId = null
+                                        val updated = if (updatedBox.text.trim().isEmpty()) {
+                                            localTextBoxes.filterNot { it.id == updatedBox.id }
+                                        } else {
+                                            localTextBoxes.map { if (it.id == updatedBox.id) updatedBox else it }
+                                        }
+                                        saveTextBoxes(updated)
+                                    },
+                                    onUpdateDraft = { draft ->
+                                        localTextBoxes = localTextBoxes.map { if (it.id == draft.id) draft else it }
+                                    },
+                                    onDelete = {
+                                        editingTextBoxId = null
+                                        val updated = localTextBoxes.filterNot { it.id == box.id }
+                                        saveTextBoxes(updated)
+                                    },
+                                    onMove = { newXRatio, newYRatio ->
+                                        val updated = localTextBoxes.map {
+                                            if (it.id == box.id) it.copy(xRatio = newXRatio, yRatio = newYRatio) else it
+                                        }
+                                        saveTextBoxes(updated)
+                                    },
+                                    onTriggerVoice = {
+                                        showVoiceDialog = true
+                                    }
+                                )
+                            }
+
+                            // Page Audio Clips Badge Indicator
+                            val pageAudioClips = notebook?.voiceNotes?.filter { it.pageIndex == pageIdx } ?: emptyList()
+                            if (pageAudioClips.isNotEmpty()) {
+                                Surface(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(8.dp)
+                                        .clickable { showAudioNotesDialog = true },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFF1E1E22).copy(alpha = 0.88f),
+                                    border = BorderStroke(1.dp, Color(0xFF00BCD4))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.GraphicEq,
+                                            contentDescription = null,
+                                            tint = Color(0xFF00BCD4),
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = "${pageAudioClips.size} audio",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -935,7 +1288,7 @@ fun CanvasEditorScreen(
             Card(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 24.dp)
+                    .padding(end = 16.dp, bottom = if (isTablet) 24.dp else 84.dp)
                     .shadow(6.dp, RoundedCornerShape(20.dp)),
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22).copy(alpha = 0.92f)),
@@ -978,20 +1331,258 @@ fun CanvasEditorScreen(
                     }
                 }
             }
+
+            // ==========================================
+            // FLOATING TEXT INPUT BAR (when TEXT tool is active)
+            // ==========================================
+            AnimatedVisibility(
+                visible = selectedStudioTool == StudioTool.TEXT && !isReadOnlyMode,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 90.dp, bottom = 20.dp)
+                    .imePadding()
+            ) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22).copy(alpha = 0.98f)),
+                    border = BorderStroke(1.5.dp, Color(0xFF00BCD4)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(12.dp, RoundedCornerShape(16.dp))
+                ) {
+                    var typedText by remember { mutableStateOf("") }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.TextFields,
+                            contentDescription = null,
+                            tint = Color(0xFF00BCD4),
+                            modifier = Modifier.size(22.dp)
+                        )
+
+                        BasicTextField(
+                            value = typedText,
+                            onValueChange = { typedText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF28282E))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                            cursorBrush = SolidColor(Color(0xFF00BCD4)),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    if (typedText.isNotBlank()) {
+                                        val pageTag = if (currentPageIndex > 0) "[PAGE:$currentPageIndex] " else ""
+                                        val repoNote = GraphiteRepository.getNotebook(notebookId)
+                                        val freshLines = (repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()).toMutableList()
+                                        val textLines = typedText.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { "$pageTag$it" }
+                                        freshLines.addAll(textLines)
+                                        GraphiteRepository.updateNotebookLines(notebookId, freshLines)
+                                        Toast.makeText(context, "Added to Page ${currentPageIndex + 1}!", Toast.LENGTH_SHORT).show()
+                                        typedText = ""
+                                    }
+                                }
+                            ),
+                            decorationBox = { innerTextField ->
+                                if (typedText.isEmpty()) {
+                                    Text(
+                                        "Type note on Page ${currentPageIndex + 1}...",
+                                        color = Color.Gray,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        )
+
+                        Button(
+                            onClick = {
+                                if (typedText.isNotBlank()) {
+                                    val pageTag = if (currentPageIndex > 0) "[PAGE:$currentPageIndex] " else ""
+                                    val repoNote = GraphiteRepository.getNotebook(notebookId)
+                                    val freshLines = (repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()).toMutableList()
+                                    val textLines = typedText.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { "$pageTag$it" }
+                                    freshLines.addAll(textLines)
+                                    GraphiteRepository.updateNotebookLines(notebookId, freshLines)
+                                    Toast.makeText(context, "Added to Page ${currentPageIndex + 1}!", Toast.LENGTH_SHORT).show()
+                                    typedText = ""
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00BCD4)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text("Add", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+
+                        IconButton(
+                            onClick = { selectedStudioTool = StudioTool.PEN },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close Text Tool",
+                                tint = Color.LightGray,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // ==========================================
-        // 2. TOP FLOATING APP BAR
+        // 2. TOP FLOATING APP BAR & STUDIO TOOL DOCK
         // ==========================================
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            // GROUP A: Top-Left Pill (<, ⊞, ↶) & Page Chip (1 of N)
-            Column(horizontalAlignment = Alignment.Start) {
+        if (isTablet) {
+            // TABLET: 3-Pill Wide Floating Layout
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                // GROUP A: Top-Left Pill (<, ⊞, ↶) & Page Chip (1 of N)
+                Column(horizontalAlignment = Alignment.Start) {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
+                        border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                        modifier = Modifier.shadow(4.dp, RoundedCornerShape(12.dp))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = onNavigateBack, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { showPageDrawer = !showPageDrawer },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.GridView,
+                                    contentDescription = "Page Drawer",
+                                    tint = if (showPageDrawer) Color(0xFF29B6F6) else Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { workspaceViewModel.undo() },
+                                enabled = uiState.canUndo,
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Undo,
+                                    contentDescription = "Undo",
+                                    tint = if (uiState.canUndo) Color.White else Color(0xFF555555),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Page indicator chip (e.g. "1 of 25")
+                    Card(
+                        shape = RoundedCornerShape(6.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
+                        border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        Text(
+                            text = "${currentPageIndex + 1} of $totalPages",
+                            color = Color(0xFFCCCCCC),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                // GROUP B: Top-Center Floating Toolbar Pill
+                AnimatedVisibility(
+                    visible = !isReadOnlyMode,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
+                            border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                            modifier = Modifier.shadow(8.dp, RoundedCornerShape(16.dp))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                FloatingToolButton(
+                                    icon = Icons.Default.Create,
+                                    isSelected = selectedStudioTool == StudioTool.PEN,
+                                    hasSubOptions = true,
+                                    onClick = {
+                                        selectedStudioTool = StudioTool.PEN
+                                        workspaceViewModel.selectTool(InkToolType.PEN)
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.Brush,
+                                    isSelected = selectedStudioTool == StudioTool.HIGHLIGHTER,
+                                    onClick = {
+                                        selectedStudioTool = StudioTool.HIGHLIGHTER
+                                        workspaceViewModel.selectTool(InkToolType.PEN)
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.AutoFixHigh,
+                                    isSelected = selectedStudioTool == StudioTool.ERASER,
+                                    onClick = {
+                                        selectedStudioTool = StudioTool.ERASER
+                                        workspaceViewModel.selectTool(InkToolType.ERASER)
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.HighlightAlt,
+                                    isSelected = selectedStudioTool == StudioTool.LASSO,
+                                    onClick = {
+                                        selectedStudioTool = StudioTool.LASSO
+                                        Toast.makeText(context, "Lasso active: draw a loop around strokes to select", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.TextFields,
+                                    isSelected = selectedStudioTool == StudioTool.TEXT,
+                                    onClick = {
+                                        selectedStudioTool = if (selectedStudioTool == StudioTool.TEXT) StudioTool.PEN else StudioTool.TEXT
+                                        if (selectedStudioTool == StudioTool.TEXT) {
+                                            Toast.makeText(context, "Text tool active: tap on page or type below", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // GROUP C: Top-Right Pill (+, ⊘, Hand Draw, ⋮)
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
@@ -1002,71 +1593,245 @@ fun CanvasEditorScreen(
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = onNavigateBack, modifier = Modifier.size(34.dp)) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
                         IconButton(
-                            onClick = { showPageDrawer = !showPageDrawer },
+                            onClick = {
+                                showAddMenu = !showAddMenu
+                                showDocumentMenu = false
+                            },
                             modifier = Modifier.size(34.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.GridView,
-                                contentDescription = "Page Drawer",
-                                tint = if (showPageDrawer) Color(0xFF29B6F6) else Color.White,
-                                modifier = Modifier.size(18.dp)
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Add",
+                                tint = if (showAddMenu) Color(0xFF29B6F6) else Color.White,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
+
                         IconButton(
-                            onClick = { workspaceViewModel.undo() },
-                            enabled = uiState.canUndo,
+                            onClick = {
+                                isReadOnlyMode = !isReadOnlyMode
+                                Toast.makeText(
+                                    context,
+                                    if (isReadOnlyMode) "Read-Only Mode enabled" else "Annotation Mode enabled",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
                             modifier = Modifier.size(34.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Undo,
-                                contentDescription = "Undo",
-                                tint = if (uiState.canUndo) Color.White else Color(0xFF555555),
+                                imageVector = Icons.Default.Block,
+                                contentDescription = "Read-Only Mode Toggle",
+                                tint = if (isReadOnlyMode) Color(0xFF29B6F6) else Color.White,
                                 modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                interactionMode = if (interactionMode == EditorInteractionMode.PEN_MODE) {
+                                    EditorInteractionMode.HAND_MODE
+                                } else {
+                                    EditorInteractionMode.PEN_MODE
+                                }
+                                Toast.makeText(
+                                    context,
+                                    if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                        "Pen Mode: Only Stylus draws (1-finger scroll & pinch-zoom)"
+                                    else
+                                        "Hand Mode: Draw with Hand & Stylus (2-finger scroll & pinch-zoom)",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                    Icons.Default.Create
+                                else
+                                    Icons.Default.TouchApp,
+                                contentDescription = "Interaction Mode Toggle",
+                                tint = if (interactionMode == EditorInteractionMode.PEN_MODE)
+                                    Color(0xFF29B6F6)
+                                else
+                                    Color(0xFFFFB300),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { showVoiceDialog = true },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Voice Note & Transcription",
+                                tint = Color(0xFFFF7A30),
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+
+                        val allVoiceClips = notebook?.voiceNotes ?: emptyList()
+                        BadgedBox(
+                            badge = {
+                                if (allVoiceClips.isNotEmpty()) {
+                                    Badge(
+                                        containerColor = Color(0xFF00BCD4),
+                                        contentColor = Color.Black
+                                    ) {
+                                        Text(
+                                            text = "${allVoiceClips.size}",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        ) {
+                            IconButton(
+                                onClick = { showAudioNotesDialog = true },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.GraphicEq,
+                                    contentDescription = "Audio Recordings Manager",
+                                    tint = if (allVoiceClips.isNotEmpty()) Color(0xFF00BCD4) else Color.White,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+
+                        if (onSplitScreen != null) {
+                            IconButton(
+                                onClick = { showSplitScreenPicker = true },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VerticalSplit,
+                                    contentDescription = "Split Screen",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = {
+                                showDocumentMenu = !showDocumentMenu
+                                showAddMenu = false
+                            },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Menu",
+                                tint = if (showDocumentMenu) Color(0xFF29B6F6) else Color.White,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
                 }
-
-                // Page indicator chip (e.g. "1 of 25")
-                Card(
-                    shape = RoundedCornerShape(6.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
-                    border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
-                    modifier = Modifier.padding(top = 4.dp)
-                ) {
-                    Text(
-                        text = "${currentPageIndex + 1} of $totalPages",
-                        color = Color(0xFFCCCCCC),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                    )
-                }
             }
-
-            // GROUP B: Top-Center Floating Toolbar Pill (Pen, Highlighter, Eraser, Lasso ONLY)
-            AnimatedVisibility(
-                visible = !isReadOnlyMode,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
+        } else {
+            // MOBILE: Option A - Clean Spacious Top Header (Tools moved to thumb-friendly bottom dock)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Card(
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
                     border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
-                    modifier = Modifier.shadow(8.dp, RoundedCornerShape(16.dp))
+                    modifier = Modifier.shadow(4.dp, RoundedCornerShape(12.dp))
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onNavigateBack, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(17.dp))
+                        }
+                        IconButton(onClick = { showPageDrawer = !showPageDrawer }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.GridView, contentDescription = "Page Drawer", tint = if (showPageDrawer) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(17.dp))
+                        }
+                        Text(
+                            text = "${currentPageIndex + 1}/$totalPages",
+                            color = Color(0xFFCCCCCC),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                        IconButton(onClick = { workspaceViewModel.undo() }, enabled = uiState.canUndo, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (uiState.canUndo) Color.White else Color(0xFF555555), modifier = Modifier.size(17.dp))
+                        }
+                    }
+                }
+
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
+                    border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                    modifier = Modifier.shadow(4.dp, RoundedCornerShape(12.dp))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { showAddMenu = !showAddMenu; showDocumentMenu = false }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Add, contentDescription = "Add", tint = if (showAddMenu) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(onClick = {
+                            interactionMode = if (interactionMode == EditorInteractionMode.PEN_MODE) EditorInteractionMode.HAND_MODE else EditorInteractionMode.PEN_MODE
+                        }, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = if (interactionMode == EditorInteractionMode.PEN_MODE) Icons.Default.Create else Icons.Default.TouchApp,
+                                contentDescription = "Interaction Mode",
+                                tint = if (interactionMode == EditorInteractionMode.PEN_MODE) Color(0xFF29B6F6) else Color(0xFFFFB300),
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        IconButton(onClick = { isReadOnlyMode = !isReadOnlyMode }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Block, contentDescription = "Read-Only", tint = if (isReadOnlyMode) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(17.dp))
+                        }
+                        if (onSplitScreen != null) {
+                            IconButton(onClick = { showSplitScreenPicker = true }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.VerticalSplit, contentDescription = "Split Screen", tint = Color.White, modifier = Modifier.size(17.dp))
+                            }
+                        }
+                        IconButton(onClick = { showDocumentMenu = !showDocumentMenu; showAddMenu = false }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = if (showDocumentMenu) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 2B. MOBILE OPTION A: BOTTOM FLOATING STUDIO DOCK
+        // ==========================================
+        if (!isTablet) {
+            AnimatedVisibility(
+                visible = !isReadOnlyMode,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+                    .imePadding()
+            ) {
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.96f)),
+                    border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                    modifier = Modifier.shadow(10.dp, RoundedCornerShape(24.dp))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .horizontalScroll(rememberScrollState()),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -1103,105 +1868,42 @@ fun CanvasEditorScreen(
                                 Toast.makeText(context, "Lasso active: draw a loop around strokes to select", Toast.LENGTH_SHORT).show()
                             }
                         )
-                    }
-                }
-            }
-
-            // GROUP C: Top-Right Pill (+, ⊘, Hand Draw, ⋮)
-            Card(
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
-                border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
-                modifier = Modifier.shadow(4.dp, RoundedCornerShape(12.dp))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-
-                    // Plus (+) button -> Opens Add Menu (Image 2)
-                    IconButton(
-                        onClick = {
-                            showAddMenu = !showAddMenu
-                            showDocumentMenu = false
-                        },
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Add",
-                            tint = if (showAddMenu) Color(0xFF29B6F6) else Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Circle with slash (⊘) -> Read-Only mode toggle
-                    IconButton(
-                        onClick = {
-                            isReadOnlyMode = !isReadOnlyMode
-                            Toast.makeText(
-                                context,
-                                if (isReadOnlyMode) "Read-Only Mode enabled" else "Annotation Mode enabled",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Block,
-                            contentDescription = "Read-Only Mode Toggle",
-                            tint = if (isReadOnlyMode) Color(0xFF29B6F6) else Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Interaction Mode toggle button (Pen Mode: Only Stylus draws vs Hand Mode: Hand & Stylus draw)
-                    IconButton(
-                        onClick = {
-                            interactionMode = if (interactionMode == EditorInteractionMode.PEN_MODE) {
-                                EditorInteractionMode.HAND_MODE
-                            } else {
-                                EditorInteractionMode.PEN_MODE
+                        FloatingToolButton(
+                            icon = Icons.Default.TextFields,
+                            isSelected = selectedStudioTool == StudioTool.TEXT,
+                            onClick = {
+                                selectedStudioTool = if (selectedStudioTool == StudioTool.TEXT) StudioTool.PEN else StudioTool.TEXT
                             }
-                            Toast.makeText(
-                                context,
-                                if (interactionMode == EditorInteractionMode.PEN_MODE)
-                                    "Pen Mode: Only Stylus draws (1-finger scroll & pinch-zoom)"
-                                else
-                                    "Hand Mode: Draw with Hand & Stylus (2-finger scroll & pinch-zoom)",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (interactionMode == EditorInteractionMode.PEN_MODE)
-                                Icons.Default.Create
-                            else
-                                Icons.Default.TouchApp,
-                            contentDescription = "Interaction Mode Toggle",
-                            tint = if (interactionMode == EditorInteractionMode.PEN_MODE)
-                                Color(0xFF29B6F6)
-                            else
-                                Color(0xFFFFB300),
-                            modifier = Modifier.size(18.dp)
                         )
-                    }
 
-                    // Three-dots menu (⋮) -> Opens Document Menu (Image 3)
-                    IconButton(
-                        onClick = {
-                            showDocumentMenu = !showDocumentMenu
-                            showAddMenu = false
-                        },
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Menu",
-                            tint = if (showDocumentMenu) Color(0xFF29B6F6) else Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        // Voice Recording Mic Button (Always visible on mobile!)
+                        IconButton(onClick = { 
+                            voiceDialogAudioOnly = false
+                            showVoiceDialog = true 
+                        }, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.Default.Mic, contentDescription = "Voice Note & Transcription", tint = Color(0xFFFF7A30), modifier = Modifier.size(19.dp))
+                        }
+
+                        // Audio Recordings Manager with Badge (Always visible on mobile!)
+                        val allVoiceClips = notebook?.voiceNotes ?: emptyList()
+                        BadgedBox(
+                            badge = {
+                                if (allVoiceClips.isNotEmpty()) {
+                                    Badge(containerColor = Color(0xFF00BCD4), contentColor = Color.Black) {
+                                        Text("${allVoiceClips.size}", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        ) {
+                            IconButton(onClick = { showAudioNotesDialog = true }, modifier = Modifier.size(34.dp)) {
+                                Icon(Icons.Default.GraphicEq, contentDescription = "Audio Recordings Manager", tint = if (allVoiceClips.isNotEmpty()) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(19.dp))
+                            }
+                        }
+
+                        // Color Palette Toggle for Mobile
+                        IconButton(onClick = { showMobilePalette = !showMobilePalette }, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.Default.Palette, contentDescription = "Palette", tint = if (showMobilePalette) Color(0xFF00BCD4) else Color.LightGray, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }
@@ -1211,7 +1913,7 @@ fun CanvasEditorScreen(
         // 3. LEFT FLOATING COLOR & STROKE PALETTE
         // ==========================================
         AnimatedVisibility(
-            visible = !isReadOnlyMode,
+            visible = !isReadOnlyMode && (isTablet || showMobilePalette),
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -1297,9 +1999,9 @@ fun CanvasEditorScreen(
             ) {
                 Card(
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(start = 64.dp)
-                        .width(230.dp)
+                        .align(if (isTablet) Alignment.CenterStart else Alignment.BottomCenter)
+                        .padding(if (isTablet) PaddingValues(start = 64.dp) else PaddingValues(bottom = 80.dp, start = 16.dp, end = 16.dp))
+                        .widthIn(min = 260.dp, max = 320.dp)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -1310,14 +2012,32 @@ fun CanvasEditorScreen(
                     border = BorderStroke(1.dp, Color(0xFF2E2E34))
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
+                        val isHighlighter = selectedStudioTool == StudioTool.HIGHLIGHTER
+                        val isEraser = selectedStudioTool == StudioTool.ERASER
+                        val title = when {
+                            isEraser -> "Eraser Settings"
+                            isHighlighter -> "Highlighter Size"
+                            else -> "Pencil / Pen Size"
+                        }
+                        val currentVal = when {
+                            isEraser -> eraserRadius
+                            isHighlighter -> highlighterStrokeWidth
+                            else -> brushStrokeWidth
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Stroke Width", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("${uiState.selectedStrokeWidth.toInt()} pt", color = Color(0xFF00BCD4), fontSize = 12.sp)
+                                Text(
+                                    text = if (currentVal == currentVal.toInt().toFloat()) "${currentVal.toInt()} pt" else String.format(java.util.Locale.US, "%.1f pt", currentVal),
+                                    color = Color(0xFF00BCD4),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 IconButton(
                                     onClick = { showStrokeWidthDialog = false },
@@ -1327,31 +2047,162 @@ fun CanvasEditorScreen(
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Slider(
-                            value = uiState.selectedStrokeWidth,
-                            onValueChange = { workspaceViewModel.selectStrokeWidth(it) },
-                            valueRange = 1f..35f,
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFF00BCD4),
-                                activeTrackColor = Color(0xFF00BCD4),
-                                inactiveTrackColor = Color(0xFF333333)
+
+                        // Live circular preview of stroke thickness
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF141416)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(currentVal.coerceIn(2f, 38f).dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isEraser) Color(0xFFFF8A80)
+                                        else if (isHighlighter) uiState.selectedColor.copy(alpha = 0.5f)
+                                        else uiState.selectedColor
+                                    )
                             )
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        }
+
+                        if (isEraser) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            // Mode toggle: Stroke Eraser vs Precision Area
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF2B2B30))
+                                    .padding(2.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (eraserMode == WorkspaceViewModel.EraserModeType.WHOLE_STROKE) Color(0xFF00BCD4) else Color.Transparent)
+                                        .clickable { eraserMode = WorkspaceViewModel.EraserModeType.WHOLE_STROKE }
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("Stroke", color = if (eraserMode == WorkspaceViewModel.EraserModeType.WHOLE_STROKE) Color.White else Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (eraserMode == WorkspaceViewModel.EraserModeType.PRECISION_AREA) Color(0xFF00BCD4) else Color.Transparent)
+                                        .clickable { eraserMode = WorkspaceViewModel.EraserModeType.PRECISION_AREA }
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("Precision", color = if (eraserMode == WorkspaceViewModel.EraserModeType.PRECISION_AREA) Color.White else Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        val range = if (isEraser) 4f..80f else if (isHighlighter) 6f..60f else 0.5f..40f
+
+                        // Continuous dynamic slider with - and + step buttons
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            listOf(2f, 5f, 10f, 18f, 28f).forEach { pt ->
-                                Text(
-                                    text = "${pt.toInt()}",
-                                    color = if (uiState.selectedStrokeWidth == pt) Color(0xFF00BCD4) else Color.Gray,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier
-                                        .clickable { workspaceViewModel.selectStrokeWidth(pt) }
-                                        .padding(4.dp)
+                            IconButton(
+                                onClick = {
+                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else 0.5f
+                                    val nextVal = (currentVal - step).coerceAtLeast(range.start)
+                                    if (isEraser) eraserRadius = nextVal
+                                    else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                    else {
+                                        brushStrokeWidth = nextVal
+                                        workspaceViewModel.selectStrokeWidth(nextVal)
+                                    }
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Remove, contentDescription = "Decrease", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                            }
+
+                            Slider(
+                                value = currentVal,
+                                onValueChange = {
+                                    val rounded = kotlin.math.round(it * 2f) / 2f
+                                    if (isEraser) eraserRadius = rounded
+                                    else if (isHighlighter) highlighterStrokeWidth = rounded
+                                    else {
+                                        brushStrokeWidth = rounded
+                                        workspaceViewModel.selectStrokeWidth(rounded)
+                                    }
+                                },
+                                valueRange = range,
+                                modifier = Modifier.weight(1f),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFF00BCD4),
+                                    activeTrackColor = Color(0xFF00BCD4),
+                                    inactiveTrackColor = Color(0xFF333333)
                                 )
+                            )
+
+                            IconButton(
+                                onClick = {
+                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else 0.5f
+                                    val nextVal = (currentVal + step).coerceAtMost(range.endInclusive)
+                                    if (isEraser) eraserRadius = nextVal
+                                    else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                    else {
+                                        brushStrokeWidth = nextVal
+                                        workspaceViewModel.selectStrokeWidth(nextVal)
+                                    }
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Increase", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("PRESETS", color = Color.Gray, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        val presets = if (isEraser) listOf(8f, 16f, 24f, 36f, 50f, 70f)
+                        else if (isHighlighter) listOf(8f, 14f, 20f, 28f, 38f, 50f)
+                        else listOf(1f, 2f, 3f, 5f, 8f, 12f, 16f, 20f, 28f, 36f)
+
+                        // Scrollable row of quick preset chips
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(presets) { pt ->
+                                val isSelected = kotlin.math.abs(currentVal - pt) < 0.25f
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (isSelected) Color(0xFF00BCD4) else Color(0xFF26262B))
+                                        .clickable {
+                                            if (isEraser) eraserRadius = pt
+                                            else if (isHighlighter) highlighterStrokeWidth = pt
+                                            else {
+                                                brushStrokeWidth = pt
+                                                workspaceViewModel.selectStrokeWidth(pt)
+                                            }
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "${pt.toInt()}",
+                                        color = if (isSelected) Color.White else Color.LightGray,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
                             }
                         }
                     }
@@ -2326,6 +3177,153 @@ fun CanvasEditorScreen(
                 }
             }
         }
+        if (showVoiceDialog) {
+            VoiceNoteDialog(
+                notebookId = notebookId,
+                pageIndex = currentPageIndex,
+                initialRecordAudioOnly = voiceDialogAudioOnly,
+                onDismiss = { showVoiceDialog = false },
+                onSaveVoiceClip = { clip ->
+                    GraphiteRepository.addVoiceClipToNotebook(notebookId, clip)
+                },
+                onTextTranscribed = { text ->
+                    val capText = com.graphite.app.core.voice.VoiceTranscriptionManager.capitalizeSentences(text.trim())
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Transcription", capText))
+
+                    // If a text box is actively open/editing, append directly into it!
+                    if (editingTextBoxId != null) {
+                        val curBox = localTextBoxes.find { it.id == editingTextBoxId }
+                        if (curBox != null) {
+                            val updatedText = if (curBox.text.isBlank()) capText else "${curBox.text} $capText"
+                            val updatedBoxes = localTextBoxes.map {
+                                if (it.id == editingTextBoxId) it.copy(text = updatedText) else it
+                            }
+                            saveTextBoxes(updatedBoxes)
+                            Toast.makeText(context, "Inserted into active text box!", Toast.LENGTH_SHORT).show()
+                            return@VoiceNoteDialog
+                        }
+                    }
+
+                    // Place directly into Layer C as an interactive CanvasTextBox!
+                    val pageBoxes = localTextBoxes.filter { it.pageIndex == currentPageIndex }
+                    val newYRatio = (0.08f + (pageBoxes.size * 0.08f)).coerceIn(0.06f, 0.85f)
+                    val newBox = CanvasTextBox(
+                        id = java.util.UUID.randomUUID().toString(),
+                        pageIndex = currentPageIndex,
+                        xRatio = 0.08f,
+                        yRatio = newYRatio,
+                        widthRatio = 0.40f,
+                        text = capText,
+                        fontSizeSp = 16f,
+                        colorHex = "#1F1F1F"
+                    )
+                    val updatedBoxes = localTextBoxes + newBox
+                    saveTextBoxes(updatedBoxes)
+                    selectedStudioTool = StudioTool.TEXT
+                    editingTextBoxId = newBox.id
+                    Toast.makeText(context, "Voice transcribed into text box on Page ${currentPageIndex + 1}!", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
+
+        if (showAudioNotesDialog) {
+            NotebookAudioClipsDialog(
+                notebookId = notebookId,
+                notebookTitle = notebook?.title ?: "Note",
+                currentPageIndex = currentPageIndex,
+                totalPages = totalPages,
+                voiceNotes = notebook?.voiceNotes ?: emptyList(),
+                onDismiss = { showAudioNotesDialog = false },
+                onRecordOnPage = { _ ->
+                    voiceDialogAudioOnly = true
+                    showVoiceDialog = true
+                },
+                onDeleteClip = { clipId ->
+                    GraphiteRepository.deleteVoiceClipFromNotebook(notebookId, clipId)
+                },
+                onGoToPage = { targetPage ->
+                    scope.launch { listState.animateScrollToItem(targetPage) }
+                },
+                onInsertTranscriptionToPage = { pIdx, transText ->
+                    val capTrans = com.graphite.app.core.voice.VoiceTranscriptionManager.capitalizeSentences(transText.trim())
+                    if (editingTextBoxId != null) {
+                        val curBox = localTextBoxes.find { it.id == editingTextBoxId }
+                        if (curBox != null) {
+                            val updatedText = if (curBox.text.isBlank()) capTrans else "${curBox.text} $capTrans"
+                            val updatedBoxes = localTextBoxes.map {
+                                if (it.id == editingTextBoxId) it.copy(text = updatedText) else it
+                            }
+                            saveTextBoxes(updatedBoxes)
+                            Toast.makeText(context, "Inserted into active text box!", Toast.LENGTH_SHORT).show()
+                            return@NotebookAudioClipsDialog
+                        }
+                    }
+
+                    val pageBoxes = localTextBoxes.filter { it.pageIndex == pIdx }
+                    val newYRatio = (0.08f + (pageBoxes.size * 0.08f)).coerceIn(0.06f, 0.85f)
+                    val newBox = CanvasTextBox(
+                        id = java.util.UUID.randomUUID().toString(),
+                        pageIndex = pIdx,
+                        xRatio = 0.08f,
+                        yRatio = newYRatio,
+                        widthRatio = 0.40f,
+                        text = capTrans,
+                        fontSizeSp = 16f,
+                        colorHex = "#1F1F1F"
+                    )
+                    val updatedBoxes = localTextBoxes + newBox
+                    saveTextBoxes(updatedBoxes)
+                    selectedStudioTool = StudioTool.TEXT
+                    editingTextBoxId = newBox.id
+                    Toast.makeText(context, "Inserted onto Page ${pIdx + 1}!", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
+
+        if (showSplitScreenPicker && onSplitScreen != null) {
+            val allOtherNotes = GraphiteRepository.notebooks.collectAsState().value.filter { it.id != notebookId && !it.isDeleted }
+            AlertDialog(
+                onDismissRequest = { showSplitScreenPicker = false },
+                title = { Text("Open in Split Screen", color = Color.White, fontWeight = FontWeight.Bold) },
+                text = {
+                    if (allOtherNotes.isEmpty()) {
+                        Text("No other documents available to view side-by-side.", color = Color.LightGray)
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
+                            items(allOtherNotes) { otherNote ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            showSplitScreenPicker = false
+                                            onSplitScreen(notebookId, otherNote.id)
+                                        }
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (otherNote.mimeType?.contains("pdf") == true) Icons.Default.PictureAsPdf else Icons.Default.Book,
+                                        contentDescription = null,
+                                        tint = if (otherNote.mimeType?.contains("pdf") == true) Color(0xFFEF5350) else Color(0xFFFF7A30),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(otherNote.title, color = Color.White, fontSize = 14.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { showSplitScreenPicker = false }) {
+                        Text("Cancel", color = Color.LightGray)
+                    }
+                },
+                containerColor = Color(0xFF222222)
+            )
+        }
     }
 }
 
@@ -2448,35 +3446,37 @@ private fun MenuClickableRowWithIcon(
 }
 
 @Composable
-private fun PaperTemplateCanvas(paperStyle: PaperStyle) {
+private fun PaperTemplateCanvas(paperStyle: PaperStyle, pageScale: Float = 1f) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val canvasWidth = size.width
         val canvasHeight = size.height
+        val lineCol = Color(0xFFE8E8E8)
+        val s = pageScale.coerceIn(0.45f, 1.4f)
 
         when (paperStyle) {
             PaperStyle.BLANK -> {}
             PaperStyle.RULED -> {
-                val lineSpacing = 36.dp.toPx()
-                var y = lineSpacing + 20.dp.toPx()
+                val lineSpacing = 36.dp.toPx() * s
+                var y = lineSpacing + (20.dp.toPx() * s)
                 while (y < canvasHeight) {
                     drawLine(
-                        color = Color(0xFFE8E8E8),
+                        color = lineCol,
                         start = Offset(0f, y),
                         end = Offset(canvasWidth, y),
-                        strokeWidth = 1.dp.toPx()
+                        strokeWidth = (1.dp.toPx() * s).coerceAtLeast(1f)
                     )
                     y += lineSpacing
                 }
             }
             PaperStyle.DOTTED -> {
-                val dotSpacing = 28.dp.toPx()
+                val dotSpacing = 28.dp.toPx() * s
                 var x = dotSpacing
                 while (x < canvasWidth) {
                     var y = dotSpacing
                     while (y < canvasHeight) {
                         drawCircle(
                             color = Color(0xFFD6D6D6),
-                            radius = 1.2.dp.toPx(),
+                            radius = (1.2.dp.toPx() * s).coerceAtLeast(1f),
                             center = Offset(x, y)
                         )
                         y += dotSpacing
@@ -2485,18 +3485,141 @@ private fun PaperTemplateCanvas(paperStyle: PaperStyle) {
                 }
             }
             PaperStyle.GRID -> {
-                val gridSpacing = 28.dp.toPx()
+                val gridSpacing = 28.dp.toPx() * s
                 var x = 0f
                 while (x < canvasWidth) {
-                    drawLine(color = Color(0xFFEFEFEF), start = Offset(x, 0f), end = Offset(x, canvasHeight), strokeWidth = 1.dp.toPx())
+                    drawLine(color = lineCol, start = Offset(x, 0f), end = Offset(x, canvasHeight), strokeWidth = (1.dp.toPx() * s).coerceAtLeast(1f))
                     x += gridSpacing
                 }
                 var y = 0f
                 while (y < canvasHeight) {
-                    drawLine(color = Color(0xFFEFEFEF), start = Offset(0f, y), end = Offset(canvasWidth, y), strokeWidth = 1.dp.toPx())
+                    drawLine(color = lineCol, start = Offset(0f, y), end = Offset(canvasWidth, y), strokeWidth = (1.dp.toPx() * s).coerceAtLeast(1f))
                     y += gridSpacing
+                }
+            }
+            PaperStyle.HEXAGONAL_GRID -> {
+                val hexSize = 24.dp.toPx()
+                var x = hexSize
+                while (x < canvasWidth) {
+                    var y = hexSize
+                    while (y < canvasHeight) {
+                        drawCircle(color = Color(0xFFD0D0D0), radius = 1.2.dp.toPx(), center = Offset(x, y))
+                        y += hexSize * 1.5f
+                    }
+                    x += hexSize * 1.732f
+                }
+            }
+            PaperStyle.CORNELL_A -> {
+                // Cue column on left (28% width)
+                drawLine(color = Color(0xFF00BCD4).copy(alpha = 0.5f), start = Offset(canvasWidth * 0.28f, 0f), end = Offset(canvasWidth * 0.28f, canvasHeight - 120.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                // Summary block at bottom
+                drawLine(color = Color(0xFF00BCD4).copy(alpha = 0.5f), start = Offset(0f, canvasHeight - 120.dp.toPx()), end = Offset(canvasWidth, canvasHeight - 120.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                // Ruled lines in main area
+                var y = 48.dp.toPx()
+                while (y < canvasHeight - 120.dp.toPx()) {
+                    drawLine(color = lineCol, start = Offset(canvasWidth * 0.28f, y), end = Offset(canvasWidth, y), strokeWidth = 1.dp.toPx())
+                    y += 32.dp.toPx()
+                }
+            }
+            PaperStyle.CORNELL_B -> {
+                // Top header line
+                drawLine(color = Color(0xFF00BCD4).copy(alpha = 0.5f), start = Offset(0f, 60.dp.toPx()), end = Offset(canvasWidth, 60.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                // Left margin line
+                drawLine(color = Color(0xFF00BCD4).copy(alpha = 0.5f), start = Offset(canvasWidth * 0.25f, 60.dp.toPx()), end = Offset(canvasWidth * 0.25f, canvasHeight), strokeWidth = 1.5.dp.toPx())
+                var y = 60.dp.toPx() + 32.dp.toPx()
+                while (y < canvasHeight) {
+                    drawLine(color = lineCol, start = Offset(canvasWidth * 0.25f, y), end = Offset(canvasWidth, y), strokeWidth = 1.dp.toPx())
+                    y += 32.dp.toPx()
+                }
+            }
+            PaperStyle.LEGAL -> {
+                // Red left vertical margin line at 18% width
+                drawLine(color = Color(0xFFFF5252).copy(alpha = 0.65f), start = Offset(canvasWidth * 0.18f, 0f), end = Offset(canvasWidth * 0.18f, canvasHeight), strokeWidth = 1.5.dp.toPx())
+                var y = 50.dp.toPx()
+                while (y < canvasHeight) {
+                    drawLine(color = Color(0xFFBBDEFB), start = Offset(0f, y), end = Offset(canvasWidth, y), strokeWidth = 1.dp.toPx())
+                    y += 32.dp.toPx()
+                }
+            }
+            PaperStyle.ENGINEERING_GRID -> {
+                val fineGrid = 14.dp.toPx()
+                var x = 0f
+                var count = 0
+                while (x < canvasWidth) {
+                    val isMajor = count % 5 == 0
+                    drawLine(color = if (isMajor) Color(0xFF81C784) else Color(0xFFE8F5E9), start = Offset(x, 0f), end = Offset(x, canvasHeight), strokeWidth = if (isMajor) 1.2.dp.toPx() else 0.6.dp.toPx())
+                    x += fineGrid
+                    count++
+                }
+                var y = 0f
+                count = 0
+                while (y < canvasHeight) {
+                    val isMajor = count % 5 == 0
+                    drawLine(color = if (isMajor) Color(0xFF81C784) else Color(0xFFE8F5E9), start = Offset(0f, y), end = Offset(canvasWidth, y), strokeWidth = if (isMajor) 1.2.dp.toPx() else 0.6.dp.toPx())
+                    y += fineGrid
+                    count++
+                }
+            }
+            PaperStyle.MUSIC_SCORE -> {
+                // 5-line musical staves
+                var staffTop = 60.dp.toPx()
+                val lineGap = 9.dp.toPx()
+                while (staffTop + 4 * lineGap < canvasHeight - 40.dp.toPx()) {
+                    for (i in 0..4) {
+                        val ly = staffTop + i * lineGap
+                        drawLine(color = Color(0xFF555555), start = Offset(36.dp.toPx(), ly), end = Offset(canvasWidth - 36.dp.toPx(), ly), strokeWidth = 1.dp.toPx())
+                    }
+                    staffTop += 4 * lineGap + 40.dp.toPx()
+                }
+            }
+            PaperStyle.GUITAR_TABLATURE -> {
+                // 6-line guitar tab staves
+                var staffTop = 60.dp.toPx()
+                val lineGap = 8.dp.toPx()
+                while (staffTop + 5 * lineGap < canvasHeight - 40.dp.toPx()) {
+                    for (i in 0..5) {
+                        val ly = staffTop + i * lineGap
+                        drawLine(color = Color(0xFF555555), start = Offset(36.dp.toPx(), ly), end = Offset(canvasWidth - 36.dp.toPx(), ly), strokeWidth = 1.dp.toPx())
+                    }
+                    staffTop += 5 * lineGap + 40.dp.toPx()
+                }
+            }
+            PaperStyle.GUITAR_SCORE -> {
+                // Combined standard music notation + 6-line guitar TAB
+                var staffTop = 50.dp.toPx()
+                val lineGap = 7.dp.toPx()
+                while (staffTop + 14 * lineGap < canvasHeight - 40.dp.toPx()) {
+                    // Standard staff (5 lines)
+                    for (i in 0..4) {
+                        val ly = staffTop + i * lineGap
+                        drawLine(color = Color(0xFF444444), start = Offset(36.dp.toPx(), ly), end = Offset(canvasWidth - 36.dp.toPx(), ly), strokeWidth = 1.dp.toPx())
+                    }
+                    val tabTop = staffTop + 5 * lineGap + 18.dp.toPx()
+                    // TAB staff (6 lines)
+                    for (i in 0..5) {
+                        val ly = tabTop + i * lineGap
+                        drawLine(color = Color(0xFF666666), start = Offset(36.dp.toPx(), ly), end = Offset(canvasWidth - 36.dp.toPx(), ly), strokeWidth = 1.dp.toPx())
+                    }
+                    staffTop = tabTop + 6 * lineGap + 36.dp.toPx()
                 }
             }
         }
     }
 }
+
+private fun isPointInPolygon(point: Offset, polygon: List<Offset>): Boolean {
+    if (polygon.size < 3) return false
+    var inside = false
+    var j = polygon.size - 1
+    for (i in polygon.indices) {
+        val pi = polygon[i]
+        val pj = polygon[j]
+        if ((pi.y > point.y) != (pj.y > point.y) &&
+            (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x)) {
+            inside = !inside
+        }
+        j = i
+    }
+    return inside
+}
+

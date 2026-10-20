@@ -27,6 +27,16 @@ enum class BookCoverType {
     CUSTOM
 }
 
+data class NotebookCover(
+    val category: String = "PLAIN", // "PLAIN", "NO_COVER", "CUSTOM", "BAND", "PALETTE", "COMPOSITION", "ABSTRACT", "RETRO"
+    val colorHex: Long = 0xFF45A5B5, // Default Teal
+    val name: String = "Teal",
+    val bandColorHex: Long? = null,
+    val stripeColorHexes: List<Long>? = null,
+    val patternType: String? = null,
+    val customImageUri: String? = null
+)
+
 data class NotebookItem(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
@@ -48,14 +58,19 @@ data class NotebookItem(
     val initialStrokes: List<InkStroke> = emptyList(),
     val filePath: String? = null,
     val mimeType: String? = null,
-    val originalFileName: String? = null
+    val originalFileName: String? = null,
+    val cover: NotebookCover = NotebookCover(),
+    val voiceNotes: List<com.graphite.app.core.voice.VoiceClip> = emptyList(),
+    val password: String? = null
 )
 
 data class FolderItem(
     val id: String,
     val name: String,
-    val noteCount: Int
+    val noteCount: Int,
+    val parentId: String? = null
 )
+
 
 data class ReadingStats(
     val totalHoursRead: Float = 0.1f,
