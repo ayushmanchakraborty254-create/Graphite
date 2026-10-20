@@ -85,6 +85,17 @@ android {
     }
 }
 
+afterEvaluate {
+    tasks.findByName("assembleDebug")?.doLast {
+        val src = file("build/outputs/apk/debug/app-debug.apk")
+        val dest = file("build/outputs/apk/debug/Graphite-v1.0.0.apk")
+        if (src.exists()) {
+            src.copyTo(dest, overwrite = true)
+            src.copyTo(rootProject.file("Graphite-v1.0.0.apk"), overwrite = true)
+        }
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

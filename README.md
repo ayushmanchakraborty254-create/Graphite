@@ -61,7 +61,7 @@ Whether you're reading a 500-page textbook, highlighting academic papers, annota
 
 Download the latest release APK directly to your Android device:
 
-👉 **[Download Latest Graphite APK](https://github.com/ayushmanchakraborty254-create/Graphite/releases/latest/download/app-release.apk)**
+👉 **[Download Latest Graphite APK](https://github.com/ayushmanchakraborty254-create/Graphite/releases/latest/download/Graphite-v1.0.0.apk)**
 
 1. Tap the download link above on your Android tablet or phone.
 2. Open the downloaded `.apk` file from your notification bar or file manager.
