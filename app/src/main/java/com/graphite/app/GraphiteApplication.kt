@@ -33,6 +33,9 @@ class GraphiteApplication : Application() {
     lateinit var voiceRecorderManager: com.graphite.app.core.voice.VoiceRecorderManager
         private set
 
+    lateinit var appUpdateManager: com.graphite.app.core.updater.AppUpdateManager
+        private set
+
     override fun onCreate() {
 
         super.onCreate()
@@ -55,6 +58,7 @@ class GraphiteApplication : Application() {
             supabaseSyncManager = supabaseSyncManager
         )
         voiceRecorderManager = com.graphite.app.core.voice.VoiceRecorderManager(this)
+        appUpdateManager = com.graphite.app.core.updater.AppUpdateManager()
 
         com.graphite.app.data.repository.GraphiteRepository.initStorage(this)
     }

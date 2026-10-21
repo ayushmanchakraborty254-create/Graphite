@@ -86,6 +86,12 @@ class MainActivity : ComponentActivity() {
                     sharedUriToOpen.value = null
                 }
 
+                val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
+                LaunchedEffect(Unit) {
+                    appUpdateManager.checkForUpdates()
+                }
+                com.graphite.app.core.updater.AppUpdateModalDialog(updateManager = appUpdateManager, context = context)
+
                 GoogleDriveUploadWorkflow(GraphiteApplication.instance.googleDriveManager)
 
                 Scaffold(

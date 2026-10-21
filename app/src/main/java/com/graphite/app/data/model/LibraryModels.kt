@@ -18,7 +18,8 @@ data class Book(
     val mimeType: String = "text/plain",
     val isBookmarked: Boolean = false,
     val isFavorite: Boolean = false,
-    val driveFileId: String? = null
+    val driveFileId: String? = null,
+    val userId: String? = null
 )
 
 enum class BookCoverType {
@@ -61,7 +62,9 @@ data class NotebookItem(
     val originalFileName: String? = null,
     val cover: NotebookCover = NotebookCover(),
     val voiceNotes: List<com.graphite.app.core.voice.VoiceClip> = emptyList(),
-    val password: String? = null
+    val password: String? = null,
+    val driveFileId: String? = null,
+    val isUploadedToDrive: Boolean = false
 )
 
 data class FolderItem(

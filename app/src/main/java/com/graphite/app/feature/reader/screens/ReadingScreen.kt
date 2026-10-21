@@ -58,7 +58,7 @@ fun ReadingScreen(
             Text(
                 text = "Reading",
                 color = Color.White,
-                fontSize = 26.sp,
+                fontSize = 24.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Serif
             )

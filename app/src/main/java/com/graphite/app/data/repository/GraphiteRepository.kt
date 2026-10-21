@@ -64,8 +64,9 @@ object GraphiteRepository {
     private val _books = MutableStateFlow<List<Book>>(emptyList())
     val books: StateFlow<List<Book>> = _books.asStateFlow()
 
-    // Isolated notebook collections partitioned by user ID to guarantee strict multi-user privacy
+    // Isolated notebook and book collections partitioned by user ID to guarantee strict multi-user privacy
     private val userNotebooksMap = mutableMapOf<String, MutableList<NotebookItem>>()
+    private val userBooksMap = mutableMapOf<String, MutableList<Book>>()
     private var activeUserId: String? = null
 
     private val _notebooks = MutableStateFlow<List<NotebookItem>>(emptyList())
@@ -87,35 +88,69 @@ object GraphiteRepository {
 
     /**
      * Switches the active authenticated user, strictly isolating the visible workspace.
-     * When signing out (userId == null), clears private cached notes from the visible workspace.
+     * When signing out (userId == null), switches to the local "guest" workspace rather than wiping data.
      */
     fun setActiveUser(userId: String?) {
         activeUserId = userId
-        if (userId == null) {
-            _notebooks.value = emptyList()
-            _stats.update { it.copy(notesCount = 0) }
-        } else {
-            val userNotes = userNotebooksMap.getOrPut(userId) { mutableListOf() }
-            val defaultNotes = userNotebooksMap["default"]
-            if (!defaultNotes.isNullOrEmpty()) {
-                val existingIds = userNotes.map { it.id }.toSet()
-                val toMigrate = defaultNotes.filter { it.id !in existingIds && !it.id.startsWith("note_") }
-                if (toMigrate.isNotEmpty()) {
-                    userNotes.addAll(toMigrate.map { it.copy(userId = userId) })
-                    defaultNotes.removeAll(toMigrate)
-                }
+        val currentUid = userId ?: "guest"
+
+        // 1. Partitioned Notes: Load user or guest notes
+        val userNotes = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val defaultNotes = userNotebooksMap["default"]
+        if (!defaultNotes.isNullOrEmpty() && currentUid != "default") {
+            val existingIds = userNotes.map { it.id }.toSet()
+            val toMigrate = defaultNotes.filter { it.id !in existingIds && !it.id.startsWith("note_") }
+            if (toMigrate.isNotEmpty()) {
+                userNotes.addAll(toMigrate.map { it.copy(userId = currentUid) })
+                defaultNotes.removeAll(toMigrate)
             }
-            _notebooks.value = userNotes.filter { !it.isDeleted }
-            _stats.update { it.copy(notesCount = _notebooks.value.size) }
-            saveToDisk()
         }
+        _notebooks.value = userNotes.filter { !it.isDeleted }
+
+        // 2. Partitioned Books: Load user or guest books
+        val userBooks = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        val defaultBooks = userBooksMap["default"]
+        if (!defaultBooks.isNullOrEmpty() && currentUid != "default") {
+            val existingBookIds = userBooks.map { it.id }.toSet()
+            val toMigrateBooks = defaultBooks.filter { it.id !in existingBookIds }
+            if (toMigrateBooks.isNotEmpty()) {
+                userBooks.addAll(toMigrateBooks.map { it.copy(userId = currentUid) })
+                defaultBooks.removeAll(toMigrateBooks)
+            }
+        }
+        _books.value = userBooks.toList()
+        cleanBookDuplicatesAndGhosts()
+
+        _stats.update {
+            it.copy(
+                notesCount = _notebooks.value.size,
+                totalBooks = _books.value.size
+            )
+        }
+        saveToDisk()
     }
 
     /**
-     * Clears cached private data from the active user's visible workspace on sign out.
+     * Clears cached private data and reverts to the "guest" workspace on sign out.
      */
     fun clearActiveUserWorkspace() {
         setActiveUser(null)
+    }
+
+    fun updateNotebookDriveStatus(notebookId: String, driveFileId: String?, isUploaded: Boolean = true) {
+        val currentUid = activeUserId ?: "guest"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == notebookId }
+        if (idx != -1) {
+            val updated = userList[idx].copy(
+                driveFileId = driveFileId,
+                isUploadedToDrive = isUploaded,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+            userList[idx] = updated
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
     }
 
     fun getBook(id: String): Book? = _books.value.find { it.id == id }
@@ -170,41 +205,57 @@ object GraphiteRepository {
     }
 
     fun toggleBookmarkBook(id: String) {
-        _books.update { list ->
-            list.map {
-                if (it.id == id) it.copy(isBookmarked = !it.isBookmarked) else it
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        for (i in userBookList.indices) {
+            if (userBookList[i].id == id) {
+                userBookList[i] = userBookList[i].copy(isBookmarked = !userBookList[i].isBookmarked)
             }
         }
+        _books.value = userBookList.toList()
+        saveToDisk()
     }
 
     fun toggleFavoriteBook(id: String) {
-        _books.update { list ->
-            list.map {
-                if (it.id == id) it.copy(isFavorite = !it.isFavorite) else it
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        for (i in userBookList.indices) {
+            if (userBookList[i].id == id) {
+                userBookList[i] = userBookList[i].copy(isFavorite = !userBookList[i].isFavorite)
             }
         }
+        _books.value = userBookList.toList()
+        saveToDisk()
     }
 
     fun deleteBook(id: String) {
-        val currentBook = _books.value.find { it.id == id }
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        val currentBook = userBookList.find { it.id == id }
         currentBook?.filePath?.let { path ->
             try {
                 val f = File(path)
                 if (f.exists()) f.delete()
             } catch (_: Exception) {}
         }
-        _books.update { list -> list.filter { it.id != id } }
+        userBookList.removeAll { it.id == id }
+        _books.value = userBookList.toList()
         _stats.update { it.copy(totalBooks = _books.value.size) }
         saveToDisk()
     }
 
     fun updateBookProgress(id: String, progress: Int) {
-        _books.update { list ->
-            list.map {
-                if (it.id == id) it.copy(progressPercent = progress.coerceIn(0, 100), lastReadTimeMillis = System.currentTimeMillis())
-                else it
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        for (i in userBookList.indices) {
+            if (userBookList[i].id == id) {
+                userBookList[i] = userBookList[i].copy(
+                    progressPercent = progress.coerceIn(0, 100),
+                    lastReadTimeMillis = System.currentTimeMillis()
+                )
             }
         }
+        _books.value = userBookList.toList()
         saveToDisk()
     }
 
@@ -214,34 +265,35 @@ object GraphiteRepository {
             author = author,
             progressPercent = 0,
             coverType = BookCoverType.CUSTOM,
-            content = content
+            content = content,
+            userId = activeUserId ?: "guest"
         )
         addBook(newBook)
     }
 
     fun addBook(book: Book) {
-        val normalized = normalizeBookTitle(book.title)
-        val existingIndex = _books.value.indexOfFirst {
-            it.id == book.id ||
-            (book.driveFileId != null && it.driveFileId == book.driveFileId) ||
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        val scopedBook = if (book.userId.isNullOrBlank()) book.copy(userId = currentUid) else book
+        val normalized = normalizeBookTitle(scopedBook.title)
+        val existingIndex = userBookList.indexOfFirst {
+            it.id == scopedBook.id ||
+            (scopedBook.driveFileId != null && it.driveFileId == scopedBook.driveFileId) ||
             normalizeBookTitle(it.title) == normalized
         }
         if (existingIndex >= 0) {
-            _books.update { currentList ->
-                val updated = currentList.toMutableList()
-                val existing = updated[existingIndex]
-                updated[existingIndex] = existing.copy(
-                    filePath = book.filePath ?: existing.filePath,
-                    driveFileId = book.driveFileId ?: existing.driveFileId,
-                    mimeType = if (book.mimeType.isNotBlank()) book.mimeType else existing.mimeType,
-                    content = if (book.content.isNotBlank()) book.content else existing.content
-                )
-                updated
-            }
+            val existing = userBookList[existingIndex]
+            userBookList[existingIndex] = existing.copy(
+                filePath = scopedBook.filePath ?: existing.filePath,
+                driveFileId = scopedBook.driveFileId ?: existing.driveFileId,
+                mimeType = if (scopedBook.mimeType.isNotBlank()) scopedBook.mimeType else existing.mimeType,
+                content = if (scopedBook.content.isNotBlank()) scopedBook.content else existing.content
+            )
         } else {
-            _books.update { listOf(book) + it }
-            _stats.update { it.copy(totalBooks = _books.value.size) }
+            userBookList.add(0, scopedBook)
         }
+        _books.value = userBookList.toList()
+        _stats.update { it.copy(totalBooks = _books.value.size) }
         saveToDisk()
     }
 
@@ -731,28 +783,48 @@ object GraphiteRepository {
                         userNotebooksMap[uid] = list
                     }
                 }
-                val currentUid = activeUserId
-                if (currentUid == null) {
-                    _notebooks.value = emptyList()
-                    _stats.update { it.copy(notesCount = 0) }
-                } else {
-                    _notebooks.value = (userNotebooksMap[currentUid] ?: emptyList()).filter { !it.isDeleted }
-                    _stats.update { it.copy(notesCount = _notebooks.value.size) }
-                }
+                val currentUid = activeUserId ?: "guest"
+                _notebooks.value = (userNotebooksMap[currentUid] ?: userNotebooksMap["default"] ?: emptyList()).filter { !it.isDeleted }
+                _stats.update { it.copy(notesCount = _notebooks.value.size) }
             }
 
             val booksFile = File(context.filesDir, "graphite_books_storage.json")
             if (booksFile.exists()) {
-                val jsonStr = booksFile.readText(Charsets.UTF_8)
-                val arr = JSONArray(jsonStr)
-                val list = mutableListOf<Book>()
-                for (i in 0 until arr.length()) {
-                    val b = bookFromJson(arr.getJSONObject(i))
-                    if (b.id != "book_treasure_island" && b.id != "book_ce_ppt") {
-                        list.add(b)
+                val jsonStr = booksFile.readText(Charsets.UTF_8).trim()
+                if (jsonStr.startsWith("{")) {
+                    val rootObj = JSONObject(jsonStr)
+                    val keys = rootObj.keys()
+                    while (keys.hasNext()) {
+                        val uid = keys.next()
+                        val arr = rootObj.getJSONArray(uid)
+                        val list = mutableListOf<Book>()
+                        for (i in 0 until arr.length()) {
+                            val b = bookFromJson(arr.getJSONObject(i))
+                            if (b.id != "book_treasure_island" && b.id != "book_ce_ppt") {
+                                list.add(b)
+                            }
+                        }
+                        if (list.isNotEmpty()) {
+                            userBooksMap[uid] = list
+                        }
+                    }
+                } else if (jsonStr.startsWith("[")) {
+                    val arr = JSONArray(jsonStr)
+                    val list = mutableListOf<Book>()
+                    for (i in 0 until arr.length()) {
+                        val b = bookFromJson(arr.getJSONObject(i))
+                        if (b.id != "book_treasure_island" && b.id != "book_ce_ppt") {
+                            list.add(b)
+                        }
+                    }
+                    userBooksMap["guest"] = list
+                    val currentUid = activeUserId ?: "guest"
+                    if (currentUid != "guest") {
+                        userBooksMap[currentUid] = list.toMutableList()
                     }
                 }
-                _books.value = list
+                val currentUid = activeUserId ?: "guest"
+                _books.value = userBooksMap[currentUid] ?: userBooksMap["guest"] ?: emptyList()
                 _stats.update { it.copy(totalBooks = _books.value.size) }
             }
             cleanBookDuplicatesAndGhosts()
@@ -776,11 +848,15 @@ object GraphiteRepository {
             notesFile.writeText(rootObj.toString(), Charsets.UTF_8)
 
             val booksFile = File(context.filesDir, "graphite_books_storage.json")
-            val booksArr = JSONArray()
-            for (b in _books.value) {
-                booksArr.put(bookToJson(b))
+            val booksRootObj = JSONObject()
+            for ((uid, list) in userBooksMap) {
+                val arr = JSONArray()
+                for (b in list) {
+                    arr.put(bookToJson(b))
+                }
+                booksRootObj.put(uid, arr)
             }
-            booksFile.writeText(booksArr.toString(), Charsets.UTF_8)
+            booksFile.writeText(booksRootObj.toString(), Charsets.UTF_8)
         } catch (e: Exception) {
             android.util.Log.e("GraphiteRepository", "Failed to save storage to disk", e)
         }
@@ -835,6 +911,8 @@ object GraphiteRepository {
             put("mimeType", item.mimeType)
             put("originalFileName", item.originalFileName)
             put("password", item.password)
+            put("driveFileId", item.driveFileId)
+            put("isUploadedToDrive", item.isUploadedToDrive)
 
             // Cover
             val coverObj = JSONObject().apply {
@@ -929,7 +1007,9 @@ object GraphiteRepository {
             originalFileName = if (json.has("originalFileName") && !json.isNull("originalFileName")) json.getString("originalFileName") else null,
             cover = cover,
             voiceNotes = voiceNotes,
-            password = pwd
+            password = pwd,
+            driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null,
+            isUploadedToDrive = json.optBoolean("isUploadedToDrive", false)
         )
     }
 
@@ -966,6 +1046,7 @@ object GraphiteRepository {
             put("isBookmarked", book.isBookmarked)
             put("isFavorite", book.isFavorite)
             put("driveFileId", book.driveFileId)
+            put("userId", book.userId)
         }
     }
 
@@ -984,7 +1065,8 @@ object GraphiteRepository {
             mimeType = json.optString("mimeType", "application/pdf"),
             isBookmarked = json.optBoolean("isBookmarked", false),
             isFavorite = json.optBoolean("isFavorite", false),
-            driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null
+            driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null,
+            userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null
         )
     }
 }

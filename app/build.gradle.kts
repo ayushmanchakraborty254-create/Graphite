@@ -50,6 +50,16 @@ android {
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"$googleWebClientId\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
         buildConfigField("String", "GROQ_API_KEY", "\"$groqApiKey\"")
+
+        val gitCommitSha = try {
+            val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
+            proc.inputStream.bufferedReader().readText().trim()
+        } catch (_: Exception) {
+            "dev"
+        }
+        val buildTimeMillis = System.currentTimeMillis()
+        buildConfigField("String", "GIT_COMMIT_SHA", "\"$gitCommitSha\"")
+        buildConfigField("Long", "BUILD_TIME_MILLIS", "${buildTimeMillis}L")
     }
 
 

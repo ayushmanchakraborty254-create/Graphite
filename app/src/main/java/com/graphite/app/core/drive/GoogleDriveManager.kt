@@ -744,6 +744,7 @@ class GoogleDriveManager(
                         folderName = resolvedFolderName
                     )
                     _uploadState.value = DriveUploadState.Success(enrichedSuccess)
+                    com.graphite.app.data.repository.GraphiteRepository.updateNotebookDriveStatus(notebook.id, enrichedSuccess.fileId, true)
                     enrichedSuccess
                 }
                 is DriveUploadResult.Error -> {

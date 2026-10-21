@@ -86,6 +86,14 @@ class GoogleAccountManager(
         return client.signInIntent
     }
 
+    fun launchSwitchAccount(context: Context, launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
+        val client = GoogleSignIn.getClient(context, getGoogleSignInOptions())
+        client.signOut().addOnCompleteListener {
+            val intent = client.signInIntent
+            launcher.launch(intent)
+        }
+    }
+
     fun handleSignInResult(data: Intent?): Result<GoogleProfile> {
         return try {
             val task = GoogleSignIn.getSignedInAccountFromIntent(data)

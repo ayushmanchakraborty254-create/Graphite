@@ -541,7 +541,7 @@ fun NoteshelfScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp),
+                        .padding(top = 16.dp, bottom = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -568,8 +568,9 @@ fun NoteshelfScreen(
                     Text(
                         text = headerTitle,
                         color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Serif
                     )
                 }
 
@@ -1760,19 +1761,23 @@ private fun NotebookThumbnailCard(
                     )
                 }
 
-                // Cloud Upload Badge Icon (top right)
+                // Cloud Upload Badge Icon (top right) - Differentiates Uploaded vs Local
+                val isUploaded = notebook.isUploadedToDrive || !notebook.driveFileId.isNullOrBlank()
                 IconButton(
                     onClick = onUploadToDrive,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(4.dp)
                         .size(26.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .background(
+                            if (isUploaded) Color(0xCC1B5E20) else Color.Black.copy(alpha = 0.6f),
+                            RoundedCornerShape(4.dp)
+                        )
                 ) {
                     Icon(
-                        imageVector = Icons.Default.CloudUpload,
-                        contentDescription = "Upload to Google Drive",
-                        tint = GraphiteOrange,
+                        imageVector = if (isUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                        contentDescription = if (isUploaded) "Backed up to Drive" else "Upload to Google Drive",
+                        tint = if (isUploaded) Color(0xFF4CAF50) else Color(0xFFB0B0B0),
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -1891,7 +1896,7 @@ private fun NotebookThumbnailCard(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Title and Timestamp matching Page 4
+        // Title and Timestamp matching Page 4 with Cloud Status Indicator
         Text(
             text = notebook.title,
             color = Color.White,
@@ -1900,11 +1905,23 @@ private fun NotebookThumbnailCard(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        Text(
-            text = notebook.updatedAtFormatted,
-            color = Color(0xFF888888),
-            fontSize = 10.sp
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            val isUploaded = notebook.isUploadedToDrive || !notebook.driveFileId.isNullOrBlank()
+            Icon(
+                imageVector = if (isUploaded) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                contentDescription = null,
+                tint = if (isUploaded) Color(0xFF4CAF50) else Color(0xFF757575),
+                modifier = Modifier.size(10.dp)
+            )
+            Text(
+                text = "${if (isUploaded) "Backed up" else "Local"} • ${notebook.updatedAtFormatted}",
+                color = if (isUploaded) Color(0xFF81C784) else Color(0xFF888888),
+                fontSize = 10.sp
+            )
+        }
     }
 }
 
@@ -1983,11 +2000,23 @@ private fun NotebookListRow(
                     Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
                 }
             }
-            Text(
-                text = "${if (isPdf) "PDF • " else ""}${notebook.updatedAtFormatted}",
-                color = Color.Gray,
-                fontSize = 11.sp
-            )
+            val isUploaded = notebook.isUploadedToDrive || !notebook.driveFileId.isNullOrBlank()
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = if (isUploaded) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                    contentDescription = null,
+                    tint = if (isUploaded) Color(0xFF4CAF50) else Color.Gray,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = "${if (isPdf) "PDF • " else ""}${if (isUploaded) "Backed up • " else "Local • "}${notebook.updatedAtFormatted}",
+                    color = if (isUploaded) Color(0xFF81C784) else Color.Gray,
+                    fontSize = 11.sp
+                )
+            }
         }
 
         IconButton(
@@ -2045,8 +2074,9 @@ private fun NotebookListRow(
                     text = { Text("Move to Folder", color = Color.White) },
                     onClick = { menuExpanded = false; onMoveFolder() }
                 )
+                val isUploaded = notebook.isUploadedToDrive || !notebook.driveFileId.isNullOrBlank()
                 DropdownMenuItem(
-                    text = { Text("Upload to Drive", color = GraphiteOrange) },
+                    text = { Text(if (isUploaded) "Re-upload to Drive" else "Upload to Drive", color = if (isUploaded) Color(0xFF81C784) else GraphiteOrange) },
                     onClick = { menuExpanded = false; onUploadToDrive() }
                 )
                 HorizontalDivider(color = Color(0xFF333333))

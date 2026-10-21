@@ -178,8 +178,7 @@ fun GoogleProfileTopBarIcon(
             },
             onSwitchAccount = {
                 showProfileDialog = false
-                val intent = googleAccountManager.getSignInIntent(context)
-                googleSignInLauncher.launch(intent)
+                googleAccountManager.launchSwitchAccount(context, googleSignInLauncher)
             }
         )
     }
