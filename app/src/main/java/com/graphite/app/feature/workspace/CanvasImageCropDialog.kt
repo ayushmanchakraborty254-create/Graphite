@@ -21,8 +21,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -44,7 +42,7 @@ import kotlin.math.roundToInt
 fun CanvasImageCropDialog(
     image: CanvasImageElement,
     onDismiss: () -> Unit,
-    onApplyCrop: (newFilePath: String, newWidthRatio: Float, newHeightRatio: Float) -> Unit
+    onApplyCrop: (newFilePath: String, newXRatio: Float, newYRatio: Float, newWidthRatio: Float, newHeightRatio: Float) -> Unit
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -82,7 +80,7 @@ fun CanvasImageCropDialog(
             border = BorderStroke(1.dp, Color(0xFF2C2C36)),
             modifier = Modifier
                 .fillMaxWidth(0.92f)
-                .fillMaxHeight(0.85f)
+                .fillMaxHeight(0.88f)
         ) {
             Column(
                 modifier = Modifier
@@ -141,8 +139,8 @@ fun CanvasImageCropDialog(
                     val dispWidth = if (imgAspect > containerAspect) maxW else maxH * imgAspect
                     val dispHeight = if (imgAspect > containerAspect) maxW / imgAspect else maxH
 
-                    val dispWidthPx = with(density) { dispWidth.toPx() }
-                    val dispHeightPx = with(density) { dispHeight.toPx() }
+                    val dispWidthPx = with(density) { dispWidth.toPx() }.coerceAtLeast(1f)
+                    val dispHeightPx = with(density) { dispHeight.toPx() }.coerceAtLeast(1f)
 
                     Box(
                         modifier = Modifier
@@ -164,7 +162,7 @@ fun CanvasImageCropDialog(
                                 .fillMaxWidth()
                                 .height(dispHeight * topCropRatio)
                                 .align(Alignment.TopCenter)
-                                .background(Color.Black.copy(alpha = 0.55f))
+                                .background(Color.Black.copy(alpha = 0.60f))
                         )
                         // Bottom
                         Box(
@@ -172,7 +170,7 @@ fun CanvasImageCropDialog(
                                 .fillMaxWidth()
                                 .height(dispHeight * bottomCropRatio)
                                 .align(Alignment.BottomCenter)
-                                .background(Color.Black.copy(alpha = 0.55f))
+                                .background(Color.Black.copy(alpha = 0.60f))
                         )
                         // Left
                         Box(
@@ -180,7 +178,7 @@ fun CanvasImageCropDialog(
                                 .width(dispWidth * leftCropRatio)
                                 .fillMaxHeight()
                                 .align(Alignment.CenterStart)
-                                .background(Color.Black.copy(alpha = 0.55f))
+                                .background(Color.Black.copy(alpha = 0.60f))
                         )
                         // Right
                         Box(
@@ -188,7 +186,7 @@ fun CanvasImageCropDialog(
                                 .width(dispWidth * rightCropRatio)
                                 .fillMaxHeight()
                                 .align(Alignment.CenterEnd)
-                                .background(Color.Black.copy(alpha = 0.55f))
+                                .background(Color.Black.copy(alpha = 0.60f))
                         )
 
                         // Crop Boundary Box with corner handles
@@ -197,6 +195,7 @@ fun CanvasImageCropDialog(
                         val cropW = (dispWidthPx * (1f - leftCropRatio - rightCropRatio)).coerceAtLeast(40f)
                         val cropH = (dispHeightPx * (1f - topCropRatio - bottomCropRatio)).coerceAtLeast(40f)
 
+                        // Center crop box draggable region (drag inside box moves the entire crop window)
                         Box(
                             modifier = Modifier
                                 .offset { IntOffset(cropLeft.roundToInt(), cropTop.roundToInt()) }
@@ -205,54 +204,142 @@ fun CanvasImageCropDialog(
                                     height = with(density) { cropH.toDp() }
                                 )
                                 .border(2.dp, Color(0xFF2196F3))
-                        )
-
-                        // Draggable Corner handles
-                        val handleSize = 22.dp
-
-                        // Top-Left Handle
-                        Box(
-                            modifier = Modifier
-                                .offset {
-                                    IntOffset(
-                                        (cropLeft - with(density) { (handleSize / 2).toPx() }).roundToInt(),
-                                        (cropTop - with(density) { (handleSize / 2).toPx() }).roundToInt()
-                                    )
-                                }
-                                .size(handleSize)
-                                .clip(CircleShape)
-                                .background(Color(0xFF2196F3))
-                                .border(2.dp, Color.White, CircleShape)
-                                .pointerInput(Unit) {
+                                .pointerInput(dispWidthPx, dispHeightPx) {
                                     detectDragGestures { change, dragAmount ->
                                         change.consume()
-                                        leftCropRatio = (leftCropRatio + dragAmount.x / dispWidthPx).coerceIn(0f, 0.85f - rightCropRatio)
-                                        topCropRatio = (topCropRatio + dragAmount.y / dispHeightPx).coerceIn(0f, 0.85f - bottomCropRatio)
+                                        val boxW = 1f - leftCropRatio - rightCropRatio
+                                        val boxH = 1f - topCropRatio - bottomCropRatio
+                                        val dxRatio = dragAmount.x / dispWidthPx
+                                        val dyRatio = dragAmount.y / dispHeightPx
+
+                                        val newLeft = (leftCropRatio + dxRatio).coerceIn(0f, 1f - boxW)
+                                        leftCropRatio = newLeft
+                                        rightCropRatio = (1f - newLeft - boxW).coerceAtLeast(0f)
+
+                                        val newTop = (topCropRatio + dyRatio).coerceIn(0f, 1f - boxH)
+                                        topCropRatio = newTop
+                                        bottomCropRatio = (1f - newTop - boxH).coerceAtLeast(0f)
                                     }
                                 }
                         )
 
-                        // Bottom-Right Handle
+                        // Draggable 4 Corner handles (with comfortable 32dp grab target)
+                        val handleVisualSize = 24.dp
+                        val handleTouchSize = 36.dp
+                        val handleVisualOffsetPx = with(density) { (handleVisualSize / 2).toPx() }
+                        val handleTouchOffsetPx = with(density) { (handleTouchSize / 2).toPx() }
+
+                        // 1. Top-Left Handle
                         Box(
                             modifier = Modifier
                                 .offset {
                                     IntOffset(
-                                        (cropLeft + cropW - with(density) { (handleSize / 2).toPx() }).roundToInt(),
-                                        (cropTop + cropH - with(density) { (handleSize / 2).toPx() }).roundToInt()
+                                        (cropLeft - handleTouchOffsetPx).roundToInt(),
+                                        (cropTop - handleTouchOffsetPx).roundToInt()
                                     )
                                 }
-                                .size(handleSize)
-                                .clip(CircleShape)
-                                .background(Color(0xFF2196F3))
-                                .border(2.dp, Color.White, CircleShape)
-                                .pointerInput(Unit) {
+                                .size(handleTouchSize)
+                                .pointerInput(dispWidthPx, dispHeightPx) {
                                     detectDragGestures { change, dragAmount ->
                                         change.consume()
-                                        rightCropRatio = (rightCropRatio - dragAmount.x / dispWidthPx).coerceIn(0f, 0.85f - leftCropRatio)
-                                        bottomCropRatio = (bottomCropRatio - dragAmount.y / dispHeightPx).coerceIn(0f, 0.85f - topCropRatio)
+                                        leftCropRatio = (leftCropRatio + dragAmount.x / dispWidthPx).coerceIn(0f, 0.88f - rightCropRatio)
+                                        topCropRatio = (topCropRatio + dragAmount.y / dispHeightPx).coerceIn(0f, 0.88f - bottomCropRatio)
                                     }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(handleVisualSize)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2196F3))
+                                    .border(2.5.dp, Color.White, CircleShape)
+                            )
+                        }
+
+                        // 2. Top-Right Handle
+                        Box(
+                            modifier = Modifier
+                                .offset {
+                                    IntOffset(
+                                        (cropLeft + cropW - handleTouchOffsetPx).roundToInt(),
+                                        (cropTop - handleTouchOffsetPx).roundToInt()
+                                    )
                                 }
-                        )
+                                .size(handleTouchSize)
+                                .pointerInput(dispWidthPx, dispHeightPx) {
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
+                                        rightCropRatio = (rightCropRatio - dragAmount.x / dispWidthPx).coerceIn(0f, 0.88f - leftCropRatio)
+                                        topCropRatio = (topCropRatio + dragAmount.y / dispHeightPx).coerceIn(0f, 0.88f - bottomCropRatio)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(handleVisualSize)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2196F3))
+                                    .border(2.5.dp, Color.White, CircleShape)
+                            )
+                        }
+
+                        // 3. Bottom-Left Handle
+                        Box(
+                            modifier = Modifier
+                                .offset {
+                                    IntOffset(
+                                        (cropLeft - handleTouchOffsetPx).roundToInt(),
+                                        (cropTop + cropH - handleTouchOffsetPx).roundToInt()
+                                    )
+                                }
+                                .size(handleTouchSize)
+                                .pointerInput(dispWidthPx, dispHeightPx) {
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
+                                        leftCropRatio = (leftCropRatio + dragAmount.x / dispWidthPx).coerceIn(0f, 0.88f - rightCropRatio)
+                                        bottomCropRatio = (bottomCropRatio - dragAmount.y / dispHeightPx).coerceIn(0f, 0.88f - topCropRatio)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(handleVisualSize)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2196F3))
+                                    .border(2.5.dp, Color.White, CircleShape)
+                            )
+                        }
+
+                        // 4. Bottom-Right Handle
+                        Box(
+                            modifier = Modifier
+                                .offset {
+                                    IntOffset(
+                                        (cropLeft + cropW - handleTouchOffsetPx).roundToInt(),
+                                        (cropTop + cropH - handleTouchOffsetPx).roundToInt()
+                                    )
+                                }
+                                .size(handleTouchSize)
+                                .pointerInput(dispWidthPx, dispHeightPx) {
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
+                                        rightCropRatio = (rightCropRatio - dragAmount.x / dispWidthPx).coerceIn(0f, 0.88f - leftCropRatio)
+                                        bottomCropRatio = (bottomCropRatio - dragAmount.y / dispHeightPx).coerceIn(0f, 0.88f - topCropRatio)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(handleVisualSize)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2196F3))
+                                    .border(2.5.dp, Color.White, CircleShape)
+                            )
+                        }
                     }
                 }
 
@@ -279,7 +366,7 @@ fun CanvasImageCropDialog(
 
                     Button(
                         onClick = {
-                            val margin = 0.12f
+                            val margin = 0.10f
                             leftCropRatio = margin
                             rightCropRatio = margin
                             topCropRatio = margin
@@ -290,6 +377,56 @@ fun CanvasImageCropDialog(
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text("Center", color = Color.White, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = {
+                            // 1:1 Square
+                            val origW = originalBitmap.width.toFloat()
+                            val origH = originalBitmap.height.toFloat()
+                            val side = minOf(origW, origH)
+                            val leftM = ((origW - side) / 2f) / origW
+                            val topM = ((origH - side) / 2f) / origH
+                            leftCropRatio = leftM
+                            rightCropRatio = leftM
+                            topCropRatio = topM
+                            bottomCropRatio = topM
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF282830)),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("1:1", color = Color.White, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = {
+                            // 16:9 Landscape
+                            val origW = originalBitmap.width.toFloat()
+                            val origH = originalBitmap.height.toFloat()
+                            val targetAspect = 16f / 9f
+                            val curAspect = origW / origH
+                            if (curAspect > targetAspect) {
+                                val targetW = origH * targetAspect
+                                val margin = ((origW - targetW) / 2f) / origW
+                                leftCropRatio = margin
+                                rightCropRatio = margin
+                                topCropRatio = 0f
+                                bottomCropRatio = 0f
+                            } else {
+                                val targetH = origW / targetAspect
+                                val margin = ((origH - targetH) / 2f) / origH
+                                topCropRatio = margin
+                                bottomCropRatio = margin
+                                leftCropRatio = 0f
+                                rightCropRatio = 0f
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF282830)),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("16:9", color = Color.White, fontSize = 12.sp)
                     }
                 }
 
@@ -318,13 +455,16 @@ fun CanvasImageCropDialog(
                                 croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos)
                             }
 
-                            // Compute updated dimension ratios to maintain proper visual size
-                            val widthFactor = cropW.toFloat() / origW.toFloat()
-                            val heightFactor = cropH.toFloat() / origH.toFloat()
-                            val newW = (image.widthRatio * widthFactor).coerceIn(0.12f, 0.95f)
-                            val newH = (image.heightRatio * heightFactor).coerceIn(0.12f, 0.95f)
+                            // Calculate new canvas coordinates & size preserving visual position
+                            val cropWFrac = 1f - leftCropRatio - rightCropRatio
+                            val cropHFrac = 1f - topCropRatio - bottomCropRatio
 
-                            onApplyCrop(targetFile.absolutePath, newW, newH)
+                            val newX = (image.xRatio + image.widthRatio * leftCropRatio).coerceIn(-0.2f, 0.95f)
+                            val newY = (image.yRatio + image.heightRatio * topCropRatio).coerceIn(-0.2f, 0.95f)
+                            val newW = (image.widthRatio * cropWFrac).coerceIn(0.08f, 0.95f)
+                            val newH = (image.heightRatio * cropHFrac).coerceIn(0.08f, 0.95f)
+
+                            onApplyCrop(targetFile.absolutePath, newX, newY, newW, newH)
                             Toast.makeText(context, "Image cropped successfully", Toast.LENGTH_SHORT).show()
                             onDismiss()
                         } catch (e: Exception) {

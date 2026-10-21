@@ -278,7 +278,9 @@ fun CanvasEditorScreen(
         val lines = notebook?.previewLines ?: emptyList()
         val parsed = lines.mapNotNull { CanvasTextBox.deserialize(it) }
         val imageLines = lines.mapNotNull { CanvasImageElement.deserialize(it) }
-        localImages = imageLines
+        if (selectedImageId == null) {
+            localImages = imageLines
+        }
 
         val isPdfDoc = notebook?.mimeType == "application/pdf" ||
                        notebook?.filePath?.endsWith(".pdf", ignoreCase = true) == true ||
@@ -926,6 +928,43 @@ fun CanvasEditorScreen(
                                 )
                             }
 
+                            // Layer A3: Background Canvas Images on pageIdx (zIndex < 0, drawn behind ink strokes)
+                            val pageBaseWPx = with(density) { basePageWidth.toPx() }
+                            val pageBaseHPx = with(density) { basePageHeight.toPx() }
+                            val backImages = localImages.filter { it.pageIndex == pageIdx && it.zIndex < 0 }.sortedBy { it.zIndex }
+                            backImages.forEach { img ->
+                                CanvasImageOverlayItem(
+                                    image = img,
+                                    isSelected = selectedImageId == img.id,
+                                    basePageWidthPx = pageBaseWPx,
+                                    basePageHeightPx = pageBaseHPx,
+                                    pageScale = 1f,
+                                    onSelect = { selectedImageId = img.id },
+                                    onUpdateDraft = { updatedImg ->
+                                        localImages = localImages.map { if (it.id == updatedImg.id) updatedImg else it }
+                                    },
+                                    onSave = { updatedImg ->
+                                        val updated = localImages.map { if (it.id == updatedImg.id) updatedImg else it }
+                                        saveImages(updated)
+                                    },
+                                    onDelete = {
+                                        val updated = localImages.filterNot { it.id == img.id }
+                                        saveImages(updated)
+                                        if (selectedImageId == img.id) selectedImageId = null
+                                    },
+                                    onDuplicate = {
+                                        val dup = img.copy(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            xRatio = (img.xRatio + 0.04f).coerceAtMost(0.85f),
+                                            yRatio = (img.yRatio + 0.04f).coerceAtMost(0.85f)
+                                        )
+                                        val updated = localImages + dup
+                                        saveImages(updated)
+                                        selectedImageId = dup.id
+                                    }
+                                )
+                            }
+
                             // Layer B: Ink Strokes Canvas
                             Canvas(
                                 modifier = Modifier
@@ -958,10 +997,11 @@ fun CanvasEditorScreen(
                                                 val cx = imgLeft + imgW / 2f
                                                 val cy = imgTop + imgH / 2f
                                                 // Covers rotated bounds, corner handles, top toolbar, and bottom rotation handle
-                                                val maxInteractiveRadius = kotlin.math.hypot(imgW / 2f, imgH / 2f) + 140f
+                                                val maxInteractiveRadius = kotlin.math.hypot(imgW / 2f, imgH / 2f) + 160f
                                                 val distSq = (touchX - cx) * (touchX - cx) + (touchY - cy) * (touchY - cy)
+                                                val isNearToolbar = touchX in (cx - 260f)..(cx + 260f) && touchY in (imgTop - 120f)..(imgTop + 60f)
 
-                                                if (distSq <= maxInteractiveRadius * maxInteractiveRadius) {
+                                                if (distSq <= maxInteractiveRadius * maxInteractiveRadius || isNearToolbar) {
                                                     return@pointerInteropFilter false
                                                 } else if (motionEvent.action == MotionEvent.ACTION_DOWN) {
                                                     selectedImageId = null
@@ -988,11 +1028,8 @@ fun CanvasEditorScreen(
                                                 unrotX in (imgLeft - 20f)..(imgLeft + imgW + 20f) && unrotY in (imgTop - 20f)..(imgTop + imgH + 20f)
                                             }
                                             if (hitImage != null) {
-                                                val isFinger = motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER
-                                                if (isFinger || selectedStudioTool == StudioTool.LASSO || selectedStudioTool == StudioTool.TEXT) {
-                                                    selectedImageId = hitImage.id
-                                                    return@pointerInteropFilter false
-                                                }
+                                                selectedImageId = hitImage.id
+                                                return@pointerInteropFilter false
                                             }
                                         }
 
@@ -1578,9 +1615,9 @@ fun CanvasEditorScreen(
                                 )
                             }
 
-                            // Layer D: Canvas Image Elements on pageIdx
-                            val pageImages = localImages.filter { it.pageIndex == pageIdx }.sortedBy { it.zIndex }
-                            pageImages.forEach { img ->
+                            // Layer D: Foreground Canvas Images on pageIdx (zIndex >= 0, drawn in front of ink strokes)
+                            val foreImages = localImages.filter { it.pageIndex == pageIdx && it.zIndex >= 0 }.sortedBy { it.zIndex }
+                            foreImages.forEach { img ->
                                 CanvasImageOverlayItem(
                                     image = img,
                                     isSelected = selectedImageId == img.id,
@@ -1588,7 +1625,10 @@ fun CanvasEditorScreen(
                                     basePageHeightPx = pageBaseH,
                                     pageScale = 1f,
                                     onSelect = { selectedImageId = img.id },
-                                    onUpdate = { updatedImg ->
+                                    onUpdateDraft = { updatedImg ->
+                                        localImages = localImages.map { if (it.id == updatedImg.id) updatedImg else it }
+                                    },
+                                    onSave = { updatedImg ->
                                         val updated = localImages.map { if (it.id == updatedImg.id) updatedImg else it }
                                         saveImages(updated)
                                     },
