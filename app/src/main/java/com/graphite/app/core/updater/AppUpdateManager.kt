@@ -3,6 +3,9 @@ package com.graphite.app.core.updater
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -71,9 +74,9 @@ class AppUpdateManager(
 
     /**
      * Checks GitHub for newly published APK builds.
-     * Compares release commit SHA, tag, or publish timestamp with the running build.
+     * Compares release commit SHA with the running build's GIT_COMMIT_SHA.
      */
-    fun checkForUpdates(onComplete: (Boolean) -> Unit = {}) {
+    fun checkForUpdates(context: Context? = null, onComplete: (Boolean) -> Unit = {}) {
         _updateState.value = UpdateState.Checking
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -128,16 +131,29 @@ class AppUpdateManager(
                 val localSha = BuildConfig.GIT_COMMIT_SHA
                 val localBuildTime = BuildConfig.BUILD_TIME_MILLIS
 
-                // Parse published timestamp
+                // Check dismissed SHA in SharedPreferences (user clicked Later or installed)
+                if (context != null) {
+                    val prefs = context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
+                    val dismissedSha = prefs.getString("dismissed_sha", null)
+                    if (!dismissedSha.isNullOrBlank() && dismissedSha.equals(releaseSha, ignoreCase = true)) {
+                        _updateState.value = UpdateState.Idle
+                        withContext(Dispatchers.Main) { onComplete(false) }
+                        return@launch
+                    }
+                }
+
+                // Check if the update is genuinely newer
                 var isNewer = false
-                if (localSha != "dev" && releaseSha.isNotBlank() && !releaseSha.equals(localSha, ignoreCase = true)) {
-                    isNewer = true
-                } else if (publishedAt.isNotBlank()) {
+                if (localSha.isNotBlank() && !localSha.equals("dev", ignoreCase = true) && releaseSha.isNotBlank()) {
+                    // Exact commit SHA comparison: only newer if remote SHA does NOT match installed SHA
+                    isNewer = !releaseSha.equals(localSha, ignoreCase = true)
+                } else if (localSha.equals("dev", ignoreCase = true) && publishedAt.isNotBlank()) {
+                    // Only fallback to timestamp comparison if running an uncommitted local build
                     try {
                         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
                         sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
                         val remoteTime = sdf.parse(publishedAt)?.time ?: 0L
-                        if (remoteTime > localBuildTime + 60_000) {
+                        if (remoteTime > localBuildTime + 300_000) {
                             isNewer = true
                         }
                     } catch (_: Exception) {}
@@ -219,12 +235,34 @@ class AppUpdateManager(
         }
     }
 
-    fun dismissUpdate() {
+    fun dismissUpdate(context: Context? = null, sha: String? = null) {
+        if (context != null && !sha.isNullOrBlank()) {
+            context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
+                .edit()
+                .putString("dismissed_sha", sha)
+                .apply()
+        }
         _updateState.value = UpdateState.Idle
     }
 
     fun installApk(context: Context, apkFile: File) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (!context.packageManager.canRequestPackageInstalls()) {
+                    Toast.makeText(
+                        context,
+                        "Please allow Graphite to install updates, then tap Install",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    val permissionIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(permissionIntent)
+                    return
+                }
+            }
+
             val contentUri: Uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -255,7 +293,7 @@ fun AppUpdateModalDialog(
     when (val state = updateState) {
         is UpdateState.Available -> {
             AlertDialog(
-                onDismissRequest = { updateManager.dismissUpdate() },
+                onDismissRequest = { updateManager.dismissUpdate(context, state.info.commitSha) },
                 icon = {
                     Icon(
                         imageVector = Icons.Default.SystemUpdate,
@@ -297,6 +335,7 @@ fun AppUpdateModalDialog(
                 confirmButton = {
                     Button(
                         onClick = {
+                            updateManager.dismissUpdate(context, state.info.commitSha)
                             updateManager.downloadAndInstall(context, state.info.downloadUrl)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
@@ -306,7 +345,7 @@ fun AppUpdateModalDialog(
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { updateManager.dismissUpdate() }) {
+                    TextButton(onClick = { updateManager.dismissUpdate(context, state.info.commitSha) }) {
                         Text("Later", color = Color.Gray)
                     }
                 },
@@ -377,6 +416,19 @@ fun AppUpdateModalDialog(
                 },
                 containerColor = GraphiteSurfaceVariant,
                 shape = RoundedCornerShape(16.dp)
+            )
+        }
+        is UpdateState.Error -> {
+            AlertDialog(
+                onDismissRequest = { updateManager.dismissUpdate() },
+                title = { Text("Update Error", color = Color.White) },
+                text = { Text(state.message, color = Color.LightGray) },
+                confirmButton = {
+                    Button(onClick = { updateManager.dismissUpdate() }) {
+                        Text("OK")
+                    }
+                },
+                containerColor = GraphiteSurfaceVariant
             )
         }
         else -> {}

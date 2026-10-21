@@ -51,17 +51,30 @@ android {
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
         buildConfigField("String", "GROQ_API_KEY", "\"$groqApiKey\"")
 
-        val gitCommitSha = try {
-            val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
-            proc.inputStream.bufferedReader().readText().trim()
-        } catch (_: Exception) {
-            "dev"
-        }
-        val buildTimeMillis = System.currentTimeMillis()
+        val gitCommitSha = (project.findProperty("gitCommitSha") as? String)?.trim()?.takeIf { it.isNotBlank() }
+            ?: try {
+                val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
+                proc.inputStream.bufferedReader().readText().trim()
+            } catch (_: Exception) {
+                "dev"
+            }
+        val buildTimeMillis = (project.findProperty("buildTimeMillis") as? String)?.toLongOrNull()
+            ?: System.currentTimeMillis()
         buildConfigField("String", "GIT_COMMIT_SHA", "\"$gitCommitSha\"")
         buildConfigField("Long", "BUILD_TIME_MILLIS", "${buildTimeMillis}L")
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val ks = rootProject.file("debug.keystore")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
 
     buildTypes {
         release {

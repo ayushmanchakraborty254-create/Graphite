@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
 
                 val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
                 LaunchedEffect(Unit) {
-                    appUpdateManager.checkForUpdates()
+                    appUpdateManager.checkForUpdates(context)
                 }
                 com.graphite.app.core.updater.AppUpdateModalDialog(updateManager = appUpdateManager, context = context)
 
