@@ -742,7 +742,11 @@ fun UnsplashPhotoPickerScreen(
         }
     }
 
-    val allWallpapers = remember { CoverCatalog.UnsplashCovers.distinctBy { it.customImageUri ?: it.name } }
+    val allWallpapers = remember {
+        CoverCatalog.UnsplashCovers
+            .filter { !it.customImageUri.isNullOrBlank() && it.name.isNotBlank() && !it.name.contains("blank", ignoreCase = true) }
+            .distinctBy { it.customImageUri ?: it.name }
+    }
     val isUrlInput = searchQuery.trim().startsWith("http://", ignoreCase = true) || searchQuery.trim().startsWith("https://", ignoreCase = true)
 
     val categoryFiltered = remember(selectedCategory, allWallpapers) {
@@ -936,7 +940,41 @@ fun UnsplashPhotoPickerScreen(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize(),
                                 loading = {
-                                    Box(modifier = Modifier.fillMaxSize().background(Color(item.colorHex)))
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().background(Color(item.colorHex)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            color = Color(0xFF00BCD4),
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
+                                },
+                                error = {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().background(Color(item.colorHex)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier.padding(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Image,
+                                                contentDescription = null,
+                                                tint = Color.White.copy(alpha = 0.6f),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = item.name.take(8),
+                                                color = Color.White.copy(alpha = 0.8f),
+                                                fontSize = 8.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
                                 }
                             )
 

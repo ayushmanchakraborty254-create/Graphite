@@ -95,11 +95,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlin.math.min
+
 enum class StudioTool {
     PEN,
     HIGHLIGHTER,
     ERASER,
     LASSO,
+    SHAPE,
+    PRESENT,
     TEXT
 }
 
@@ -247,10 +253,28 @@ fun CanvasEditorScreen(
     var textToolTapDownX by remember { mutableFloatStateOf(0f) }
     var textToolTapDownY by remember { mutableFloatStateOf(0f) }
 
-    // Synchronize text boxes from repository preview lines & auto-migrate any legacy raw preview lines into interactive Layer C CanvasTextBoxes!
+    // Canvas Image Elements state (Interactive image objects on canvas)
+    var localImages by remember { mutableStateOf<List<CanvasImageElement>>(emptyList()) }
+    var selectedImageId by remember { mutableStateOf<String?>(null) }
+
+    // Shapes Tool state
+    var showShapeDialog by remember { mutableStateOf(false) }
+    var selectedShapeType by remember { mutableStateOf(CanvasShapeType.RECTANGLE) }
+    var shapeStrokeWidth by remember { mutableFloatStateOf(4f) }
+    var shapeStartOffset by remember { mutableStateOf<Offset?>(null) }
+    var shapeCurrentOffset by remember { mutableStateOf<Offset?>(null) }
+
+    // Presenter Laser Mode state (Neon glow laser pointer with 2s disconnect timer)
+    var laserActivePoints by remember { mutableStateOf<List<InkPoint>>(emptyList()) }
+    var laserStrokes by remember { mutableStateOf<List<InkStroke>>(emptyList()) }
+    var laserFadeJob by remember { mutableStateOf<Job?>(null) }
+
+    // Synchronize text boxes and images from repository preview lines
     LaunchedEffect(notebook?.previewLines) {
         val lines = notebook?.previewLines ?: emptyList()
         val parsed = lines.mapNotNull { CanvasTextBox.deserialize(it) }
+        val imageLines = lines.mapNotNull { CanvasImageElement.deserialize(it) }
+        localImages = imageLines
 
         val isPdfDoc = notebook?.mimeType == "application/pdf" ||
                        notebook?.filePath?.endsWith(".pdf", ignoreCase = true) == true ||
@@ -280,6 +304,7 @@ fun CanvasEditorScreen(
                 !line.startsWith("[GRAPHITE_DATA:") &&
                 !line.startsWith("[GRAPHITE_VOICE:") &&
                 !line.startsWith("[GRAPHITE_TEXTBOX:") &&
+                !line.startsWith("[GRAPHITE_IMAGE:") &&
                 !line.startsWith("[GRAPHITE_PAGE_W:") &&
                 line.trim().isNotEmpty()
             }
@@ -330,6 +355,18 @@ fun CanvasEditorScreen(
         GraphiteRepository.updateNotebookLines(notebookId, currentLines)
     }
 
+    fun saveImages(newImages: List<CanvasImageElement>) {
+        localImages = newImages
+        val repoNote = GraphiteRepository.getNotebook(notebookId)
+        val baseLines = repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()
+        val currentLines = baseLines
+            .filterNot { it.startsWith("[GRAPHITE_IMAGE:") }
+            .toMutableList()
+        val serialized = newImages.map { it.serialize() }
+        currentLines.addAll(serialized)
+        GraphiteRepository.updateNotebookLines(notebookId, currentLines)
+    }
+
     // Auto-prune empty text boxes whenever switching away from the Text Tool
     LaunchedEffect(selectedStudioTool) {
         if (selectedStudioTool != StudioTool.TEXT) {
@@ -344,6 +381,64 @@ fun CanvasEditorScreen(
     val palmFilter = remember { PalmRejectionFilter(uiState.inputPolicy) }
     palmFilter.policy = uiState.inputPolicy
 
+    // Helper to import images directly onto active notebook page (not full-screen, proportional size, with editing options)
+    fun importImageToCurrentPage(uri: Uri?, bitmap: Bitmap?) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val imagesDir = File(context.filesDir, "notebook_images").apply { mkdirs() }
+                val targetFile = File(imagesDir, "img_${System.currentTimeMillis()}.jpg")
+                var origW = 800
+                var origH = 600
+
+                if (bitmap != null) {
+                    origW = bitmap.width
+                    origH = bitmap.height
+                    java.io.FileOutputStream(targetFile).use { fos ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos)
+                    }
+                } else if (uri != null) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        val bytes = input.readBytes()
+                        val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                        if (options.outWidth > 0) origW = options.outWidth
+                        if (options.outHeight > 0) origH = options.outHeight
+                        targetFile.writeBytes(bytes)
+                    }
+                } else return@launch
+
+                val aspect = origH.toFloat() / origW.toFloat().coerceAtLeast(1f)
+                val wRatio = 0.55f
+                val hRatio = (wRatio * aspect).coerceIn(0.18f, 0.75f)
+
+                val newImg = CanvasImageElement(
+                    id = java.util.UUID.randomUUID().toString(),
+                    pageIndex = currentPageIndex,
+                    filePath = targetFile.absolutePath,
+                    xRatio = 0.225f,
+                    yRatio = 0.22f,
+                    widthRatio = wRatio,
+                    heightRatio = hRatio,
+                    rotationDegrees = 0f,
+                    opacity = 1.0f,
+                    isLocked = false,
+                    keepAspectRatio = true
+                )
+
+                withContext(Dispatchers.Main) {
+                    val updated = localImages + newImg
+                    saveImages(updated)
+                    selectedImageId = newImg.id
+                    Toast.makeText(context, "Image added to Page ${currentPageIndex + 1}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Failed to import image: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     // Activity Launchers for Add Menu
     val docPickerLauncher = rememberLauncherForActivityResult(
@@ -361,9 +456,7 @@ fun CanvasEditorScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            totalPages++
-            scope.launch { listState.animateScrollToItem(totalPages - 1) }
-            Toast.makeText(context, "Image added as new page", Toast.LENGTH_SHORT).show()
+            importImageToCurrentPage(uri, null)
         }
     }
 
@@ -371,9 +464,7 @@ fun CanvasEditorScreen(
         contract = ActivityResultContracts.TakePicturePreview()
     ) { bmp: Bitmap? ->
         if (bmp != null) {
-            totalPages++
-            scope.launch { listState.animateScrollToItem(totalPages - 1) }
-            Toast.makeText(context, "Photo captured as page $totalPages", Toast.LENGTH_SHORT).show()
+            importImageToCurrentPage(null, bmp)
         }
     }
 
@@ -895,7 +986,14 @@ fun CanvasEditorScreen(
                                                 val safeZoom = zoomScale.coerceAtLeast(0.01f)
                                                 val baseX = packet.x / safeZoom
                                                 val baseY = packet.y / safeZoom
-                                                if (selectedStudioTool == StudioTool.LASSO) {
+                                                if (selectedStudioTool == StudioTool.PRESENT) {
+                                                    laserFadeJob?.cancel()
+                                                    laserFadeJob = null
+                                                    laserActivePoints = listOf(InkPoint(baseX, baseY, 1f, packet.timestamp))
+                                                } else if (selectedStudioTool == StudioTool.SHAPE) {
+                                                    shapeStartOffset = Offset(baseX, baseY)
+                                                    shapeCurrentOffset = Offset(baseX, baseY)
+                                                } else if (selectedStudioTool == StudioTool.LASSO) {
                                                     if (selectedStrokeIndices.isNotEmpty() && lassoBounds != null && lassoBounds!!.contains(Offset(baseX, baseY))) {
                                                         isDraggingLasso = true
                                                         lassoDragStart = Offset(baseX, baseY)
@@ -921,7 +1019,11 @@ fun CanvasEditorScreen(
                                                 val safeZoom = zoomScale.coerceAtLeast(0.01f)
                                                 val baseX = packet.x / safeZoom
                                                 val baseY = packet.y / safeZoom
-                                                if (selectedStudioTool == StudioTool.LASSO) {
+                                                if (selectedStudioTool == StudioTool.PRESENT) {
+                                                    laserActivePoints = laserActivePoints + InkPoint(baseX, baseY, 1f, packet.timestamp)
+                                                } else if (selectedStudioTool == StudioTool.SHAPE) {
+                                                    shapeCurrentOffset = Offset(baseX, baseY)
+                                                } else if (selectedStudioTool == StudioTool.LASSO) {
                                                     if (isDraggingLasso) {
                                                         lassoDragOffset = Offset(baseX - lassoDragStart.x, baseY - lassoDragStart.y)
                                                     } else {
@@ -960,7 +1062,43 @@ fun CanvasEditorScreen(
                                                 }
                                             }
                                             MotionActionType.UP, MotionActionType.CANCEL -> {
-                                                if (selectedStudioTool == StudioTool.LASSO) {
+                                                if (selectedStudioTool == StudioTool.PRESENT) {
+                                                    if (laserActivePoints.size >= 2) {
+                                                        val lStroke = InkStroke(
+                                                            points = laserActivePoints,
+                                                            baseWidth = 6f,
+                                                            color = Color(0xFFFF1744),
+                                                            toolType = InkToolType.PEN,
+                                                            pageIndex = pageIdx
+                                                        )
+                                                        laserStrokes = laserStrokes + lStroke
+                                                    }
+                                                    laserActivePoints = emptyList()
+                                                    // 2-second reconnect timer: If stylus touched again within 2s, glow stays; if disconnected > 2s, laser fades away!
+                                                    laserFadeJob?.cancel()
+                                                    laserFadeJob = scope.launch {
+                                                        delay(2000L)
+                                                        laserStrokes = emptyList()
+                                                    }
+                                                } else if (selectedStudioTool == StudioTool.SHAPE) {
+                                                    if (shapeStartOffset != null && shapeCurrentOffset != null) {
+                                                        val s = shapeStartOffset!!
+                                                        val e = shapeCurrentOffset!!
+                                                        if (hypot(e.x - s.x, e.y - s.y) > 12f) {
+                                                            val generated = CanvasShapeGenerator.generateShapeStrokes(
+                                                                shape = selectedShapeType,
+                                                                start = s,
+                                                                end = e,
+                                                                strokeWidth = shapeStrokeWidth,
+                                                                color = uiState.selectedColor,
+                                                                pageIndex = pageIdx
+                                                            )
+                                                            generated.forEach { workspaceViewModel.addStroke(it) }
+                                                        }
+                                                    }
+                                                    shapeStartOffset = null
+                                                    shapeCurrentOffset = null
+                                                } else if (selectedStudioTool == StudioTool.LASSO) {
                                                     if (isDraggingLasso) {
                                                         if (lassoDragOffset != Offset.Zero) {
                                                             workspaceViewModel.translateStrokes(selectedStrokeIndices, lassoDragOffset.x, lassoDragOffset.y)
@@ -1111,6 +1249,70 @@ fun CanvasEditorScreen(
                                     )
                                 }
 
+                                // Live Shape drag preview
+                                if (selectedStudioTool == StudioTool.SHAPE && shapeStartOffset != null && shapeCurrentOffset != null && activePageForStroke == pageIdx) {
+                                    val shapeStrokes = CanvasShapeGenerator.generateShapeStrokes(
+                                        shape = selectedShapeType,
+                                        start = shapeStartOffset!!,
+                                        end = shapeCurrentOffset!!,
+                                        strokeWidth = shapeStrokeWidth,
+                                        color = uiState.selectedColor,
+                                        pageIndex = pageIdx
+                                    )
+                                    shapeStrokes.forEach { s ->
+                                        if (s.points.size >= 2) {
+                                            val p = BezierSplineInterpolator.createSplinePath(s.points)
+                                            drawPath(
+                                                path = p,
+                                                color = s.color,
+                                                style = Stroke(width = s.baseWidth * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Presenter Neon Laser Pointer trails (multi-pass glow aura + white-hot core)
+                                val currentLaserStrokes = laserStrokes + (if (laserActivePoints.size >= 2 && activePageForStroke == pageIdx) {
+                                    listOf(InkStroke(points = laserActivePoints, baseWidth = 6f, color = Color(0xFFFF1744), toolType = InkToolType.PEN, pageIndex = pageIdx))
+                                } else emptyList())
+
+                                currentLaserStrokes.forEach { lStroke ->
+                                    if (lStroke.pageIndex == pageIdx && lStroke.points.size >= 2) {
+                                        val lPath = BezierSplineInterpolator.createSplinePath(lStroke.points)
+                                        // 1. Broad outer luminous glow aura
+                                        drawPath(
+                                            path = lPath,
+                                            color = Color(0xFFFF1744).copy(alpha = 0.22f),
+                                            style = Stroke(width = 18f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                        )
+                                        // 2. Focused vibrant neon beam
+                                        drawPath(
+                                            path = lPath,
+                                            color = Color(0xFFFF1744).copy(alpha = 0.65f),
+                                            style = Stroke(width = 9f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                        )
+                                        // 3. Core white-hot laser center
+                                        drawPath(
+                                            path = lPath,
+                                            color = Color(0xFFFFF0F2),
+                                            style = Stroke(width = 3.5f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                        )
+                                        // Tip luminous glow dot
+                                        lStroke.points.lastOrNull()?.let { tip ->
+                                            drawCircle(
+                                                color = Color(0xFFFF1744).copy(alpha = 0.5f),
+                                                radius = 12f * d,
+                                                center = Offset(tip.x, tip.y)
+                                            )
+                                            drawCircle(
+                                                color = Color.White,
+                                                radius = 4f * d,
+                                                center = Offset(tip.x, tip.y)
+                                            )
+                                        }
+                                    }
+                                }
+
                                 // Live Lasso selection loop
                                 if (lassoPoints.size >= 2 && activePageForStroke == pageIdx) {
                                     val lassoPath = androidx.compose.ui.graphics.Path().apply {
@@ -1241,6 +1443,38 @@ fun CanvasEditorScreen(
                                     },
                                     onTriggerVoice = {
                                         showVoiceDialog = true
+                                    }
+                                )
+                            }
+
+                            // Layer D: Canvas Image Elements on pageIdx
+                            val pageImages = localImages.filter { it.pageIndex == pageIdx }.sortedBy { it.zIndex }
+                            pageImages.forEach { img ->
+                                CanvasImageOverlayItem(
+                                    image = img,
+                                    isSelected = selectedImageId == img.id,
+                                    basePageWidthPx = pageBaseW,
+                                    basePageHeightPx = pageBaseH,
+                                    pageScale = canonicalScale,
+                                    onSelect = { selectedImageId = img.id },
+                                    onUpdate = { updatedImg ->
+                                        val updated = localImages.map { if (it.id == updatedImg.id) updatedImg else it }
+                                        saveImages(updated)
+                                    },
+                                    onDelete = {
+                                        val updated = localImages.filterNot { it.id == img.id }
+                                        saveImages(updated)
+                                        if (selectedImageId == img.id) selectedImageId = null
+                                    },
+                                    onDuplicate = {
+                                        val dup = img.copy(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            xRatio = (img.xRatio + 0.04f).coerceAtMost(0.85f),
+                                            yRatio = (img.yRatio + 0.04f).coerceAtMost(0.85f)
+                                        )
+                                        val updated = localImages + dup
+                                        saveImages(updated)
+                                        selectedImageId = dup.id
                                     }
                                 )
                             }
@@ -1565,6 +1799,24 @@ fun CanvasEditorScreen(
                                     onClick = {
                                         selectedStudioTool = StudioTool.LASSO
                                         Toast.makeText(context, "Lasso active: draw a loop around strokes to select", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.Category,
+                                    isSelected = selectedStudioTool == StudioTool.SHAPE,
+                                    onClick = {
+                                        selectedStudioTool = StudioTool.SHAPE
+                                        showShapeDialog = true
+                                    }
+                                )
+                                FloatingToolButton(
+                                    icon = Icons.Default.Adjust,
+                                    isSelected = selectedStudioTool == StudioTool.PRESENT,
+                                    onClick = {
+                                        selectedStudioTool = if (selectedStudioTool == StudioTool.PRESENT) StudioTool.PEN else StudioTool.PRESENT
+                                        if (selectedStudioTool == StudioTool.PRESENT) {
+                                            Toast.makeText(context, "Laser Presenter active (Neon glow)", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 )
                                 FloatingToolButton(
@@ -2512,8 +2764,28 @@ fun CanvasEditorScreen(
                         ) {
                             showDocumentMenu = false
                             if (totalPages > 1) {
-                                totalPages--
-                                Toast.makeText(context, "Page deleted", Toast.LENGTH_SHORT).show()
+                                val pageToDelete = currentPageIndex
+                                workspaceViewModel.deletePage(pageToDelete)
+                                val shiftedBoxes = localTextBoxes.mapNotNull { box ->
+                                    when {
+                                        box.pageIndex == pageToDelete -> null
+                                        box.pageIndex > pageToDelete -> box.copy(pageIndex = box.pageIndex - 1)
+                                        else -> box
+                                    }
+                                }
+                                saveTextBoxes(shiftedBoxes)
+
+                                val shiftedImages = localImages.mapNotNull { img ->
+                                    when {
+                                        img.pageIndex == pageToDelete -> null
+                                        img.pageIndex > pageToDelete -> img.copy(pageIndex = img.pageIndex - 1)
+                                        else -> img
+                                    }
+                                }
+                                saveImages(shiftedImages)
+
+                                totalPages = (totalPages - 1).coerceAtLeast(1)
+                                Toast.makeText(context, "Page ${pageToDelete + 1} deleted", Toast.LENGTH_SHORT).show()
                             } else {
                                 workspaceViewModel.confirmClearPage()
                                 Toast.makeText(context, "Page cleared", Toast.LENGTH_SHORT).show()
@@ -2789,13 +3061,54 @@ fun CanvasEditorScreen(
                                                 }
                                             }
                                             Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                text = "Page ${pageIdx + 1}",
-                                                color = if (isCurrent) Color(0xFF00BCD4) else Color.LightGray,
-                                                fontSize = 11.sp,
-                                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                                modifier = Modifier.padding(start = 2.dp)
-                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "Page ${pageIdx + 1}",
+                                                    color = if (isCurrent) Color(0xFF00BCD4) else Color.LightGray,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                                    modifier = Modifier.padding(start = 2.dp)
+                                                )
+                                                if (totalPages > 1) {
+                                                    IconButton(
+                                                        onClick = {
+                                                            workspaceViewModel.deletePage(pageIdx)
+                                                            val shiftedBoxes = localTextBoxes.mapNotNull { box ->
+                                                                when {
+                                                                    box.pageIndex == pageIdx -> null
+                                                                    box.pageIndex > pageIdx -> box.copy(pageIndex = box.pageIndex - 1)
+                                                                    else -> box
+                                                                }
+                                                            }
+                                                            saveTextBoxes(shiftedBoxes)
+
+                                                            val shiftedImages = localImages.mapNotNull { img ->
+                                                                when {
+                                                                    img.pageIndex == pageIdx -> null
+                                                                    img.pageIndex > pageIdx -> img.copy(pageIndex = img.pageIndex - 1)
+                                                                    else -> img
+                                                                }
+                                                            }
+                                                            saveImages(shiftedImages)
+
+                                                            totalPages = (totalPages - 1).coerceAtLeast(1)
+                                                            Toast.makeText(context, "Page ${pageIdx + 1} deleted", Toast.LENGTH_SHORT).show()
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.DeleteOutline,
+                                                            contentDescription = "Delete Page",
+                                                            tint = Color(0xFFFF5252).copy(alpha = 0.85f),
+                                                            modifier = Modifier.size(15.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
 
@@ -2917,6 +3230,30 @@ fun CanvasEditorScreen(
                     }
                 },
                 containerColor = Color(0xFF1E1E22)
+            )
+        }
+
+        if (showShapeDialog) {
+            ShapeSelectorDialog(
+                selectedShape = selectedShapeType,
+                strokeWidth = shapeStrokeWidth,
+                selectedColor = uiState.selectedColor,
+                onSelectShape = { selectedShapeType = it },
+                onSelectStrokeWidth = { shapeStrokeWidth = it },
+                onSelectColor = { workspaceViewModel.selectColor(it) },
+                onInsertShapeToPage = { shape, width, color ->
+                    val pageBaseW = with(density) { basePageWidth.toPx() } * canonicalScale
+                    val pageBaseH = with(density) { basePageHeight.toPx() } * canonicalScale
+                    val centerX = pageBaseW * 0.5f
+                    val centerY = pageBaseH * 0.4f
+                    val halfSize = min(pageBaseW, pageBaseH) * 0.22f
+                    val start = Offset(centerX - halfSize, centerY - halfSize)
+                    val end = Offset(centerX + halfSize, centerY + halfSize)
+                    val strokes = CanvasShapeGenerator.generateShapeStrokes(shape, start, end, width, color, currentPageIndex)
+                    strokes.forEach { workspaceViewModel.addStroke(it) }
+                    Toast.makeText(context, "${shape.label} inserted to Page ${currentPageIndex + 1}", Toast.LENGTH_SHORT).show()
+                },
+                onDismiss = { showShapeDialog = false }
             )
         }
 

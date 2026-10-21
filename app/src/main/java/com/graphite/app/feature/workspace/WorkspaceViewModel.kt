@@ -67,6 +67,28 @@ class WorkspaceViewModel : ViewModel() {
         }
     }
 
+    fun deletePage(pageIndexToDelete: Int) {
+        val currentStrokes = _uiState.value.strokes
+        val remainingStrokes = currentStrokes.mapNotNull { stroke ->
+            when {
+                stroke.pageIndex == pageIndexToDelete -> null
+                stroke.pageIndex > pageIndexToDelete -> stroke.copy(pageIndex = stroke.pageIndex - 1)
+                else -> stroke
+            }
+        }
+        historyManager.clear()
+        _uiState.update { current ->
+            current.copy(
+                strokes = remainingStrokes,
+                canUndo = false,
+                canRedo = false
+            )
+        }
+        currentNotebookId?.let { id ->
+            GraphiteRepository.updateNotebookStrokes(id, remainingStrokes)
+        }
+    }
+
     enum class EraserModeType {
         WHOLE_STROKE,
         PRECISION_AREA
