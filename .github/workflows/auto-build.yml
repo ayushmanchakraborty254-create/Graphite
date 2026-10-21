@@ -53,6 +53,13 @@ jobs:
           cp "$APK_PATH" Graphite-v1.0.0.apk
           ls -lh Graphite-v1.0.0.apk
 
+      - name: Remove Old Release Assets
+        run: |
+          gh release delete-asset latest Graphite-latest.apk --yes || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Update Latest Release
         uses: softprops/action-gh-release@v2
         with:
