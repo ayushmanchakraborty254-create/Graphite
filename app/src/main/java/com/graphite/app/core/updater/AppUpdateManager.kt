@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -181,12 +182,15 @@ class AppUpdateManager(
         }
     }
 
+    private var downloadJob: kotlinx.coroutines.Job? = null
+
     /**
      * Downloads the latest APK and launches the system installer.
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
         _updateState.value = UpdateState.Downloading(0)
-        CoroutineScope(Dispatchers.IO).launch {
+        downloadJob?.cancel()
+        downloadJob = CoroutineScope(Dispatchers.IO).launch {
             try {
                 val request = Request.Builder()
                     .url(downloadUrl)
@@ -230,16 +234,31 @@ class AppUpdateManager(
                     installApk(context, apkFile)
                 }
             } catch (e: Exception) {
-                _updateState.value = UpdateState.Error("Download failed: ${e.message}")
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    _updateState.value = UpdateState.Error("Download failed: ${e.message}")
+                }
             }
         }
     }
 
+    fun cancelDownload(context: Context? = null, sha: String? = null) {
+        downloadJob?.cancel()
+        downloadJob = null
+        if (context != null) {
+            try {
+                val apkFile = File(context.cacheDir, "Graphite-update.apk")
+                if (apkFile.exists()) apkFile.delete()
+            } catch (_: Exception) {}
+        }
+        dismissUpdate(context, sha)
+    }
+
     fun dismissUpdate(context: Context? = null, sha: String? = null) {
-        if (context != null && !sha.isNullOrBlank()) {
+        val targetSha = sha ?: (_updateState.value as? UpdateState.Available)?.info?.commitSha
+        if (context != null && !targetSha.isNullOrBlank()) {
             context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
                 .edit()
-                .putLong("snoozed_until_${sha}", System.currentTimeMillis() + 30 * 60 * 1000L) // snooze 30 mins
+                .putLong("snoozed_until_${targetSha}", System.currentTimeMillis() + 30 * 60 * 1000L) // snooze 30 mins
                 .remove("dismissed_sha") // clear legacy permanent blacklist
                 .apply()
         }
@@ -304,13 +323,29 @@ fun AppUpdateModalDialog(
                     )
                 },
                 title = {
-                    Text(
-                        text = "🚀 New Update Available!",
-                        color = Color.White,
-                        fontSize = 19.sp,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "🚀 New Update Available!",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { updateManager.dismissUpdate(context, state.info.commitSha) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = Color.LightGray
+                            )
+                        }
+                    }
                 },
                 text = {
                     Column(
@@ -355,14 +390,30 @@ fun AppUpdateModalDialog(
         }
         is UpdateState.Downloading -> {
             AlertDialog(
-                onDismissRequest = {},
+                onDismissRequest = { updateManager.cancelDownload(context) },
                 title = {
-                    Text(
-                        text = "Downloading Update...",
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Downloading Update...",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        IconButton(
+                            onClick = { updateManager.cancelDownload(context) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel Download",
+                                tint = Color.LightGray
+                            )
+                        }
+                    }
                 },
                 text = {
                     Column(
@@ -383,21 +434,41 @@ fun AppUpdateModalDialog(
                         )
                     }
                 },
-                confirmButton = {},
+                confirmButton = {
+                    TextButton(onClick = { updateManager.cancelDownload(context) }) {
+                        Text("Cancel", color = Color(0xFFFF5252))
+                    }
+                },
                 containerColor = GraphiteSurfaceVariant,
                 shape = RoundedCornerShape(16.dp)
             )
         }
         is UpdateState.ReadyToInstall -> {
             AlertDialog(
-                onDismissRequest = { updateManager.dismissUpdate() },
+                onDismissRequest = { updateManager.dismissUpdate(context) },
                 title = {
-                    Text(
-                        text = "Update Ready to Install",
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Update Ready to Install",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        IconButton(
+                            onClick = { updateManager.dismissUpdate(context) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = Color.LightGray
+                            )
+                        }
+                    }
                 },
                 text = {
                     Text(
@@ -409,9 +480,15 @@ fun AppUpdateModalDialog(
                 confirmButton = {
                     Button(
                         onClick = { updateManager.installApk(context, state.apkFile) },
-                        colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                        colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                        shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text("Install", color = Color.White)
+                        Text("Install", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { updateManager.dismissUpdate(context) }) {
+                        Text("Later", color = Color.Gray)
                     }
                 },
                 containerColor = GraphiteSurfaceVariant,
@@ -420,11 +497,11 @@ fun AppUpdateModalDialog(
         }
         is UpdateState.Error -> {
             AlertDialog(
-                onDismissRequest = { updateManager.dismissUpdate() },
+                onDismissRequest = { updateManager.dismissUpdate(context) },
                 title = { Text("Update Error", color = Color.White) },
                 text = { Text(state.message, color = Color.LightGray) },
                 confirmButton = {
-                    Button(onClick = { updateManager.dismissUpdate() }) {
+                    Button(onClick = { updateManager.dismissUpdate(context) }) {
                         Text("OK")
                     }
                 },
