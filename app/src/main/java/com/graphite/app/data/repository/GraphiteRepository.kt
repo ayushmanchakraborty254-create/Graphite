@@ -92,7 +92,18 @@ object GraphiteRepository {
      */
     fun setActiveUser(userId: String?) {
         activeUserId = userId
-        val currentUid = userId ?: "guest"
+
+        if (userId == null) {
+            // Unauthenticated state: completely clear visible notebooks and books!
+            _notebooks.value = emptyList()
+            _books.value = emptyList()
+            _stats.update {
+                it.copy(notesCount = 0, totalBooks = 0)
+            }
+            return
+        }
+
+        val currentUid = userId
 
         // 1. Partitioned Notes: Load user or guest notes
         val userNotes = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
@@ -783,9 +794,14 @@ object GraphiteRepository {
                         userNotebooksMap[uid] = list
                     }
                 }
-                val currentUid = activeUserId ?: "guest"
-                _notebooks.value = (userNotebooksMap[currentUid] ?: userNotebooksMap["default"] ?: emptyList()).filter { !it.isDeleted }
-                _stats.update { it.copy(notesCount = _notebooks.value.size) }
+                if (activeUserId == null) {
+                    _notebooks.value = emptyList()
+                    _stats.update { it.copy(notesCount = 0) }
+                } else {
+                    val currentUid = activeUserId!!
+                    _notebooks.value = (userNotebooksMap[currentUid] ?: emptyList()).filter { !it.isDeleted }
+                    _stats.update { it.copy(notesCount = _notebooks.value.size) }
+                }
             }
 
             val booksFile = File(context.filesDir, "graphite_books_storage.json")
@@ -823,9 +839,14 @@ object GraphiteRepository {
                         userBooksMap[currentUid] = list.toMutableList()
                     }
                 }
-                val currentUid = activeUserId ?: "guest"
-                _books.value = userBooksMap[currentUid] ?: userBooksMap["guest"] ?: emptyList()
-                _stats.update { it.copy(totalBooks = _books.value.size) }
+                if (activeUserId == null) {
+                    _books.value = emptyList()
+                    _stats.update { it.copy(totalBooks = 0) }
+                } else {
+                    val currentUid = activeUserId!!
+                    _books.value = userBooksMap[currentUid] ?: emptyList()
+                    _stats.update { it.copy(totalBooks = _books.value.size) }
+                }
             }
             cleanBookDuplicatesAndGhosts()
         } catch (e: Exception) {

@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.graphite.app.GraphiteApplication
+import com.graphite.app.core.auth.AccountRequiredDialog
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
 import com.graphite.app.core.drive.BookshelfSyncReport
 import com.graphite.app.core.drive.DriveFolder
@@ -65,6 +66,20 @@ fun BookshelfScreen(
     val scope = rememberCoroutineScope()
     val fileImportManager = remember { GraphiteApplication.instance.fileImportManager }
     val driveManager = remember { GraphiteApplication.instance.googleDriveManager }
+
+    val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
+    val googleUser by googleAccountManager.currentUser.collectAsState()
+    val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
+    val hasActiveSession = googleUser != null || isGuestMode
+
+    var showAccountRequiredDialog by remember { mutableStateOf(false) }
+    var pendingAccountAction by remember { mutableStateOf("import books") }
+
+    val googleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        googleAccountManager.handleSignInResult(result.data)
+    }
 
     var selectedCategory by remember { mutableStateOf("All Books") }
     var categoryMenuExpanded by remember { mutableStateOf(false) }
@@ -263,7 +278,14 @@ fun BookshelfScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Google Drive 2-Way Sync Button
                     val isSynced = driveManager.hasBookshelfSyncConfigured()
-                    IconButton(onClick = { showDriveSyncDialog = true }) {
+                    IconButton(onClick = {
+                        if (!hasActiveSession) {
+                            pendingAccountAction = "sync books with Google Drive"
+                            showAccountRequiredDialog = true
+                        } else {
+                            showDriveSyncDialog = true
+                        }
+                    }) {
                         Box {
                             Icon(
                                 imageVector = Icons.Default.CloudSync,
@@ -430,17 +452,31 @@ fun BookshelfScreen(
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = if (searchQuery.isNotBlank()) "No matching PDF books" else "No PDF books in Bookshelf",
-                            color = Color.Gray,
+                            text = if (!hasActiveSession) "Account Required" else if (searchQuery.isNotBlank()) "No matching PDF books" else "No PDF books in Bookshelf",
+                            color = Color.White,
                             fontSize = 16.sp,
-                            fontWeight = FontWeight.Medium
+                            fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = if (searchQuery.isNotBlank()) "Try a different search query" else "Tap + to import a PDF document or sync with Google Drive",
-                            color = Color(0xFF666666),
-                            fontSize = 13.sp
+                            text = if (!hasActiveSession) "Sign in with Google to sync your reading library with Drive, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Tap + to import a PDF document or sync with Google Drive",
+                            color = Color(0xFF9E9E9E),
+                            fontSize = 13.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
+                        if (!hasActiveSession) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Button(
+                                onClick = {
+                                    pendingAccountAction = "access your books"
+                                    showAccountRequiredDialog = true
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Sign In / Guest Account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                        }
                     }
                 }
             } else {
@@ -528,7 +564,12 @@ fun BookshelfScreen(
         // Floating Action Button (FAB) matching Page 2
         FloatingActionButton(
             onClick = {
-                fileImportLauncher.launch(arrayOf("application/pdf"))
+                if (!hasActiveSession) {
+                    pendingAccountAction = "import PDF books"
+                    showAccountRequiredDialog = true
+                } else {
+                    fileImportLauncher.launch(arrayOf("application/pdf"))
+                }
             },
             containerColor = GraphiteOrange,
             contentColor = Color.White,
@@ -642,6 +683,22 @@ fun BookshelfScreen(
             },
             containerColor = GraphiteSurfaceVariant,
             shape = RoundedCornerShape(14.dp)
+        )
+    }
+
+    if (showAccountRequiredDialog) {
+        AccountRequiredDialog(
+            onDismiss = { showAccountRequiredDialog = false },
+            onSignInWithGoogle = {
+                showAccountRequiredDialog = false
+                val intent = googleAccountManager.getSignInIntent(context)
+                googleSignInLauncher.launch(intent)
+            },
+            onContinueAsGuest = {
+                showAccountRequiredDialog = false
+                googleAccountManager.enableGuestMode()
+            },
+            actionDescription = pendingAccountAction
         )
     }
 }

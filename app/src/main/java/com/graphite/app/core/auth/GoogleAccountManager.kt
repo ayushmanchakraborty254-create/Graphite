@@ -37,8 +37,26 @@ class GoogleAccountManager(
     private val _currentUser = MutableStateFlow<GoogleProfile?>(null)
     val currentUser: StateFlow<GoogleProfile?> = _currentUser.asStateFlow()
 
+    private val _isGuestMode = MutableStateFlow(false)
+    val isGuestMode: StateFlow<Boolean> = _isGuestMode.asStateFlow()
+
     init {
         restoreFromStorage()
+    }
+
+    fun hasActiveSession(): Boolean = _currentUser.value != null || _isGuestMode.value
+
+    fun enableGuestMode() {
+        secureStorage.putBoolean("is_guest_mode", true)
+        _isGuestMode.value = true
+        _currentUser.value = null
+        graphiteRepository.setActiveUser("guest")
+    }
+
+    fun disableGuestMode() {
+        secureStorage.putBoolean("is_guest_mode", false)
+        _isGuestMode.value = false
+        graphiteRepository.setActiveUser(null)
     }
 
     private fun restoreFromStorage() {
@@ -48,6 +66,7 @@ class GoogleAccountManager(
         val name = secureStorage.getString(KEY_GOOGLE_NAME)
         val photoUrl = secureStorage.getString(KEY_GOOGLE_PHOTO)
         val idToken = secureStorage.getString(KEY_GOOGLE_ID_TOKEN)
+        val isGuestSaved = secureStorage.getBoolean("is_guest_mode", false)
 
         if (!email.isNullOrBlank()) {
             val displayName = if (!name.isNullOrBlank()) name else email.substringBefore("@")
@@ -57,6 +76,7 @@ class GoogleAccountManager(
                 photoUrl = photoUrl,
                 idToken = idToken
             )
+            _isGuestMode.value = false
             graphiteRepository.setActiveUser(email)
             try {
                 com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
@@ -69,6 +89,14 @@ class GoogleAccountManager(
                     user = SupabaseUser(id = deterministicUuid, email = email)
                 )
             )
+        } else if (isGuestSaved) {
+            _currentUser.value = null
+            _isGuestMode.value = true
+            graphiteRepository.setActiveUser("guest")
+        } else {
+            _currentUser.value = null
+            _isGuestMode.value = false
+            graphiteRepository.setActiveUser(null)
         }
     }
 
@@ -119,8 +147,10 @@ class GoogleAccountManager(
             secureStorage.putString(KEY_GOOGLE_PHOTO, photoUrl)
             secureStorage.putString(KEY_GOOGLE_ID_TOKEN, idToken)
             secureStorage.putString("google_drive_authorized_account_email", email)
+            secureStorage.putBoolean("is_guest_mode", false)
 
             _currentUser.value = profile
+            _isGuestMode.value = false
             graphiteRepository.setActiveUser(email)
             try {
                 com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
@@ -177,7 +207,9 @@ class GoogleAccountManager(
         secureStorage.putString(KEY_GOOGLE_PHOTO, profile.photoUrl)
         secureStorage.putString(KEY_GOOGLE_ID_TOKEN, profile.idToken)
         secureStorage.putString("google_drive_authorized_account_email", profile.email)
+        secureStorage.putBoolean("is_guest_mode", false)
         _currentUser.value = profile
+        _isGuestMode.value = false
 
         val userUid = profile.email
         graphiteRepository.setActiveUser(userUid)
@@ -208,9 +240,11 @@ class GoogleAccountManager(
         secureStorage.remove(KEY_GOOGLE_NAME)
         secureStorage.remove(KEY_GOOGLE_PHOTO)
         secureStorage.remove(KEY_GOOGLE_ID_TOKEN)
+        secureStorage.putBoolean("is_guest_mode", false)
         _currentUser.value = null
+        _isGuestMode.value = false
         supabaseAuthManager?.clearSession()
-        graphiteRepository.clearActiveUserWorkspace()
+        graphiteRepository.setActiveUser(null)
     }
 
     companion object {

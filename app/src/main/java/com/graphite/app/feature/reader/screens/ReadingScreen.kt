@@ -12,12 +12,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.graphite.app.GraphiteApplication
+import com.graphite.app.core.auth.AccountRequiredDialog
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
 import com.graphite.app.core.theme.GraphiteBlack
 import com.graphite.app.core.theme.GraphiteOrange
@@ -32,6 +37,20 @@ fun ReadingScreen(
     modifier: Modifier = Modifier
 ) {
     val books by GraphiteRepository.books.collectAsState()
+    val context = LocalContext.current
+    val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
+    val googleUser by googleAccountManager.currentUser.collectAsState()
+    val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
+    val hasActiveSession = googleUser != null || isGuestMode
+
+    var showAccountRequiredDialog by remember { mutableStateOf(false) }
+
+    val googleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        googleAccountManager.handleSignInResult(result.data)
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     var showSearchBar by remember { mutableStateOf(false) }
     var isGridView by remember { mutableStateOf(false) }
@@ -124,17 +143,28 @@ fun ReadingScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = if (searchQuery.isNotBlank()) "No matching recent books" else "No recent books",
-                        color = Color.Gray,
+                        text = if (!hasActiveSession) "Account Required" else if (searchQuery.isNotBlank()) "No matching recent books" else "No recent books",
+                        color = Color.White,
                         fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (searchQuery.isNotBlank()) "Try a different search query" else "Your opened and imported PDF books will appear here",
-                        color = Color(0xFF666666),
-                        fontSize = 13.sp
+                        text = if (!hasActiveSession) "Sign in with Google to sync your reading library, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Your opened and imported PDF books will appear here",
+                        color = Color(0xFF9E9E9E),
+                        fontSize = 13.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
+                    if (!hasActiveSession) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Button(
+                            onClick = { showAccountRequiredDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Sign In / Guest Account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
                 }
             }
         } else if (isGridView) {
@@ -198,6 +228,22 @@ fun ReadingScreen(
                 }
             }
         }
+    }
+
+    if (showAccountRequiredDialog) {
+        AccountRequiredDialog(
+            onDismiss = { showAccountRequiredDialog = false },
+            onSignInWithGoogle = {
+                showAccountRequiredDialog = false
+                val intent = googleAccountManager.getSignInIntent(context)
+                googleSignInLauncher.launch(intent)
+            },
+            onContinueAsGuest = {
+                showAccountRequiredDialog = false
+                googleAccountManager.enableGuestMode()
+            },
+            actionDescription = "access your reading library"
+        )
     }
 }
 

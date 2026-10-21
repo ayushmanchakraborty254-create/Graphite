@@ -11,6 +11,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -50,7 +52,9 @@ fun GoogleProfileTopBarIcon(
     val context = LocalContext.current
     val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
     val googleUser by googleAccountManager.currentUser.collectAsState()
+    val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
     var showProfileDialog by remember { mutableStateOf(false) }
+    var showGuestDialog by remember { mutableStateOf(false) }
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -125,6 +129,44 @@ fun GoogleProfileTopBarIcon(
                 )
             }
         }
+    } else if (isGuestMode) {
+        // Guest mode: Sleek "Guest" badge
+        Surface(
+            modifier = modifier
+                .height(32.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .clickable { showGuestDialog = true },
+            color = Color(0xFF252525),
+            shape = RoundedCornerShape(16.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF4A4A4A))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF383838)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = "Guest",
+                        tint = Color(0xFFFFB74D),
+                        modifier = Modifier.size(12.dp)
+                    )
+                }
+                Text(
+                    text = "Guest",
+                    color = Color(0xFFE0E0E0),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
     } else {
         // Not signed in: Sleek Google Sign-In button
         Surface(
@@ -182,6 +224,256 @@ fun GoogleProfileTopBarIcon(
             }
         )
     }
+
+    if (showGuestDialog) {
+        GuestAccountDialog(
+            onDismiss = { showGuestDialog = false },
+            onSignInWithGoogle = {
+                showGuestDialog = false
+                val intent = googleAccountManager.getSignInIntent(context)
+                googleSignInLauncher.launch(intent)
+            },
+            onExitGuest = {
+                showGuestDialog = false
+                googleAccountManager.disableGuestMode()
+            }
+        )
+    }
+}
+
+/**
+ * Guest Account info and options dialog.
+ */
+@Composable
+fun GuestAccountDialog(
+    onDismiss: () -> Unit,
+    onSignInWithGoogle: () -> Unit,
+    onExitGuest: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = null,
+                    tint = Color(0xFFFFB74D),
+                    modifier = Modifier.size(24.dp)
+                )
+                Text(
+                    text = "Guest Account",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    text = "You are currently in offline Guest Mode. Notes and books are saved locally on this device only without cloud backup.",
+                    color = Color(0xFFB0B0B0),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+
+                Button(
+                    onClick = onSignInWithGoogle,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = GoogleBlue)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(Color.White),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("G", color = GoogleBlue, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Sign in with Google", color = Color.White, fontSize = 13.sp)
+                }
+
+                OutlinedButton(
+                    onClick = onExitGuest,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF552222))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ExitToApp,
+                        contentDescription = null,
+                        tint = Color(0xFFFF5252),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Exit Guest Mode", color = Color(0xFFFF5252), fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+/**
+ * Universal "Account Required" Dialog prompted when an unauthenticated user
+ * attempts to create, import, export, or add notes, books, or PDFs.
+ */
+@Composable
+fun AccountRequiredDialog(
+    onDismiss: () -> Unit,
+    onSignInWithGoogle: () -> Unit,
+    onContinueAsGuest: () -> Unit,
+    actionDescription: String = "perform this action"
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = null,
+                    tint = GoogleBlue,
+                    modifier = Modifier.size(24.dp)
+                )
+                Text(
+                    text = "Account Required",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "To $actionDescription, please sign in with your Google Account or use an offline Guest Account.",
+                    color = Color(0xFFCCCCCC),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+
+                // Option 1: Google Sign In
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onSignInWithGoogle() },
+                    color = Color(0xFF1E1E1E),
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GoogleBlue.copy(alpha = 0.5f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color.White),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "G",
+                                color = GoogleBlue,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "Sign in with Google",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = "Sync with Google Drive & cloud backup",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                // Option 2: Guest Account
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onContinueAsGuest() },
+                    color = Color(0xFF1E1E1E),
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF383838))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF333333)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = Color(0xFFFFB74D),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "Use Guest Account",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = "Offline local storage only (no cloud sync)",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant,
+        shape = RoundedCornerShape(16.dp)
+    )
 }
 
 /**

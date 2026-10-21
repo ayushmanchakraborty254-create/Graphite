@@ -13,6 +13,8 @@ interface SecureStorage {
     fun putString(key: String, value: String?)
     fun getLong(key: String, defaultValue: Long = 0L): Long
     fun putLong(key: String, value: Long)
+    fun getBoolean(key: String, defaultValue: Boolean = false): Boolean
+    fun putBoolean(key: String, value: Boolean)
     fun remove(key: String)
     fun clear()
 
@@ -67,6 +69,14 @@ private class SharedPreferencesSecureStorage(
         prefs.edit().putLong(key, value).apply()
     }
 
+    override fun getBoolean(key: String, defaultValue: Boolean): Boolean {
+        return prefs.getBoolean(key, defaultValue)
+    }
+
+    override fun putBoolean(key: String, value: Boolean) {
+        prefs.edit().putBoolean(key, value).apply()
+    }
+
     override fun remove(key: String) {
         prefs.edit().remove(key).apply()
     }
@@ -92,6 +102,14 @@ class InMemorySecureStorage : SecureStorage {
     }
 
     override fun putLong(key: String, value: Long) {
+        store[key] = value
+    }
+
+    override fun getBoolean(key: String, defaultValue: Boolean): Boolean {
+        return (store[key] as? Boolean) ?: defaultValue
+    }
+
+    override fun putBoolean(key: String, value: Boolean) {
         store[key] = value
     }
 

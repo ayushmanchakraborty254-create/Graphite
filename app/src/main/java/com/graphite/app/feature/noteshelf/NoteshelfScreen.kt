@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.graphite.app.GraphiteApplication
+import com.graphite.app.core.auth.AccountRequiredDialog
 import com.graphite.app.core.auth.GoogleProfileTopBarIcon
 import com.graphite.app.core.drive.DriveUploadState
 import com.graphite.app.core.importer.ImportResult
@@ -87,6 +88,20 @@ fun NoteshelfScreen(
     val isTablet = configuration.screenWidthDp >= 600
     val syncManager = remember { GraphiteApplication.instance.supabaseSyncManager }
     var isSyncingNotes by remember { mutableStateOf(false) }
+
+    val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
+    val googleUser by googleAccountManager.currentUser.collectAsState()
+    val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
+    val hasActiveSession = googleUser != null || isGuestMode
+
+    var showAccountRequiredDialog by remember { mutableStateOf(false) }
+    var pendingAccountAction by remember { mutableStateOf("create a notebook") }
+
+    val googleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        googleAccountManager.handleSignInResult(result.data)
+    }
 
     LaunchedEffect(Unit) {
         syncManager.triggerAutoSync(debounceMs = 0L)
@@ -575,7 +590,14 @@ fun NoteshelfScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { showCreationOptionsSheet = true }) {
+                    IconButton(onClick = {
+                        if (!hasActiveSession) {
+                            pendingAccountAction = "create a notebook"
+                            showAccountRequiredDialog = true
+                        } else {
+                            showCreationOptionsSheet = true
+                        }
+                    }) {
                         Icon(
                             imageVector = Icons.Default.AddCircle,
                             contentDescription = "Add Notebook",
@@ -593,14 +615,19 @@ fun NoteshelfScreen(
 
                     IconButton(
                         onClick = {
-                            isSyncingNotes = true
-                            scope.launch {
-                                val sResult = syncManager.syncNotes()
-                                isSyncingNotes = false
-                                if (sResult.isSuccess) {
-                                    Toast.makeText(context, "Synced ${sResult.getOrNull()} notes with Supabase", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Sync error: ${sResult.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_SHORT).show()
+                            if (!hasActiveSession) {
+                                pendingAccountAction = "sync notes"
+                                showAccountRequiredDialog = true
+                            } else {
+                                isSyncingNotes = true
+                                scope.launch {
+                                    val sResult = syncManager.syncNotes()
+                                    isSyncingNotes = false
+                                    if (sResult.isSuccess) {
+                                        Toast.makeText(context, "Synced ${sResult.getOrNull()} notes with Supabase", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Sync error: ${sResult.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         },
@@ -751,8 +778,18 @@ fun NoteshelfScreen(
                         iconTint = Color(0xFFFFD54F),
                         modifier = Modifier.weight(1f),
                         onClick = {
-                            val quickNote = GraphiteRepository.createNotebook("Quick Note")
-                            onOpenNotebook(quickNote.id)
+                            if (!hasActiveSession) {
+                                pendingAccountAction = "create a quick note"
+                                showAccountRequiredDialog = true
+                            } else {
+                                val quickNote = GraphiteRepository.createNotebook(
+                                    title = "Quick Note",
+                                    mimeType = "text/keep",
+                                    initialPreviewLines = listOf("Tap to start typing your note..."),
+                                    cover = NotebookCover(category = "NONE")
+                                )
+                                onOpenNotebook(quickNote.id)
+                            }
                         }
                     )
                     QuickActionCard(
@@ -760,7 +797,14 @@ fun NoteshelfScreen(
                         icon = Icons.Default.Book,
                         iconTint = Color(0xFF81C784),
                         modifier = Modifier.weight(1f),
-                        onClick = { showCreationOptionsSheet = true }
+                        onClick = {
+                            if (!hasActiveSession) {
+                                pendingAccountAction = "create a notebook"
+                                showAccountRequiredDialog = true
+                            } else {
+                                showCreationOptionsSheet = true
+                            }
+                        }
                     )
                 }
             }
@@ -794,8 +838,13 @@ fun NoteshelfScreen(
             if (selectedCategory == "Templates") {
                 TemplatesGrid(
                     onCreateFromTemplate = { title, paperStyle ->
-                        val newNote = GraphiteRepository.createNotebook(title, paperStyle = paperStyle)
-                        onOpenNotebook(newNote.id)
+                        if (!hasActiveSession) {
+                            pendingAccountAction = "create a notebook from template"
+                            showAccountRequiredDialog = true
+                        } else {
+                            val newNote = GraphiteRepository.createNotebook(title, paperStyle = paperStyle)
+                            onOpenNotebook(newNote.id)
+                        }
                     }
                 )
             } else {
@@ -836,18 +885,31 @@ fun NoteshelfScreen(
                             }
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
-                                text = if (selectedCategory == "Recordings") "No audio recordings yet" else "No notebooks found",
+                                text = if (!hasActiveSession) "Account Required" else if (selectedCategory == "Recordings") "No audio recordings yet" else "No notebooks found",
                                 color = Color.White,
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = if (selectedCategory == "Recordings") "Voice notes and audio clips recorded in your notebooks will appear here." else "Tap New Notebook or Quick Note above to create one.",
+                                text = if (!hasActiveSession) "Sign in with Google to sync notes across devices or use a Guest Account for offline notes." else if (selectedCategory == "Recordings") "Voice notes and audio clips recorded in your notebooks will appear here." else "Tap New Notebook or Quick Note above to create one.",
                                 color = Color.Gray,
                                 fontSize = 13.sp,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
+                            if (!hasActiveSession) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Button(
+                                    onClick = {
+                                        pendingAccountAction = "access your notes"
+                                        showAccountRequiredDialog = true
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Sign In / Guest Account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
                         }
                     }
                 } else if (isListView) {
@@ -1113,7 +1175,8 @@ fun NoteshelfScreen(
                                 val textNote = GraphiteRepository.createNotebook(
                                     title = "Text Note $count",
                                     mimeType = "text/keep",
-                                    initialPreviewLines = listOf("Tap to start typing your note...")
+                                    initialPreviewLines = listOf("Tap to start typing your note..."),
+                                    cover = NotebookCover(category = "NONE")
                                 )
                                 onOpenNotebook(textNote.id)
                             }
@@ -1284,7 +1347,22 @@ fun NoteshelfScreen(
                 }
             },
             containerColor = GraphiteSurfaceVariant,
-            shape = RoundedCornerShape(14.dp)
+        )
+    }
+
+    if (showAccountRequiredDialog) {
+        AccountRequiredDialog(
+            onDismiss = { showAccountRequiredDialog = false },
+            onSignInWithGoogle = {
+                showAccountRequiredDialog = false
+                val intent = googleAccountManager.getSignInIntent(context)
+                googleSignInLauncher.launch(intent)
+            },
+            onContinueAsGuest = {
+                showAccountRequiredDialog = false
+                googleAccountManager.enableGuestMode()
+            },
+            actionDescription = pendingAccountAction
         )
     }
 }
@@ -1456,7 +1534,10 @@ private fun NotebookThumbnailCard(
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
     val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pptx", ignoreCase = true) == true
-    val isKeepText = notebook.mimeType == "text/keep"
+    val isKeepText = notebook.mimeType == "text/keep" ||
+            notebook.mimeType?.startsWith("text/") == true ||
+            notebook.title.startsWith("Quick Note", ignoreCase = true) ||
+            notebook.title.startsWith("Text Note", ignoreCase = true)
 
     Column(
         modifier = Modifier
@@ -1584,12 +1665,87 @@ private fun NotebookThumbnailCard(
                             fontWeight = FontWeight.Medium
                         )
                     }
-                } else if (notebook.cover.category != "NONE") {
-                    NotebookCoverView(
-                        cover = notebook.cover,
-                        modifier = Modifier.fillMaxSize(),
-                        isThumbnail = true
-                    )
+                } else if (isKeepText) {
+                    // Google Keep style checklist / text note thumbnail (NEVER shows artificial cover)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color(0xFF333333))
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                Text("NOTE", color = Color(0xFFFFB74D), fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (notebook.isStarred) {
+                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
+                            }
+                        }
+
+                        if (notebook.previewLines.isEmpty()) {
+                            Text(
+                                text = "Tap to type note...",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                            )
+                        } else {
+                            notebook.previewLines.take(4).forEach { line ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                ) {
+                                    if (line.startsWith("[x] ")) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckBox,
+                                            contentDescription = null,
+                                            tint = GraphiteOrange,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = line.removePrefix("[x] "),
+                                            color = Color.Gray,
+                                            fontSize = 10.sp,
+                                            maxLines = 1,
+                                            textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough
+                                        )
+                                    } else if (line.startsWith("[ ] ")) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckBoxOutlineBlank,
+                                            contentDescription = null,
+                                            tint = Color.LightGray,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = line.removePrefix("[ ] "),
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            maxLines = 1
+                                        )
+                                    } else {
+                                        Text(
+                                            text = line,
+                                            color = Color.LightGray,
+                                            fontSize = 10.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else if (isDoc) {
                     // Word / PPTX Document Layout
                     val isPpt = notebook.filePath?.endsWith(".pptx", true) == true
@@ -1631,78 +1787,12 @@ private fun NotebookThumbnailCard(
                             fontSize = 11.sp
                         )
                     }
-                } else if (isKeepText) {
-                    // Google Keep style checklist thumbnail
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(Color(0xFF333333))
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            ) {
-                                Text("LIST", color = Color(0xFFFFB74D), fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                            }
-                            if (notebook.isStarred) {
-                                Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(14.dp))
-                            }
-                        }
-
-                        notebook.previewLines.take(4).forEach { line ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(vertical = 2.dp)
-                            ) {
-                                if (line.startsWith("[x] ")) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckBox,
-                                        contentDescription = null,
-                                        tint = GraphiteOrange,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = line.removePrefix("[x] "),
-                                        color = Color.Gray,
-                                        fontSize = 10.sp,
-                                        maxLines = 1,
-                                        textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough
-                                    )
-                                } else if (line.startsWith("[ ] ")) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckBoxOutlineBlank,
-                                        contentDescription = null,
-                                        tint = Color.LightGray,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = line.removePrefix("[ ] "),
-                                        color = Color.White,
-                                        fontSize = 10.sp,
-                                        maxLines = 1
-                                    )
-                                } else {
-                                    Text(
-                                        text = line,
-                                        color = Color.LightGray,
-                                        fontSize = 10.sp,
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }
+                } else if (notebook.cover.category != "NONE") {
+                    NotebookCoverView(
+                        cover = notebook.cover,
+                        modifier = Modifier.fillMaxSize(),
+                        isThumbnail = true
+                    )
                 } else {
                     // Handwritten Lined Paper Notebook Layout
                     Column(

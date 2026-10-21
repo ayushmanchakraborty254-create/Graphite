@@ -50,6 +50,7 @@ fun MeScreen(
 
     val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
     val googleUser by googleAccountManager.currentUser.collectAsState()
+    val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
     val authManager = remember { GraphiteApplication.instance.supabaseAuthManager }
     val syncManager = remember { GraphiteApplication.instance.supabaseSyncManager }
     val driveManager = remember { GraphiteApplication.instance.googleDriveManager }
@@ -376,6 +377,84 @@ fun MeScreen(
                             onClick = { driveManager.disconnect() }
                         ) {
                             Text("Disconnect", color = Color(0xFFFF5252), fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = GraphiteOutline, thickness = 0.5.dp)
+
+                // 3. Guest Account Section
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isGuestMode) Color(0xFFFFB74D) else Color(0xFF333333)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = if (isGuestMode) Color.Black else Color.Gray,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Guest Account",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Text(
+                            text = when {
+                                isGuestMode -> "Active: Local offline storage only (no cloud sync)"
+                                googleUser != null -> "Inactive (Signed in with Google Account)"
+                                else -> "Use offline without signing in"
+                            },
+                            color = if (isGuestMode) Color(0xFFFFB74D) else Color.Gray,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+
+                    when {
+                        isGuestMode -> {
+                            OutlinedButton(
+                                onClick = { googleAccountManager.disableGuestMode() },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF552222)),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("Exit Guest", fontSize = 12.sp, color = Color(0xFFFF5252))
+                            }
+                        }
+                        googleUser == null -> {
+                            Button(
+                                onClick = { googleAccountManager.enableGuestMode() },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF383838)),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text("Use Guest", fontSize = 12.sp, color = Color.White)
+                            }
+                        }
+                        else -> {
+                            TextButton(
+                                onClick = {
+                                    googleAccountManager.signOut(context) {
+                                        googleAccountManager.enableGuestMode()
+                                    }
+                                }
+                            ) {
+                                Text("Switch to Guest", color = Color.Gray, fontSize = 12.sp)
+                            }
                         }
                     }
                 }
