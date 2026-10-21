@@ -72,6 +72,24 @@ fun CanvasImageOverlayItem(
 
     var showOpacitySlider by remember { mutableStateOf(false) }
     var showContextMenu by remember { mutableStateOf(false) }
+    var showCropDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isSelected) {
+        if (!isSelected) {
+            showOpacitySlider = false
+            showContextMenu = false
+        }
+    }
+
+    if (showCropDialog) {
+        CanvasImageCropDialog(
+            image = image,
+            onDismiss = { showCropDialog = false },
+            onApplyCrop = { newPath, newW, newH ->
+                onUpdate(image.copy(filePath = newPath, widthRatio = newW, heightRatio = newH))
+            }
+        )
+    }
 
     // Root wrapper
     Box(
@@ -113,7 +131,7 @@ fun CanvasImageOverlayItem(
             Image(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Canvas Image",
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -291,15 +309,12 @@ fun CanvasImageOverlayItem(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        // 1. Crop / Circle Mask
+                        // 1. Crop Dialog
                         IconButton(
-                            onClick = {
-                                onUpdate(image.copy(isCircleCrop = !image.isCircleCrop))
-                                Toast.makeText(context, if (!image.isCircleCrop) "Circle mask applied" else "Rectangle restored", Toast.LENGTH_SHORT).show()
-                            },
+                            onClick = { showCropDialog = true },
                             modifier = Modifier.size(30.dp)
                         ) {
-                            Icon(Icons.Default.Crop, contentDescription = "Crop", tint = if (image.isCircleCrop) Color(0xFF2196F3) else Color.White, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.Crop, contentDescription = "Crop", tint = if (showCropDialog) Color(0xFF2196F3) else Color.White, modifier = Modifier.size(16.dp))
                         }
 
                         // 2. Corner shape / Circle indicator

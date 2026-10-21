@@ -5,7 +5,8 @@ import java.util.UUID
 
 enum class InkToolType {
     PEN,
-    ERASER
+    ERASER,
+    SHAPE
 }
 
 enum class PaperStyle {

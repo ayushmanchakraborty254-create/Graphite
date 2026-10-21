@@ -71,7 +71,8 @@ data class FolderItem(
     val id: String,
     val name: String,
     val noteCount: Int,
-    val parentId: String? = null
+    val parentId: String? = null,
+    val colorHex: Long? = null
 )
 
 

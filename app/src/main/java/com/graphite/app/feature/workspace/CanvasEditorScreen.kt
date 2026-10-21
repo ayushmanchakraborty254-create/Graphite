@@ -263,11 +263,15 @@ fun CanvasEditorScreen(
     var shapeStrokeWidth by remember { mutableFloatStateOf(4f) }
     var shapeStartOffset by remember { mutableStateOf<Offset?>(null) }
     var shapeCurrentOffset by remember { mutableStateOf<Offset?>(null) }
+    var isFreehandShapeMode by remember { mutableStateOf(false) }
 
     // Presenter Laser Mode state (Neon glow laser pointer with 2s disconnect timer)
     var laserActivePoints by remember { mutableStateOf<List<InkPoint>>(emptyList()) }
     var laserStrokes by remember { mutableStateOf<List<InkStroke>>(emptyList()) }
     var laserFadeJob by remember { mutableStateOf<Job?>(null) }
+    var laserColor by remember { mutableStateOf(Color(0xFFFF1744)) }
+    var isLaserDotMode by remember { mutableStateOf(false) }
+    var laserAlpha by remember { mutableFloatStateOf(1f) }
 
     // Synchronize text boxes and images from repository preview lines
     LaunchedEffect(notebook?.previewLines) {
@@ -407,15 +411,16 @@ fun CanvasEditorScreen(
                     }
                 } else return@launch
 
-                val aspect = origH.toFloat() / origW.toFloat().coerceAtLeast(1f)
-                val wRatio = 0.55f
-                val hRatio = (wRatio * aspect).coerceIn(0.18f, 0.75f)
+                val pageAspect = 1.414f
+                val imgAspect = origH.toFloat() / origW.toFloat().coerceAtLeast(1f)
+                val wRatio = 0.50f
+                val hRatio = (wRatio * imgAspect / pageAspect).coerceIn(0.12f, 0.85f)
 
                 val newImg = CanvasImageElement(
                     id = java.util.UUID.randomUUID().toString(),
                     pageIndex = currentPageIndex,
                     filePath = targetFile.absolutePath,
-                    xRatio = 0.225f,
+                    xRatio = 0.25f,
                     yRatio = 0.22f,
                     widthRatio = wRatio,
                     heightRatio = hRatio,
@@ -932,6 +937,54 @@ fun CanvasEditorScreen(
                                             return@pointerInteropFilter false
                                         }
 
+                                        // Yield touch events for selected image manipulation or deselect when clicking outside
+                                        val pageBaseW = with(density) { basePageWidth.toPx() }
+                                        val pageBaseH = with(density) { basePageHeight.toPx() }
+
+                                        if (selectedImageId != null) {
+                                            val activeImg = localImages.firstOrNull { it.id == selectedImageId && it.pageIndex == pageIdx }
+                                            if (activeImg != null) {
+                                                val safeZoom = zoomScale.coerceAtLeast(0.01f)
+                                                val touchX = motionEvent.x / safeZoom
+                                                val touchY = motionEvent.y / safeZoom
+
+                                                val imgLeft = activeImg.xRatio * pageBaseW
+                                                val imgTop = activeImg.yRatio * pageBaseH
+                                                val imgW = (activeImg.widthRatio * pageBaseW).coerceAtLeast(40f)
+                                                val imgH = (activeImg.heightRatio * pageBaseH).coerceAtLeast(40f)
+
+                                                val interactiveBounds = Rect(
+                                                    left = imgLeft - 40f,
+                                                    top = imgTop - 90f,
+                                                    right = imgLeft + imgW + 40f,
+                                                    bottom = imgTop + imgH + 60f
+                                                )
+                                                if (interactiveBounds.contains(Offset(touchX, touchY))) {
+                                                    return@pointerInteropFilter false
+                                                } else if (motionEvent.action == MotionEvent.ACTION_DOWN) {
+                                                    selectedImageId = null
+                                                }
+                                            }
+                                        }
+
+                                        // Check if tapping to select an unselected image on canvas
+                                        if (selectedImageId == null && motionEvent.action == MotionEvent.ACTION_DOWN) {
+                                            val safeZoom = zoomScale.coerceAtLeast(0.01f)
+                                            val touchX = motionEvent.x / safeZoom
+                                            val touchY = motionEvent.y / safeZoom
+                                            val hitImage = localImages.filter { it.pageIndex == pageIdx }.lastOrNull { img ->
+                                                val imgLeft = img.xRatio * pageBaseW
+                                                val imgTop = img.yRatio * pageBaseH
+                                                val imgW = (img.widthRatio * pageBaseW).coerceAtLeast(40f)
+                                                val imgH = (img.heightRatio * pageBaseH).coerceAtLeast(40f)
+                                                Rect(imgLeft, imgTop, imgLeft + imgW, imgTop + imgH).contains(Offset(touchX, touchY))
+                                            }
+                                            if (hitImage != null && selectedStudioTool != StudioTool.PEN && selectedStudioTool != StudioTool.HIGHLIGHTER && selectedStudioTool != StudioTool.ERASER) {
+                                                selectedImageId = hitImage.id
+                                                return@pointerInteropFilter false
+                                            }
+                                        }
+
                                         val pointerCount = motionEvent.pointerCount
 
                                         // Check if hardware stylus or eraser is on screen
@@ -989,6 +1042,7 @@ fun CanvasEditorScreen(
                                                 if (selectedStudioTool == StudioTool.PRESENT) {
                                                     laserFadeJob?.cancel()
                                                     laserFadeJob = null
+                                                    laserAlpha = 1f
                                                     laserActivePoints = listOf(InkPoint(baseX, baseY, 1f, packet.timestamp))
                                                 } else if (selectedStudioTool == StudioTool.SHAPE) {
                                                     shapeStartOffset = Offset(baseX, baseY)
@@ -1020,7 +1074,11 @@ fun CanvasEditorScreen(
                                                 val baseX = packet.x / safeZoom
                                                 val baseY = packet.y / safeZoom
                                                 if (selectedStudioTool == StudioTool.PRESENT) {
-                                                    laserActivePoints = laserActivePoints + InkPoint(baseX, baseY, 1f, packet.timestamp)
+                                                    if (isLaserDotMode) {
+                                                        laserActivePoints = listOf(InkPoint(baseX, baseY, 1f, packet.timestamp))
+                                                    } else {
+                                                        laserActivePoints = laserActivePoints + InkPoint(baseX, baseY, 1f, packet.timestamp)
+                                                    }
                                                 } else if (selectedStudioTool == StudioTool.SHAPE) {
                                                     shapeCurrentOffset = Offset(baseX, baseY)
                                                 } else if (selectedStudioTool == StudioTool.LASSO) {
@@ -1063,22 +1121,27 @@ fun CanvasEditorScreen(
                                             }
                                             MotionActionType.UP, MotionActionType.CANCEL -> {
                                                 if (selectedStudioTool == StudioTool.PRESENT) {
-                                                    if (laserActivePoints.size >= 2) {
+                                                    if (!isLaserDotMode && laserActivePoints.size >= 2) {
                                                         val lStroke = InkStroke(
                                                             points = laserActivePoints,
                                                             baseWidth = 6f,
-                                                            color = Color(0xFFFF1744),
+                                                            color = laserColor,
                                                             toolType = InkToolType.PEN,
                                                             pageIndex = pageIdx
                                                         )
                                                         laserStrokes = laserStrokes + lStroke
                                                     }
                                                     laserActivePoints = emptyList()
-                                                    // 2-second reconnect timer: If stylus touched again within 2s, glow stays; if disconnected > 2s, laser fades away!
                                                     laserFadeJob?.cancel()
                                                     laserFadeJob = scope.launch {
                                                         delay(2000L)
+                                                        val steps = 14
+                                                        for (i in steps downTo 0) {
+                                                            laserAlpha = i.toFloat() / steps.toFloat()
+                                                            delay(25L)
+                                                        }
                                                         laserStrokes = emptyList()
+                                                        laserAlpha = 1f
                                                     }
                                                 } else if (selectedStudioTool == StudioTool.SHAPE) {
                                                     if (shapeStartOffset != null && shapeCurrentOffset != null) {
@@ -1185,12 +1248,25 @@ fun CanvasEditorScreen(
                                                 )
                                             }
                                         } else stroke.points
-                                        val path = BezierSplineInterpolator.createSplinePath(pts)
-                                        val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
-                                        val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                            stroke.baseWidth * canonicalScale * d * fitScale,
-                                            avgPressure
-                                        )
+                                        val path = if (stroke.toolType == InkToolType.SHAPE) {
+                                            androidx.compose.ui.graphics.Path().apply {
+                                                moveTo(pts[0].x, pts[0].y)
+                                                for (i in 1 until pts.size) {
+                                                    lineTo(pts[i].x, pts[i].y)
+                                                }
+                                            }
+                                        } else {
+                                            BezierSplineInterpolator.createSplinePath(pts)
+                                        }
+                                        val effectiveWidth = if (stroke.toolType == InkToolType.SHAPE) {
+                                            stroke.baseWidth * canonicalScale * d * fitScale
+                                        } else {
+                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                            BezierSplineInterpolator.calculateEffectiveWidth(
+                                                stroke.baseWidth * canonicalScale * d * fitScale,
+                                                avgPressure
+                                            )
+                                        }
                                         drawPath(
                                             path = path,
                                             color = strokeColor,
@@ -1211,12 +1287,25 @@ fun CanvasEditorScreen(
                                                 pt.copy(x = pt.x * fitScale, y = pt.y * fitScale)
                                             }
                                         } else transientStroke.points
-                                        val path = BezierSplineInterpolator.createSplinePath(pts)
-                                        val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
-                                        val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                            transientStroke.baseWidth * canonicalScale * d * fitScale,
-                                            avgPressure
-                                        )
+                                        val path = if (transientStroke.toolType == InkToolType.SHAPE) {
+                                            androidx.compose.ui.graphics.Path().apply {
+                                                moveTo(pts[0].x, pts[0].y)
+                                                for (i in 1 until pts.size) {
+                                                    lineTo(pts[i].x, pts[i].y)
+                                                }
+                                            }
+                                        } else {
+                                            BezierSplineInterpolator.createSplinePath(pts)
+                                        }
+                                        val effectiveWidth = if (transientStroke.toolType == InkToolType.SHAPE) {
+                                            transientStroke.baseWidth * canonicalScale * d * fitScale
+                                        } else {
+                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                            BezierSplineInterpolator.calculateEffectiveWidth(
+                                                transientStroke.baseWidth * canonicalScale * d * fitScale,
+                                                avgPressure
+                                            )
+                                        }
                                         drawPath(
                                             path = path,
                                             color = transientStroke.color,
@@ -1249,7 +1338,7 @@ fun CanvasEditorScreen(
                                     )
                                 }
 
-                                // Live Shape drag preview
+                                // Live Shape drag preview (precise straight lines, no spline distortion)
                                 if (selectedStudioTool == StudioTool.SHAPE && shapeStartOffset != null && shapeCurrentOffset != null && activePageForStroke == pageIdx) {
                                     val shapeStrokes = CanvasShapeGenerator.generateShapeStrokes(
                                         shape = selectedShapeType,
@@ -1261,7 +1350,12 @@ fun CanvasEditorScreen(
                                     )
                                     shapeStrokes.forEach { s ->
                                         if (s.points.size >= 2) {
-                                            val p = BezierSplineInterpolator.createSplinePath(s.points)
+                                            val p = androidx.compose.ui.graphics.Path().apply {
+                                                moveTo(s.points[0].x, s.points[0].y)
+                                                for (i in 1 until s.points.size) {
+                                                    lineTo(s.points[i].x, s.points[i].y)
+                                                }
+                                            }
                                             drawPath(
                                                 path = p,
                                                 color = s.color,
@@ -1271,45 +1365,71 @@ fun CanvasEditorScreen(
                                     }
                                 }
 
-                                // Presenter Neon Laser Pointer trails (multi-pass glow aura + white-hot core)
-                                val currentLaserStrokes = laserStrokes + (if (laserActivePoints.size >= 2 && activePageForStroke == pageIdx) {
-                                    listOf(InkStroke(points = laserActivePoints, baseWidth = 6f, color = Color(0xFFFF1744), toolType = InkToolType.PEN, pageIndex = pageIdx))
-                                } else emptyList())
+                                // Presenter Neon Laser Pointer trails (vibrant solid neon beam + radiant glow)
+                                if (laserActivePoints.size >= 2 && activePageForStroke == pageIdx && !isLaserDotMode) {
+                                    val lPath = BezierSplineInterpolator.createSplinePath(laserActivePoints)
+                                    // 1. Radiant luminous glow aura
+                                    drawPath(
+                                        path = lPath,
+                                        color = laserColor.copy(alpha = 0.45f),
+                                        style = Stroke(width = 16f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                    )
+                                    // 2. Focused vibrant solid neon beam
+                                    drawPath(
+                                        path = lPath,
+                                        color = laserColor.copy(alpha = 1.0f),
+                                        style = Stroke(width = 7f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                    )
+                                    // 3. Core white-hot laser center
+                                    drawPath(
+                                        path = lPath,
+                                        color = Color.White,
+                                        style = Stroke(width = 2.5f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                    )
+                                }
 
-                                currentLaserStrokes.forEach { lStroke ->
-                                    if (lStroke.pageIndex == pageIdx && lStroke.points.size >= 2) {
-                                        val lPath = BezierSplineInterpolator.createSplinePath(lStroke.points)
-                                        // 1. Broad outer luminous glow aura
-                                        drawPath(
-                                            path = lPath,
-                                            color = Color(0xFFFF1744).copy(alpha = 0.22f),
-                                            style = Stroke(width = 18f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                                        )
-                                        // 2. Focused vibrant neon beam
-                                        drawPath(
-                                            path = lPath,
-                                            color = Color(0xFFFF1744).copy(alpha = 0.65f),
-                                            style = Stroke(width = 9f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                                        )
-                                        // 3. Core white-hot laser center
-                                        drawPath(
-                                            path = lPath,
-                                            color = Color(0xFFFFF0F2),
-                                            style = Stroke(width = 3.5f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                                        )
-                                        // Tip luminous glow dot
-                                        lStroke.points.lastOrNull()?.let { tip ->
-                                            drawCircle(
-                                                color = Color(0xFFFF1744).copy(alpha = 0.5f),
-                                                radius = 12f * d,
-                                                center = Offset(tip.x, tip.y)
+                                if (laserAlpha > 0.01f) {
+                                    laserStrokes.forEach { lStroke ->
+                                        if (lStroke.pageIndex == pageIdx && lStroke.points.size >= 2) {
+                                            val lPath = BezierSplineInterpolator.createSplinePath(lStroke.points)
+                                            val strokeClr = lStroke.color
+                                            drawPath(
+                                                path = lPath,
+                                                color = strokeClr.copy(alpha = 0.45f * laserAlpha),
+                                                style = Stroke(width = 16f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                             )
-                                            drawCircle(
-                                                color = Color.White,
-                                                radius = 4f * d,
-                                                center = Offset(tip.x, tip.y)
+                                            drawPath(
+                                                path = lPath,
+                                                color = strokeClr.copy(alpha = 1.0f * laserAlpha),
+                                                style = Stroke(width = 7f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                            )
+                                            drawPath(
+                                                path = lPath,
+                                                color = Color.White.copy(alpha = laserAlpha),
+                                                style = Stroke(width = 2.5f * d, cap = StrokeCap.Round, join = StrokeJoin.Round)
                                             )
                                         }
+                                    }
+                                }
+
+                                // Laser Pointer Dot (active during dot mode)
+                                if (isLaserDotMode && laserActivePoints.isNotEmpty() && activePageForStroke == pageIdx) {
+                                    laserActivePoints.lastOrNull()?.let { tip ->
+                                        drawCircle(
+                                            color = laserColor.copy(alpha = 0.45f),
+                                            radius = 16f * d,
+                                            center = Offset(tip.x, tip.y)
+                                        )
+                                        drawCircle(
+                                            color = laserColor,
+                                            radius = 8f * d,
+                                            center = Offset(tip.x, tip.y)
+                                        )
+                                        drawCircle(
+                                            color = Color.White,
+                                            radius = 3.5f * d,
+                                            center = Offset(tip.x, tip.y)
+                                        )
                                     }
                                 }
 
@@ -1805,8 +1925,7 @@ fun CanvasEditorScreen(
                                     icon = Icons.Default.Category,
                                     isSelected = selectedStudioTool == StudioTool.SHAPE,
                                     onClick = {
-                                        selectedStudioTool = StudioTool.SHAPE
-                                        showShapeDialog = true
+                                        selectedStudioTool = if (selectedStudioTool == StudioTool.SHAPE) StudioTool.PEN else StudioTool.SHAPE
                                     }
                                 )
                                 FloatingToolButton(
@@ -2127,6 +2246,20 @@ fun CanvasEditorScreen(
                                 selectedStudioTool = if (selectedStudioTool == StudioTool.TEXT) StudioTool.PEN else StudioTool.TEXT
                             }
                         )
+                        FloatingToolButton(
+                            icon = Icons.Default.Category,
+                            isSelected = selectedStudioTool == StudioTool.SHAPE,
+                            onClick = {
+                                selectedStudioTool = if (selectedStudioTool == StudioTool.SHAPE) StudioTool.PEN else StudioTool.SHAPE
+                            }
+                        )
+                        FloatingToolButton(
+                            icon = Icons.Default.Adjust,
+                            isSelected = selectedStudioTool == StudioTool.PRESENT,
+                            onClick = {
+                                selectedStudioTool = if (selectedStudioTool == StudioTool.PRESENT) StudioTool.PEN else StudioTool.PRESENT
+                            }
+                        )
 
                         // Voice Recording Mic Button (Always visible on mobile!)
                         IconButton(onClick = { 
@@ -2162,10 +2295,275 @@ fun CanvasEditorScreen(
         }
 
         // ==========================================
-        // 3. LEFT FLOATING COLOR & STROKE PALETTE
+        // 3A. LEFT FLOATING SHAPES SIDEBAR (Screenshot 2 Match)
         // ==========================================
         AnimatedVisibility(
-            visible = !isReadOnlyMode && (isTablet || showMobilePalette),
+            visible = !isReadOnlyMode && selectedStudioTool == StudioTool.SHAPE,
+            enter = fadeIn() + slideInHorizontally { -it },
+            exit = fadeOut() + slideOutHorizontally { -it },
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 12.dp)
+        ) {
+            Card(
+                shape = RoundedCornerShape(26.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.96f)),
+                border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                modifier = Modifier
+                    .shadow(8.dp, RoundedCornerShape(26.dp))
+                    .width(46.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 1. Draw to Shape / Freehand toggle
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (isFreehandShapeMode) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable {
+                                isFreehandShapeMode = !isFreehandShapeMode
+                                Toast.makeText(context, if (isFreehandShapeMode) "Auto Shape Detection ON" else "Auto Shape Detection OFF", Toast.LENGTH_SHORT).show()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Gesture,
+                            contentDescription = "Draw-to-Shape",
+                            tint = if (isFreehandShapeMode) Color(0xFF00BCD4) else Color.LightGray,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    HorizontalDivider(color = Color(0xFF333333), modifier = Modifier.padding(horizontal = 4.dp))
+
+                    // 2. Line (/)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (selectedShapeType == CanvasShapeType.LINE) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { selectedShapeType = CanvasShapeType.LINE },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Timeline, contentDescription = "Line", tint = if (selectedShapeType == CanvasShapeType.LINE) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(18.dp))
+                    }
+
+                    // 3. Arrow (↗)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (selectedShapeType == CanvasShapeType.ARROW) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { selectedShapeType = CanvasShapeType.ARROW },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.NorthEast, contentDescription = "Arrow", tint = if (selectedShapeType == CanvasShapeType.ARROW) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(18.dp))
+                    }
+
+                    // 4. Double Arrow
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (selectedShapeType == CanvasShapeType.DOUBLE_ARROW) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { selectedShapeType = CanvasShapeType.DOUBLE_ARROW },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.OpenInFull, contentDescription = "Double Arrow", tint = if (selectedShapeType == CanvasShapeType.DOUBLE_ARROW) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(18.dp))
+                    }
+
+                    // 5. Rectangle (□)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (selectedShapeType == CanvasShapeType.RECTANGLE) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { selectedShapeType = CanvasShapeType.RECTANGLE },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.CropSquare, contentDescription = "Rectangle", tint = if (selectedShapeType == CanvasShapeType.RECTANGLE) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(18.dp))
+                    }
+
+                    // 6. Rounded Rectangle / Circle (◯)
+                    val isRoundOrCircle = selectedShapeType == CanvasShapeType.ROUNDED_RECT || selectedShapeType == CanvasShapeType.CIRCLE
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (isRoundOrCircle) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable {
+                                selectedShapeType = if (selectedShapeType == CanvasShapeType.ROUNDED_RECT) CanvasShapeType.CIRCLE else CanvasShapeType.ROUNDED_RECT
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.RadioButtonUnchecked, contentDescription = "Circle/Round", tint = if (isRoundOrCircle) Color(0xFF00BCD4) else Color.White, modifier = Modifier.size(18.dp))
+                    }
+
+                    HorizontalDivider(color = Color(0xFF333333), modifier = Modifier.padding(horizontal = 4.dp))
+
+                    // 7. Shape Color Swatch
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(uiState.selectedColor)
+                            .border(1.5.dp, Color.White.copy(alpha = 0.8f), CircleShape)
+                            .clickable { showColorPaletteDialog = true }
+                    )
+
+                    // 8. Stroke thickness indicator
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2A2A2E))
+                            .clickable { showStrokeWidthDialog = !showStrokeWidthDialog },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size((shapeStrokeWidth * 1.5f).coerceIn(4f, 14f).dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                        )
+                    }
+
+                    // 9. More Shapes Library (•••)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (showShapeDialog) Color(0xFF00BCD4).copy(alpha = 0.2f) else Color.Transparent)
+                            .clickable { showShapeDialog = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.MoreHoriz,
+                            contentDescription = "All Shapes Library",
+                            tint = if (showShapeDialog) Color(0xFF00BCD4) else Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 3B. LEFT FLOATING PRESENTER MODE SIDEBAR
+        // ==========================================
+        AnimatedVisibility(
+            visible = !isReadOnlyMode && selectedStudioTool == StudioTool.PRESENT,
+            enter = fadeIn() + slideInHorizontally { -it },
+            exit = fadeOut() + slideOutHorizontally { -it },
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 12.dp)
+        ) {
+            Card(
+                shape = RoundedCornerShape(26.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.96f)),
+                border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                modifier = Modifier
+                    .shadow(8.dp, RoundedCornerShape(26.dp))
+                    .width(46.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Laser Pen Trail mode
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (!isLaserDotMode) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { isLaserDotMode = false },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Draw,
+                            contentDescription = "Laser Beam Pen",
+                            tint = if (!isLaserDotMode) Color(0xFF00BCD4) else Color.LightGray,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    // Laser Pointer Dot mode
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (isLaserDotMode) Color(0xFF00BCD4).copy(alpha = 0.25f) else Color.Transparent)
+                            .clickable { isLaserDotMode = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Adjust,
+                            contentDescription = "Laser Pointer Dot",
+                            tint = if (isLaserDotMode) Color(0xFF00BCD4) else Color.LightGray,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+
+                    HorizontalDivider(color = Color(0xFF333333), modifier = Modifier.padding(horizontal = 4.dp))
+
+                    // 4 Vibrant Neon Colors
+                    listOf(
+                        Color(0xFFFF1744), // Neon Red
+                        Color(0xFF00E676), // Neon Green
+                        Color(0xFF00E5FF), // Neon Cyan
+                        Color(0xFFFFEA00)  // Neon Yellow
+                    ).forEach { clr ->
+                        val isSelected = laserColor == clr
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(clr)
+                                .then(
+                                    if (isSelected) Modifier.border(2.dp, Color.White, CircleShape)
+                                    else Modifier
+                                )
+                                .clickable { laserColor = clr }
+                        )
+                    }
+
+                    HorizontalDivider(color = Color(0xFF333333), modifier = Modifier.padding(horizontal = 4.dp))
+
+                    // Clear Laser Trails
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                laserStrokes = emptyList()
+                                laserActivePoints = emptyList()
+                                laserFadeJob?.cancel()
+                                laserFadeJob = null
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Clear Laser Trails",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 3C. LEFT FLOATING COLOR & STROKE PALETTE
+        // ==========================================
+        AnimatedVisibility(
+            visible = !isReadOnlyMode && (isTablet || showMobilePalette) && selectedStudioTool != StudioTool.SHAPE && selectedStudioTool != StudioTool.PRESENT,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -2266,14 +2664,17 @@ fun CanvasEditorScreen(
                     Column(modifier = Modifier.padding(14.dp)) {
                         val isHighlighter = selectedStudioTool == StudioTool.HIGHLIGHTER
                         val isEraser = selectedStudioTool == StudioTool.ERASER
+                        val isShape = selectedStudioTool == StudioTool.SHAPE
                         val title = when {
                             isEraser -> "Eraser Settings"
                             isHighlighter -> "Highlighter Size"
+                            isShape -> "Shape Outline Width"
                             else -> "Pencil / Pen Size"
                         }
                         val currentVal = when {
                             isEraser -> eraserRadius
                             isHighlighter -> highlighterStrokeWidth
+                            isShape -> shapeStrokeWidth
                             else -> brushStrokeWidth
                         }
 
@@ -2367,10 +2768,11 @@ fun CanvasEditorScreen(
                         ) {
                             IconButton(
                                 onClick = {
-                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else 0.5f
+                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else if (isShape) 1f else 0.5f
                                     val nextVal = (currentVal - step).coerceAtLeast(range.start)
                                     if (isEraser) eraserRadius = nextVal
                                     else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                    else if (isShape) shapeStrokeWidth = nextVal
                                     else {
                                         brushStrokeWidth = nextVal
                                         workspaceViewModel.selectStrokeWidth(nextVal)
@@ -2387,6 +2789,7 @@ fun CanvasEditorScreen(
                                     val rounded = kotlin.math.round(it * 2f) / 2f
                                     if (isEraser) eraserRadius = rounded
                                     else if (isHighlighter) highlighterStrokeWidth = rounded
+                                    else if (isShape) shapeStrokeWidth = rounded
                                     else {
                                         brushStrokeWidth = rounded
                                         workspaceViewModel.selectStrokeWidth(rounded)
@@ -2403,10 +2806,11 @@ fun CanvasEditorScreen(
 
                             IconButton(
                                 onClick = {
-                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else 0.5f
+                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else if (isShape) 1f else 0.5f
                                     val nextVal = (currentVal + step).coerceAtMost(range.endInclusive)
                                     if (isEraser) eraserRadius = nextVal
                                     else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                    else if (isShape) shapeStrokeWidth = nextVal
                                     else {
                                         brushStrokeWidth = nextVal
                                         workspaceViewModel.selectStrokeWidth(nextVal)

@@ -106,6 +106,8 @@ class SupabaseNotesRepository(
                     var resolvedIsBookmarked = false
                     var resolvedIsLocked = false
                     var resolvedPassword: String? = null
+                    var resolvedUpdatedAtMillis: Long? = null
+                    var resolvedCreatedAtMillis: Long? = null
                     var resolvedCover = com.graphite.app.data.model.NotebookCover()
                     val resolvedVoiceNotes = mutableListOf<com.graphite.app.core.voice.VoiceClip>()
                     val cleanPreviewLines = mutableListOf<String>()
@@ -126,6 +128,8 @@ class SupabaseNotesRepository(
                                 if (p.startsWith("bookmark=")) resolvedIsBookmarked = p.removePrefix("bookmark=").toBoolean()
                                 if (p.startsWith("locked=")) resolvedIsLocked = p.removePrefix("locked=").toBoolean()
                                 if (p.startsWith("pwd=")) resolvedPassword = p.removePrefix("pwd=")
+                                if (p.startsWith("updated_millis=")) resolvedUpdatedAtMillis = p.removePrefix("updated_millis=").toLongOrNull()
+                                if (p.startsWith("created_millis=")) resolvedCreatedAtMillis = p.removePrefix("created_millis=").toLongOrNull()
                                 if (p.startsWith("cov_cat=")) covCat = p.removePrefix("cov_cat=")
                                 if (p.startsWith("cov_col=")) covCol = p.removePrefix("cov_col=").toLongOrNull() ?: 0xFF45A5B5
                                 if (p.startsWith("cov_name=")) covName = p.removePrefix("cov_name=")
@@ -222,13 +226,28 @@ class SupabaseNotesRepository(
                         }
                     }
 
+                    val finalUpdatedAtMillis = if (dto.updatedAtMillis > 0) {
+                        dto.updatedAtMillis
+                    } else if (resolvedUpdatedAtMillis != null && resolvedUpdatedAtMillis > 0) {
+                        resolvedUpdatedAtMillis
+                    } else {
+                        try {
+                            val sdf = java.text.SimpleDateFormat("dd/MM/yy hh:mm a", java.util.Locale.US)
+                            sdf.parse(dto.updatedAt ?: "")?.time ?: 0L
+                        } catch (_: Exception) {
+                            0L
+                        }
+                    }
+                    val finalCreatedAtMillis = resolvedCreatedAtMillis ?: finalUpdatedAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis()
+
                     NotebookItem(
                         id = dto.id,
                         userId = dto.userId,
                         title = dto.title,
                         folderId = dto.folderId,
                         updatedAtFormatted = dto.updatedAt ?: "Synced",
-                        updatedAtMillis = if (dto.updatedAtMillis > 0) dto.updatedAtMillis else System.currentTimeMillis(),
+                        updatedAtMillis = if (finalUpdatedAtMillis > 0) finalUpdatedAtMillis else System.currentTimeMillis(),
+                        createdAtMillis = finalCreatedAtMillis,
                         paperStyle = try {
                             PaperStyle.valueOf(dto.paperStyle)
                         } catch (_: Exception) {
@@ -279,6 +298,8 @@ class SupabaseNotesRepository(
                 metaParts.add("starred=${notebook.isStarred}")
                 metaParts.add("bookmark=${notebook.isBookmarked}")
                 metaParts.add("locked=${notebook.isLocked}")
+                metaParts.add("updated_millis=${notebook.updatedAtMillis}")
+                metaParts.add("created_millis=${notebook.createdAtMillis}")
                 if (!notebook.password.isNullOrBlank()) metaParts.add("pwd=${notebook.password}")
                 metaParts.add("cov_cat=${notebook.cover.category}")
                 metaParts.add("cov_col=${notebook.cover.colorHex}")

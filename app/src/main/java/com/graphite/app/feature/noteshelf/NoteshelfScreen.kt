@@ -13,6 +13,7 @@ import com.graphite.app.data.model.NotebookCover
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import android.content.Context
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
@@ -135,7 +136,15 @@ fun NoteshelfScreen(
     }
 
     var moreMenuExpanded by remember { mutableStateOf(false) }
-    var currentSortOption by remember { mutableStateOf("Date Modified (Newest)") }
+    val sortPrefs = remember { context.getSharedPreferences("graphite_sort_prefs", Context.MODE_PRIVATE) }
+    var currentSortOption by remember {
+        mutableStateOf(sortPrefs.getString("notes_sort_order", "Date Modified (Newest)") ?: "Date Modified (Newest)")
+    }
+    var customOrderIds by remember {
+        val saved = sortPrefs.getString("custom_order_ids", "") ?: ""
+        mutableStateOf(saved.split(",").filter { it.isNotBlank() })
+    }
+    var folderForOptionsDialog by remember { mutableStateOf<FolderItem?>(null) }
     var isListView by remember { mutableStateOf(false) }
 
     // Note Selection & Deletion state
@@ -216,11 +225,34 @@ fun NoteshelfScreen(
     }
 
     val sortedNotebooks = when (currentSortOption) {
+        "Custom" -> {
+            searchFiltered.sortedBy { nb ->
+                val idx = customOrderIds.indexOf(nb.id)
+                if (idx >= 0) idx else Int.MAX_VALUE
+            }
+        }
         "Date Modified (Newest)" -> searchFiltered.sortedByDescending { it.updatedAtMillis }
         "Date Modified (Oldest)" -> searchFiltered.sortedBy { it.updatedAtMillis }
         "Title (A-Z)" -> searchFiltered.sortedBy { it.title.lowercase() }
         "Title (Z-A)" -> searchFiltered.sortedByDescending { it.title.lowercase() }
         else -> searchFiltered
+    }
+
+    val moveNoteInCustomOrder: (String, Int) -> Unit = { noteId, delta ->
+        val allIds = sortedNotebooks.map { it.id }
+        val mergedList = customOrderIds.toMutableList()
+        allIds.forEach { id -> if (!mergedList.contains(id)) mergedList.add(id) }
+
+        val idx = mergedList.indexOf(noteId)
+        if (idx >= 0) {
+            val targetIdx = (idx + delta).coerceIn(0, mergedList.size - 1)
+            if (targetIdx != idx) {
+                mergedList.removeAt(idx)
+                mergedList.add(targetIdx, noteId)
+                customOrderIds = mergedList
+                sortPrefs.edit().putString("custom_order_ids", mergedList.joinToString(",")).apply()
+            }
+        }
     }
 
     val sidebarContent: @Composable () -> Unit = {
@@ -358,6 +390,7 @@ fun NoteshelfScreen(
             rootFolders.forEach { folder ->
                 val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
                 val subfolders = folders.filter { it.parentId == folder.id }
+                val folderColor = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -367,12 +400,26 @@ fun NoteshelfScreen(
                         SidebarItem(
                             title = folder.name,
                             icon = Icons.Default.Folder,
+                            iconSize = 24.dp,
+                            iconTint = folderColor,
                             count = noteCount,
                             isSelected = selectedCategory == folder.id,
+                            onLongClick = { folderForOptionsDialog = folder },
                             onClick = {
                                 selectedCategory = folder.id
                                 if (!isTablet) sidebarVisible = false
                             }
+                        )
+                    }
+                    IconButton(
+                        onClick = { folderForOptionsDialog = folder },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Folder Settings",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                     IconButton(
@@ -394,22 +441,39 @@ fun NoteshelfScreen(
                 // Render subfolders indented
                 subfolders.forEach { subfolder ->
                     val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
+                    val subColor = subfolder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(start = 16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        SidebarItem(
-                            title = subfolder.name,
-                            icon = Icons.Default.FolderOpen,
-                            count = subNoteCount,
-                            isSelected = selectedCategory == subfolder.id,
-                            onClick = {
-                                selectedCategory = subfolder.id
-                                if (!isTablet) sidebarVisible = false
-                            }
-                        )
+                        Box(modifier = Modifier.weight(1f)) {
+                            SidebarItem(
+                                title = subfolder.name,
+                                icon = Icons.Default.FolderOpen,
+                                iconSize = 22.dp,
+                                iconTint = subColor,
+                                count = subNoteCount,
+                                isSelected = selectedCategory == subfolder.id,
+                                onLongClick = { folderForOptionsDialog = subfolder },
+                                onClick = {
+                                    selectedCategory = subfolder.id
+                                    if (!isTablet) sidebarVisible = false
+                                }
+                            )
+                        }
+                        IconButton(
+                            onClick = { folderForOptionsDialog = subfolder },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Subfolder Settings",
+                                tint = Color.Gray,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -590,21 +654,6 @@ fun NoteshelfScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = {
-                        if (!hasActiveSession) {
-                            pendingAccountAction = "create a notebook"
-                            showAccountRequiredDialog = true
-                        } else {
-                            showCreationOptionsSheet = true
-                        }
-                    }) {
-                        Icon(
-                            imageVector = Icons.Default.AddCircle,
-                            contentDescription = "Add Notebook",
-                            tint = GraphiteOrange,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
                     IconButton(onClick = { showSearchBar = !showSearchBar }) {
                         Icon(
                             imageVector = Icons.Default.Search,
@@ -664,30 +713,42 @@ fun NoteshelfScreen(
                             modifier = Modifier.background(GraphiteSurfaceVariant)
                         ) {
                             DropdownMenuItem(
-                                text = { Text("Sort: Date Modified (Newest)", color = Color.White) },
+                                text = { Text("Sort: Custom (Hold & Reorder)", color = if (currentSortOption == "Custom") GraphiteOrange else Color.White) },
+                                onClick = {
+                                    currentSortOption = "Custom"
+                                    sortPrefs.edit().putString("notes_sort_order", "Custom").apply()
+                                    moreMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sort: Date Modified (Newest)", color = if (currentSortOption == "Date Modified (Newest)") GraphiteOrange else Color.White) },
                                 onClick = {
                                     currentSortOption = "Date Modified (Newest)"
+                                    sortPrefs.edit().putString("notes_sort_order", "Date Modified (Newest)").apply()
                                     moreMenuExpanded = false
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Sort: Date Modified (Oldest)", color = Color.White) },
+                                text = { Text("Sort: Date Modified (Oldest)", color = if (currentSortOption == "Date Modified (Oldest)") GraphiteOrange else Color.White) },
                                 onClick = {
                                     currentSortOption = "Date Modified (Oldest)"
+                                    sortPrefs.edit().putString("notes_sort_order", "Date Modified (Oldest)").apply()
                                     moreMenuExpanded = false
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Sort: Title (A-Z)", color = Color.White) },
+                                text = { Text("Sort: Title (A-Z)", color = if (currentSortOption == "Title (A-Z)") GraphiteOrange else Color.White) },
                                 onClick = {
                                     currentSortOption = "Title (A-Z)"
+                                    sortPrefs.edit().putString("notes_sort_order", "Title (A-Z)").apply()
                                     moreMenuExpanded = false
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Sort: Title (Z-A)", color = Color.White) },
+                                text = { Text("Sort: Title (Z-A)", color = if (currentSortOption == "Title (Z-A)") GraphiteOrange else Color.White) },
                                 onClick = {
                                     currentSortOption = "Title (Z-A)"
+                                    sortPrefs.edit().putString("notes_sort_order", "Title (Z-A)").apply()
                                     moreMenuExpanded = false
                                 }
                             )
@@ -923,6 +984,8 @@ fun NoteshelfScreen(
                                 notebook = notebook,
                                 isSelected = notebook.id in selectedNotebookIds,
                                 isSelectionMode = isSelectionMode,
+                                isCustomSortActive = currentSortOption == "Custom",
+                                onMoveCustomOrder = { delta -> moveNoteInCustomOrder(notebook.id, delta) },
                                 onClick = {
                                     if (isSelectionMode) {
                                         toggleNoteSelection(notebook.id)
@@ -969,6 +1032,8 @@ fun NoteshelfScreen(
                                 notebook = notebook,
                                 isSelected = notebook.id in selectedNotebookIds,
                                 isSelectionMode = isSelectionMode,
+                                isCustomSortActive = currentSortOption == "Custom",
+                                onMoveCustomOrder = { delta -> moveNoteInCustomOrder(notebook.id, delta) },
                                 onClick = {
                                     if (isSelectionMode) {
                                         toggleNoteSelection(notebook.id)
@@ -1110,6 +1175,28 @@ fun NoteshelfScreen(
                 GraphiteRepository.addFolder(name, selectedParentFolderForSubfolder?.id)
                 showNewFolderDialog = false
                 selectedParentFolderForSubfolder = null
+            }
+        )
+    }
+
+    if (folderForOptionsDialog != null) {
+        FolderOptionsDialog(
+            folder = folderForOptionsDialog!!,
+            allFolders = folders,
+            onDismiss = { folderForOptionsDialog = null },
+            onSave = { newName, newColorHex, newParentId ->
+                GraphiteRepository.updateFolder(folderForOptionsDialog!!.id, newName, newColorHex, newParentId)
+                folderForOptionsDialog = null
+                Toast.makeText(context, "Folder updated", Toast.LENGTH_SHORT).show()
+            },
+            onDelete = {
+                val fId = folderForOptionsDialog!!.id
+                GraphiteRepository.deleteFolder(fId)
+                if (selectedCategory == fId) {
+                    selectedCategory = "All Notes"
+                }
+                folderForOptionsDialog = null
+                Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -1367,6 +1454,7 @@ fun NoteshelfScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SidebarItem(
     title: String,
@@ -1374,6 +1462,9 @@ private fun SidebarItem(
     count: Int? = null,
     badgeText: String? = null,
     isSelected: Boolean = false,
+    iconSize: androidx.compose.ui.unit.Dp = 18.dp,
+    iconTint: Color? = null,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     Row(
@@ -1381,7 +1472,13 @@ private fun SidebarItem(
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(if (isSelected) GraphiteOrange else Color.Transparent)
-            .clickable(onClick = onClick)
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    Modifier.clickable(onClick = onClick)
+                }
+            )
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -1390,8 +1487,8 @@ private fun SidebarItem(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (isSelected) Color.White else Color(0xFFB0B0B0),
-                modifier = Modifier.size(18.dp)
+                tint = iconTint ?: (if (isSelected) Color.White else Color(0xFFB0B0B0)),
+                modifier = Modifier.size(iconSize)
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
@@ -1516,6 +1613,8 @@ private fun NotebookThumbnailCard(
     notebook: NotebookItem,
     isSelected: Boolean = false,
     isSelectionMode: Boolean = false,
+    isCustomSortActive: Boolean = false,
+    onMoveCustomOrder: ((Int) -> Unit)? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onToggleStar: () -> Unit,
@@ -1893,6 +1992,19 @@ private fun NotebookThumbnailCard(
                     onDismissRequest = { menuExpanded = false },
                     modifier = Modifier.background(GraphiteSurfaceVariant)
                 ) {
+                    if (isCustomSortActive && onMoveCustomOrder != null) {
+                        DropdownMenuItem(
+                            text = { Text("Move Earlier / Left", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.ArrowBack, contentDescription = null, tint = GraphiteOrange) },
+                            onClick = { menuExpanded = false; onMoveCustomOrder(-1) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Move Later / Right", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.ArrowForward, contentDescription = null, tint = GraphiteOrange) },
+                            onClick = { menuExpanded = false; onMoveCustomOrder(1) }
+                        )
+                        HorizontalDivider(color = Color(0xFF333333))
+                    }
                     DropdownMenuItem(
                         text = { Text(if (isPdf) "Open PDF" else "Open Note", color = Color.White) },
                         onClick = {
@@ -2021,6 +2133,8 @@ private fun NotebookListRow(
     notebook: NotebookItem,
     isSelected: Boolean = false,
     isSelectionMode: Boolean = false,
+    isCustomSortActive: Boolean = false,
+    onMoveCustomOrder: ((Int) -> Unit)? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onOpenSplitScreen: (() -> Unit)? = null,
@@ -2036,6 +2150,10 @@ private fun NotebookListRow(
 ) {
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
+    val isKeepText = notebook.mimeType == "text/keep" ||
+            notebook.mimeType?.startsWith("text/") == true ||
+            notebook.title.startsWith("Quick Note", ignoreCase = true) ||
+            notebook.title.startsWith("Text Note", ignoreCase = true)
     var menuExpanded by remember { mutableStateOf(false) }
 
     Row(
@@ -2064,13 +2182,73 @@ private fun NotebookListRow(
             Spacer(modifier = Modifier.width(10.dp))
         }
 
-        Icon(
-            imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
-            contentDescription = null,
-            tint = if (isPdf) Color(0xFFEF5350) else GraphiteOrange,
-            modifier = Modifier.size(28.dp)
-        )
-        Spacer(modifier = Modifier.width(14.dp))
+        // Miniature Cover Page / PDF First Page / Text lines preview card matching Grid View
+        Card(
+            modifier = Modifier
+                .width(46.dp)
+                .height(60.dp)
+                .shadow(2.dp, RoundedCornerShape(4.dp)),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isPdf) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
+            ),
+            shape = RoundedCornerShape(4.dp)
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (isPdf) {
+                    if (!notebook.filePath.isNullOrEmpty() && (File(notebook.filePath).exists() || notebook.filePath.startsWith("content://"))) {
+                        PdfThumbnailImage(notebook.filePath)
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(22.dp))
+                        }
+                    }
+                } else if (notebook.mimeType == "application/x-graphite-voice") {
+                    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF1E1710)), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.GraphicEq, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(22.dp))
+                    }
+                } else if (isKeepText) {
+                    Column(modifier = Modifier.fillMaxSize().padding(3.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color(0xFF333333))
+                                .padding(horizontal = 2.dp, vertical = 1.dp)
+                        ) {
+                            Text("NOTE", color = Color(0xFFFFB74D), fontSize = 6.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        notebook.previewLines.take(3).forEach { line ->
+                            Text(
+                                text = line.removePrefix("[x] ").removePrefix("[ ] "),
+                                color = Color.LightGray,
+                                fontSize = 6.sp,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                } else if (notebook.cover.category != "NONE") {
+                    NotebookCoverView(
+                        cover = notebook.cover,
+                        modifier = Modifier.fillMaxSize(),
+                        isThumbnail = true
+                    )
+                } else {
+                    Column(modifier = Modifier.fillMaxSize().padding(4.dp)) {
+                        repeat(5) { lineIdx ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(if (lineIdx % 2 == 0) 0.65f else 0.9f)
+                                    .height(1.dp)
+                                    .background(Color(0xFFD0D0D0))
+                            )
+                            Spacer(modifier = Modifier.height(7.dp))
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -2109,6 +2287,18 @@ private fun NotebookListRow(
             }
         }
 
+        if (isCustomSortActive && onMoveCustomOrder != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { onMoveCustomOrder(-1) }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Move Up", tint = Color.LightGray, modifier = Modifier.size(20.dp))
+                }
+                IconButton(onClick = { onMoveCustomOrder(1) }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Move Down", tint = Color.LightGray, modifier = Modifier.size(20.dp))
+                }
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
+
         IconButton(
             onClick = onToggleStar,
             modifier = Modifier.size(36.dp)
@@ -2130,6 +2320,19 @@ private fun NotebookListRow(
                 onDismissRequest = { menuExpanded = false },
                 modifier = Modifier.background(GraphiteSurfaceVariant)
             ) {
+                if (isCustomSortActive && onMoveCustomOrder != null) {
+                    DropdownMenuItem(
+                        text = { Text("Move Up", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = GraphiteOrange) },
+                        onClick = { menuExpanded = false; onMoveCustomOrder(-1) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move Down", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = GraphiteOrange) },
+                        onClick = { menuExpanded = false; onMoveCustomOrder(1) }
+                    )
+                    HorizontalDivider(color = Color(0xFF333333))
+                }
                 DropdownMenuItem(
                     text = { Text(if (isPdf) "Open PDF" else "Open Note", color = Color.White) },
                     onClick = { menuExpanded = false; onClick() }
@@ -2524,6 +2727,169 @@ private fun NewFolderDialog(
                 colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
             ) {
                 Text("Create", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = Color.Gray)
+            }
+        },
+        containerColor = GraphiteSurfaceVariant
+    )
+}
+
+@Composable
+private fun FolderOptionsDialog(
+    folder: FolderItem,
+    allFolders: List<FolderItem>,
+    onDismiss: () -> Unit,
+    onSave: (newName: String, newColorHex: Long?, newParentId: String?) -> Unit,
+    onDelete: () -> Unit
+) {
+    var name by remember { mutableStateOf(folder.name) }
+    var selectedColorHex by remember { mutableStateOf(folder.colorHex ?: 0xFFFFD54F) }
+    var selectedParentId by remember { mutableStateOf(folder.parentId) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    val presetColors = listOf(
+        0xFFFFD54F, // Gold
+        0xFFFF5722, // Deep Orange
+        0xFFE91E63, // Pink
+        0xFF9C27B0, // Purple
+        0xFF2196F3, // Blue
+        0xFF00BCD4, // Cyan
+        0xFF4CAF50, // Green
+        0xFF795548  // Brown
+    )
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete Folder?", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = { Text("Are you sure you want to delete \"${folder.name}\"? Notes inside will be moved to Unfiled.", color = Color.LightGray) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                ) {
+                    Text("Delete", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
+        )
+        return
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Folder Settings", color = Color.White, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Folder Name", color = Color.Gray) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Folder Color", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    presetColors.forEach { cHex ->
+                        val isSelected = selectedColorHex == cHex
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(Color(cHex))
+                                .then(
+                                    if (isSelected) Modifier.border(2.dp, Color.White, CircleShape)
+                                    else Modifier
+                                )
+                                .clickable { selectedColorHex = cHex }
+                        )
+                    }
+                }
+
+                Text("Location / Nesting", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                val candidateParents = allFolders.filter { it.id != folder.id && it.parentId == null }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (selectedParentId == null) Color(0xFF2E2E32) else Color.Transparent)
+                            .clickable { selectedParentId = null }
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedParentId == null,
+                            onClick = { selectedParentId = null },
+                            colors = RadioButtonDefaults.colors(selectedColor = GraphiteOrange)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Root Level (Stand-alone folder)", color = Color.White, fontSize = 13.sp)
+                    }
+
+                    candidateParents.forEach { parent ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (selectedParentId == parent.id) Color(0xFF2E2E32) else Color.Transparent)
+                                .clickable { selectedParentId = parent.id }
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selectedParentId == parent.id,
+                                onClick = { selectedParentId = parent.id },
+                                colors = RadioButtonDefaults.colors(selectedColor = GraphiteOrange)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Inside \"${parent.name}\"", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                }
+
+                TextButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.align(Alignment.Start)
+                ) {
+                    Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Delete Folder", color = Color(0xFFFF5252), fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isNotBlank()) {
+                        val newParent = if (selectedParentId == null) "__ROOT__" else selectedParentId
+                        onSave(name.trim(), selectedColorHex, newParent)
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+            ) {
+                Text("Save", color = Color.White)
             }
         },
         dismissButton = {

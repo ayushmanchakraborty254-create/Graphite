@@ -676,9 +676,43 @@ object GraphiteRepository {
         saveToDisk()
     }
 
-    fun addFolder(name: String, parentId: String? = null) {
-        val newFolder = FolderItem(UUID.randomUUID().toString(), name, 0, parentId = parentId)
+    fun addFolder(name: String, parentId: String? = null, colorHex: Long? = null) {
+        val newFolder = FolderItem(UUID.randomUUID().toString(), name.trim(), 0, parentId = parentId, colorHex = colorHex)
         _folders.update { it + newFolder }
+        saveToDisk()
+    }
+
+    fun updateFolder(folderId: String, newName: String? = null, newColorHex: Long? = null, newParentId: String? = null) {
+        _folders.update { list ->
+            list.map { f ->
+                if (f.id == folderId) {
+                    val resolvedParent = if (newParentId == "__ROOT__") null else (newParentId ?: f.parentId)
+                    f.copy(
+                        name = newName?.trim() ?: f.name,
+                        colorHex = newColorHex ?: f.colorHex,
+                        parentId = resolvedParent
+                    )
+                } else f
+            }
+        }
+        saveToDisk()
+    }
+
+    fun deleteFolder(folderId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        var modified = false
+        for (i in userList.indices) {
+            val note = userList[i]
+            if (note.folderId == folderId) {
+                userList[i] = note.copy(folderId = "unfiled", updatedAtMillis = System.currentTimeMillis())
+                modified = true
+            }
+        }
+        if (modified) {
+            _notebooks.value = userList.filter { !it.isDeleted }
+        }
+        _folders.update { list -> list.filterNot { it.id == folderId || it.parentId == folderId } }
         saveToDisk()
     }
 
@@ -848,6 +882,28 @@ object GraphiteRepository {
                     _stats.update { it.copy(totalBooks = _books.value.size) }
                 }
             }
+            val foldersFile = File(context.filesDir, "graphite_folders_storage.json")
+            if (foldersFile.exists()) {
+                try {
+                    val arr = JSONArray(foldersFile.readText(Charsets.UTF_8))
+                    val loaded = mutableListOf<FolderItem>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        loaded.add(
+                            FolderItem(
+                                id = obj.getString("id"),
+                                name = obj.getString("name"),
+                                noteCount = obj.optInt("noteCount", 0),
+                                parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
+                                colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null
+                            )
+                        )
+                    }
+                    if (loaded.isNotEmpty()) {
+                        _folders.value = loaded
+                    }
+                } catch (_: Exception) {}
+            }
             cleanBookDuplicatesAndGhosts()
         } catch (e: Exception) {
             android.util.Log.e("GraphiteRepository", "Failed to load storage from disk", e)
@@ -878,6 +934,19 @@ object GraphiteRepository {
                 booksRootObj.put(uid, arr)
             }
             booksFile.writeText(booksRootObj.toString(), Charsets.UTF_8)
+
+            val foldersFile = File(context.filesDir, "graphite_folders_storage.json")
+            val foldersArr = JSONArray()
+            for (f in _folders.value) {
+                foldersArr.put(JSONObject().apply {
+                    put("id", f.id)
+                    put("name", f.name)
+                    put("noteCount", f.noteCount)
+                    if (f.parentId != null) put("parentId", f.parentId)
+                    if (f.colorHex != null) put("colorHex", f.colorHex)
+                })
+            }
+            foldersFile.writeText(foldersArr.toString(), Charsets.UTF_8)
         } catch (e: Exception) {
             android.util.Log.e("GraphiteRepository", "Failed to save storage to disk", e)
         }

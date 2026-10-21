@@ -62,10 +62,15 @@ sealed class UpdateState {
 
 class AppUpdateManager(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
         .build()
 ) {
+    var lastDownloadUrl: String? = null
+        private set
 
     private val _updateState = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val updateState: StateFlow<UpdateState> = _updateState.asStateFlow()
@@ -188,6 +193,7 @@ class AppUpdateManager(
      * Downloads the latest APK and launches the system installer.
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
+        lastDownloadUrl = downloadUrl
         _updateState.value = UpdateState.Downloading(0)
         downloadJob?.cancel()
         downloadJob = CoroutineScope(Dispatchers.IO).launch {
@@ -212,16 +218,20 @@ class AppUpdateManager(
                 val inputStream = body.byteStream()
                 val outputStream = FileOutputStream(apkFile)
 
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(32768)
                 var bytesRead: Int
                 var totalBytesRead = 0L
+                var lastProgressPercent = -1
 
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     outputStream.write(buffer, 0, bytesRead)
                     totalBytesRead += bytesRead
                     if (contentLength > 0) {
-                        val progress = ((totalBytesRead * 100) / contentLength).toInt()
-                        _updateState.value = UpdateState.Downloading(progress)
+                        val progress = ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
+                        if (progress != lastProgressPercent) {
+                            lastProgressPercent = progress
+                            _updateState.value = UpdateState.Downloading(progress)
+                        }
                     }
                 }
 
@@ -501,8 +511,18 @@ fun AppUpdateModalDialog(
                 title = { Text("Update Error", color = Color.White) },
                 text = { Text(state.message, color = Color.LightGray) },
                 confirmButton = {
-                    Button(onClick = { updateManager.dismissUpdate(context) }) {
-                        Text("OK")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        updateManager.lastDownloadUrl?.let { retryUrl ->
+                            Button(
+                                onClick = { updateManager.downloadAndInstall(context, retryUrl) },
+                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                            ) {
+                                Text("Retry")
+                            }
+                        }
+                        TextButton(onClick = { updateManager.dismissUpdate(context) }) {
+                            Text("Dismiss", color = Color.Gray)
+                        }
                     }
                 },
                 containerColor = GraphiteSurfaceVariant
