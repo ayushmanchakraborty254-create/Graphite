@@ -671,7 +671,7 @@ fun CanvasEditorScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(interactionMode, isReadOnlyMode, selectedStudioTool) {
+                .pointerInput(interactionMode, isReadOnlyMode, selectedStudioTool, selectedImageId) {
                     awaitEachGesture {
                         var lastCenter: Offset? = null
                         var lastDist: Float? = null
@@ -690,8 +690,9 @@ fun CanvasEditorScreen(
                             }
 
                             val isTextTool = selectedStudioTool == StudioTool.TEXT
-                            if (hasStylus || isReadOnlyMode || isTextTool) {
-                                // Stylus is active, read-only active, or text tool active: NEVER scroll from this detector!
+                            val isImageActive = selectedImageId != null
+                            if (hasStylus || isReadOnlyMode || isTextTool || isImageActive) {
+                                // Stylus is active, read-only active, text tool active, or image is selected: NEVER scroll from this detector!
                                 lastCenter = null
                                 lastDist = null
                                 scrollVelocityY = 0f
@@ -765,8 +766,10 @@ fun CanvasEditorScreen(
                                 lastTime = now
                                 lastDist = null
 
-                                // Consume the 1-finger touch so canvas does not ink
-                                pressed[0].consume()
+                                // Consume the 1-finger touch only once drag movement has engaged
+                                if (isDragging1Finger) {
+                                    pressed[0].consume()
+                                }
                             } else {
                                 // Fingers lifted: fling momentum if swiped with velocity
                                 val shouldFling = (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
@@ -944,22 +947,21 @@ fun CanvasEditorScreen(
                                         if (selectedImageId != null) {
                                             val activeImg = localImages.firstOrNull { it.id == selectedImageId && it.pageIndex == pageIdx }
                                             if (activeImg != null) {
-                                                val safeZoom = zoomScale.coerceAtLeast(0.01f)
-                                                val touchX = motionEvent.x / safeZoom
-                                                val touchY = motionEvent.y / safeZoom
+                                                val touchX = motionEvent.x
+                                                val touchY = motionEvent.y
 
                                                 val imgLeft = activeImg.xRatio * pageBaseW
                                                 val imgTop = activeImg.yRatio * pageBaseH
                                                 val imgW = (activeImg.widthRatio * pageBaseW).coerceAtLeast(40f)
                                                 val imgH = (activeImg.heightRatio * pageBaseH).coerceAtLeast(40f)
 
-                                                val interactiveBounds = Rect(
-                                                    left = imgLeft - 40f,
-                                                    top = imgTop - 90f,
-                                                    right = imgLeft + imgW + 40f,
-                                                    bottom = imgTop + imgH + 60f
-                                                )
-                                                if (interactiveBounds.contains(Offset(touchX, touchY))) {
+                                                val cx = imgLeft + imgW / 2f
+                                                val cy = imgTop + imgH / 2f
+                                                // Covers rotated bounds, corner handles, top toolbar, and bottom rotation handle
+                                                val maxInteractiveRadius = kotlin.math.hypot(imgW / 2f, imgH / 2f) + 140f
+                                                val distSq = (touchX - cx) * (touchX - cx) + (touchY - cy) * (touchY - cy)
+
+                                                if (distSq <= maxInteractiveRadius * maxInteractiveRadius) {
                                                     return@pointerInteropFilter false
                                                 } else if (motionEvent.action == MotionEvent.ACTION_DOWN) {
                                                     selectedImageId = null
@@ -969,19 +971,28 @@ fun CanvasEditorScreen(
 
                                         // Check if tapping to select an unselected image on canvas
                                         if (selectedImageId == null && motionEvent.action == MotionEvent.ACTION_DOWN) {
-                                            val safeZoom = zoomScale.coerceAtLeast(0.01f)
-                                            val touchX = motionEvent.x / safeZoom
-                                            val touchY = motionEvent.y / safeZoom
+                                            val touchX = motionEvent.x
+                                            val touchY = motionEvent.y
                                             val hitImage = localImages.filter { it.pageIndex == pageIdx }.lastOrNull { img ->
                                                 val imgLeft = img.xRatio * pageBaseW
                                                 val imgTop = img.yRatio * pageBaseH
                                                 val imgW = (img.widthRatio * pageBaseW).coerceAtLeast(40f)
                                                 val imgH = (img.heightRatio * pageBaseH).coerceAtLeast(40f)
-                                                Rect(imgLeft, imgTop, imgLeft + imgW, imgTop + imgH).contains(Offset(touchX, touchY))
+                                                val cx = imgLeft + imgW / 2f
+                                                val cy = imgTop + imgH / 2f
+                                                val rad = Math.toRadians(-img.rotationDegrees.toDouble())
+                                                val cosA = kotlin.math.cos(rad).toFloat()
+                                                val sinA = kotlin.math.sin(rad).toFloat()
+                                                val unrotX = cosA * (touchX - cx) - sinA * (touchY - cy) + cx
+                                                val unrotY = sinA * (touchX - cx) + cosA * (touchY - cy) + cy
+                                                unrotX in (imgLeft - 20f)..(imgLeft + imgW + 20f) && unrotY in (imgTop - 20f)..(imgTop + imgH + 20f)
                                             }
-                                            if (hitImage != null && selectedStudioTool != StudioTool.PEN && selectedStudioTool != StudioTool.HIGHLIGHTER && selectedStudioTool != StudioTool.ERASER) {
-                                                selectedImageId = hitImage.id
-                                                return@pointerInteropFilter false
+                                            if (hitImage != null) {
+                                                val isFinger = motionEvent.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER
+                                                if (isFinger || selectedStudioTool == StudioTool.LASSO || selectedStudioTool == StudioTool.TEXT) {
+                                                    selectedImageId = hitImage.id
+                                                    return@pointerInteropFilter false
+                                                }
                                             }
                                         }
 
@@ -1575,7 +1586,7 @@ fun CanvasEditorScreen(
                                     isSelected = selectedImageId == img.id,
                                     basePageWidthPx = pageBaseW,
                                     basePageHeightPx = pageBaseH,
-                                    pageScale = canonicalScale,
+                                    pageScale = 1f,
                                     onSelect = { selectedImageId = img.id },
                                     onUpdate = { updatedImg ->
                                         val updated = localImages.map { if (it.id == updatedImg.id) updatedImg else it }

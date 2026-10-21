@@ -8,6 +8,8 @@ import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -42,7 +45,7 @@ fun CanvasImageOverlayItem(
     isSelected: Boolean,
     basePageWidthPx: Float,
     basePageHeightPx: Float,
-    pageScale: Float,
+    pageScale: Float = 1f,
     onSelect: () -> Unit,
     onUpdate: (CanvasImageElement) -> Unit,
     onDelete: () -> Unit,
@@ -65,10 +68,17 @@ fun CanvasImageOverlayItem(
 
     if (bitmap == null) return
 
-    val imgLeftPx = image.xRatio * basePageWidthPx * pageScale
-    val imgTopPx = image.yRatio * basePageHeightPx * pageScale
-    val imgWidthPx = (image.widthRatio * basePageWidthPx * pageScale).coerceAtLeast(40f)
-    val imgHeightPx = (image.heightRatio * basePageHeightPx * pageScale).coerceAtLeast(40f)
+    val bmpAspect = remember(bitmap) {
+        bitmap.height.toFloat() / bitmap.width.toFloat().coerceAtLeast(1f)
+    }
+    val pageAspectFactor = remember(basePageWidthPx, basePageHeightPx) {
+        basePageWidthPx / basePageHeightPx.coerceAtLeast(1f)
+    }
+
+    val imgLeftPx = image.xRatio * basePageWidthPx
+    val imgTopPx = image.yRatio * basePageHeightPx
+    val imgWidthPx = (image.widthRatio * basePageWidthPx).coerceAtLeast(40f)
+    val imgHeightPx = (image.heightRatio * basePageHeightPx).coerceAtLeast(40f)
 
     var showOpacitySlider by remember { mutableStateOf(false) }
     var showContextMenu by remember { mutableStateOf(false) }
@@ -91,211 +101,275 @@ fun CanvasImageOverlayItem(
         )
     }
 
-    // Root wrapper
+    // Outer padding to contain resize handles, rotation handle stem, and floating action bar
+    val padTopDp = if (isSelected) 96.dp else 0.dp
+    val padBottomDp = if (isSelected) 60.dp else 0.dp
+    val padSideDp = if (isSelected) 48.dp else 0.dp
+
+    val padTopPx = with(density) { padTopDp.toPx() }
+    val padBottomPx = with(density) { padBottomDp.toPx() }
+    val padSidePx = with(density) { padSideDp.toPx() }
+
     Box(
         modifier = Modifier
-            .offset { IntOffset(imgLeftPx.roundToInt(), imgTopPx.roundToInt()) }
+            .offset { IntOffset((imgLeftPx - padSidePx).roundToInt(), (imgTopPx - padTopPx).roundToInt()) }
             .size(
-                width = with(density) { imgWidthPx.toDp() },
-                height = with(density) { imgHeightPx.toDp() }
+                width = with(density) { (imgWidthPx + padSidePx * 2).toDp() },
+                height = with(density) { (imgHeightPx + padTopPx + padBottomPx).toDp() }
             )
-            .zIndex(image.zIndex.toFloat() + (if (isSelected) 50f else 0f))
+            .zIndex(image.zIndex.toFloat() + (if (isSelected) 100f else 0f))
     ) {
-        // Image content with rotation, opacity, and mask
+        // Rotated Core Container holding: image content, blue selection border, 4 corner handles, and rotation handle
         Box(
             modifier = Modifier
-                .fillMaxSize()
+                .offset { IntOffset(padSidePx.roundToInt(), padTopPx.roundToInt()) }
+                .size(
+                    width = with(density) { imgWidthPx.toDp() },
+                    height = with(density) { imgHeightPx.toDp() }
+                )
                 .graphicsLayer {
                     rotationZ = image.rotationDegrees
-                    alpha = image.opacity
-                    if (image.isCircleCrop) {
-                        clip = true
-                        shape = CircleShape
-                    }
+                    transformOrigin = TransformOrigin(0.5f, 0.5f)
                 }
-                .pointerInput(image.id, image.isLocked) {
-                    detectDragGestures(
-                        onDragStart = { onSelect() },
-                        onDrag = { change, dragAmount ->
-                            if (!image.isLocked) {
-                                change.consume()
-                                val newX = (image.xRatio + dragAmount.x / (basePageWidthPx * pageScale)).coerceIn(0f, 0.90f)
-                                val newY = (image.yRatio + dragAmount.y / (basePageHeightPx * pageScale)).coerceIn(0f, 0.90f)
-                                onUpdate(image.copy(xRatio = newX, yRatio = newY))
-                            }
-                        }
-                    )
-                }
-                .clickable { onSelect() }
         ) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Canvas Image",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        // Selection boundary & handles (Active when isSelected)
-        if (isSelected) {
-            // Blue bounding box border
+            // 1. Image bitmap content + drag gesture for moving the image
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer { rotationZ = image.rotationDegrees }
-                    .border(2.dp, Color(0xFF2196F3), if (image.isCircleCrop) CircleShape else RoundedCornerShape(2.dp))
-            )
-
-            // 4 Corner Resize Handles
-            val handleSizeDp = 18.dp
-            val handleOffsetPx = with(density) { (handleSizeDp / 2).toPx() }
-
-            // Top-Left Handle
-            Box(
-                modifier = Modifier
-                    .offset { IntOffset(-handleOffsetPx.roundToInt(), -handleOffsetPx.roundToInt()) }
-                    .size(handleSizeDp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF2196F3))
-                    .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(image.id, image.isLocked) {
-                        detectDragGestures { change, dragAmount ->
+                    .graphicsLayer {
+                        alpha = image.opacity
+                        if (image.isCircleCrop) {
+                            clip = true
+                            shape = CircleShape
+                        }
+                    }
+                    .pointerInput(image.id, image.isLocked, image.rotationDegrees) {
+                        detectTransformGestures { centroid, pan, zoom, rotation ->
                             if (!image.isLocked) {
-                                change.consume()
-                                val dxRatio = dragAmount.x / (basePageWidthPx * pageScale)
-                                val dyRatio = dragAmount.y / (basePageHeightPx * pageScale)
-                                val newW = (image.widthRatio - dxRatio).coerceIn(0.12f, 0.95f)
-                                val newH = if (image.keepAspectRatio) {
-                                    newW * (bitmap.height.toFloat() / bitmap.width.toFloat())
-                                } else {
-                                    (image.heightRatio - dyRatio).coerceIn(0.12f, 0.95f)
-                                }
-                                val newX = (image.xRatio + dxRatio).coerceIn(0f, 0.90f)
-                                val newY = (image.yRatio + dyRatio).coerceIn(0f, 0.90f)
-                                onUpdate(image.copy(xRatio = newX, yRatio = newY, widthRatio = newW, heightRatio = newH))
+                                val rad = Math.toRadians(image.rotationDegrees.toDouble())
+                                val cosA = cos(rad).toFloat()
+                                val sinA = sin(rad).toFloat()
+                                // Un-rotate pan vector from local rotated frame to page frame
+                                val pagePanX = pan.x * cosA - pan.y * sinA
+                                val pagePanY = pan.x * sinA + pan.y * cosA
+
+                                val newX = (image.xRatio + pagePanX / basePageWidthPx).coerceIn(-0.2f, 0.95f)
+                                val newY = (image.yRatio + pagePanY / basePageHeightPx).coerceIn(-0.2f, 0.95f)
+
+                                val newW = if (zoom != 1f) (image.widthRatio * zoom).coerceIn(0.08f, 0.95f) else image.widthRatio
+                                val newH = if (zoom != 1f) {
+                                    if (image.keepAspectRatio) newW * bmpAspect * pageAspectFactor else (image.heightRatio * zoom).coerceIn(0.08f, 0.95f)
+                                } else image.heightRatio
+
+                                var newDeg = image.rotationDegrees + rotation
+                                while (newDeg < 0f) newDeg += 360f
+                                while (newDeg >= 360f) newDeg -= 360f
+
+                                onUpdate(
+                                    image.copy(
+                                        xRatio = newX,
+                                        yRatio = newY,
+                                        widthRatio = newW,
+                                        heightRatio = newH,
+                                        rotationDegrees = newDeg
+                                    )
+                                )
                             }
                         }
                     }
-            )
-
-            // Top-Right Handle
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset { IntOffset(handleOffsetPx.roundToInt(), -handleOffsetPx.roundToInt()) }
-                    .size(handleSizeDp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF2196F3))
-                    .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(image.id, image.isLocked) {
-                        detectDragGestures { change, dragAmount ->
-                            if (!image.isLocked) {
-                                change.consume()
-                                val dxRatio = dragAmount.x / (basePageWidthPx * pageScale)
-                                val newW = (image.widthRatio + dxRatio).coerceIn(0.12f, 0.95f)
-                                val newH = if (image.keepAspectRatio) {
-                                    newW * (bitmap.height.toFloat() / bitmap.width.toFloat())
-                                } else {
-                                    (image.heightRatio - (dragAmount.y / (basePageHeightPx * pageScale))).coerceIn(0.12f, 0.95f)
-                                }
-                                onUpdate(image.copy(widthRatio = newW, heightRatio = newH))
-                            }
-                        }
+                    .pointerInput(image.id) {
+                        detectTapGestures(onTap = { onSelect() })
                     }
-            )
-
-            // Bottom-Left Handle
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .offset { IntOffset(-handleOffsetPx.roundToInt(), handleOffsetPx.roundToInt()) }
-                    .size(handleSizeDp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF2196F3))
-                    .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(image.id, image.isLocked) {
-                        detectDragGestures { change, dragAmount ->
-                            if (!image.isLocked) {
-                                change.consume()
-                                val dxRatio = dragAmount.x / (basePageWidthPx * pageScale)
-                                val newW = (image.widthRatio - dxRatio).coerceIn(0.12f, 0.95f)
-                                val newH = if (image.keepAspectRatio) {
-                                    newW * (bitmap.height.toFloat() / bitmap.width.toFloat())
-                                } else {
-                                    (image.heightRatio + (dragAmount.y / (basePageHeightPx * pageScale))).coerceIn(0.12f, 0.95f)
-                                }
-                                val newX = (image.xRatio + dxRatio).coerceIn(0f, 0.90f)
-                                onUpdate(image.copy(xRatio = newX, widthRatio = newW, heightRatio = newH))
-                            }
-                        }
-                    }
-            )
-
-            // Bottom-Right Handle
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset { IntOffset(handleOffsetPx.roundToInt(), handleOffsetPx.roundToInt()) }
-                    .size(handleSizeDp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF2196F3))
-                    .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(image.id, image.isLocked) {
-                        detectDragGestures { change, dragAmount ->
-                            if (!image.isLocked) {
-                                change.consume()
-                                val dxRatio = dragAmount.x / (basePageWidthPx * pageScale)
-                                val newW = (image.widthRatio + dxRatio).coerceIn(0.12f, 0.95f)
-                                val newH = if (image.keepAspectRatio) {
-                                    newW * (bitmap.height.toFloat() / bitmap.width.toFloat())
-                                } else {
-                                    (image.heightRatio + (dragAmount.y / (basePageHeightPx * pageScale))).coerceIn(0.12f, 0.95f)
-                                }
-                                onUpdate(image.copy(widthRatio = newW, heightRatio = newH))
-                            }
-                        }
-                    }
-            )
-
-            // Bottom Center Rotation Handle (⟳) matching Screenshot 3
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .offset(y = 38.dp)
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(Color.White)
-                    .border(2.dp, Color(0xFF2196F3), CircleShape)
-                    .pointerInput(image.id, image.isLocked) {
-                        detectDragGestures { change, dragAmount ->
-                            if (!image.isLocked) {
-                                change.consume()
-                                val centerX = imgWidthPx / 2f
-                                val centerY = imgHeightPx / 2f
-                                val curPos = change.position
-                                val angleRad = atan2((curPos.y - centerY).toDouble(), (curPos.x - centerX).toDouble())
-                                var deg = Math.toDegrees(angleRad).toFloat() + 90f
-                                while (deg < 0f) deg += 360f
-                                while (deg >= 360f) deg -= 360f
-                                onUpdate(image.copy(rotationDegrees = deg))
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Rotate",
-                    tint = Color(0xFF2196F3),
-                    modifier = Modifier.size(18.dp)
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Canvas Image",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
                 )
             }
 
-            // Floating Action Bar directly above the image (matching Screenshot 3)
+            // 2. Selection border & handles (when isSelected)
+            if (isSelected) {
+                // Blue selection boundary border
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .border(2.dp, Color(0xFF2196F3), if (image.isCircleCrop) CircleShape else RoundedCornerShape(2.dp))
+                )
+
+                val handleSizeDp = 20.dp
+                val handleOffsetPx = with(density) { (handleSizeDp / 2).toPx() }
+
+                // Top-Left Resize Handle
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(-handleOffsetPx.roundToInt(), -handleOffsetPx.roundToInt()) }
+                        .size(handleSizeDp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2196F3))
+                        .border(2.dp, Color.White, CircleShape)
+                        .pointerInput(image.id, image.isLocked) {
+                            detectDragGestures { change, dragAmount ->
+                                if (!image.isLocked) {
+                                    change.consume()
+                                    val dx = dragAmount.x / basePageWidthPx
+                                    val dy = dragAmount.y / basePageHeightPx
+                                    val newW = (image.widthRatio - dx).coerceIn(0.08f, 0.95f)
+                                    val newH = if (image.keepAspectRatio) {
+                                        newW * bmpAspect * pageAspectFactor
+                                    } else {
+                                        (image.heightRatio - dy).coerceIn(0.08f, 0.95f)
+                                    }
+                                    val newX = (image.xRatio + (image.widthRatio - newW)).coerceIn(-0.2f, 0.95f)
+                                    val newY = (image.yRatio + (image.heightRatio - newH)).coerceIn(-0.2f, 0.95f)
+                                    onUpdate(image.copy(xRatio = newX, yRatio = newY, widthRatio = newW, heightRatio = newH))
+                                }
+                            }
+                        }
+                )
+
+                // Top-Right Resize Handle
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset { IntOffset(handleOffsetPx.roundToInt(), -handleOffsetPx.roundToInt()) }
+                        .size(handleSizeDp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2196F3))
+                        .border(2.dp, Color.White, CircleShape)
+                        .pointerInput(image.id, image.isLocked) {
+                            detectDragGestures { change, dragAmount ->
+                                if (!image.isLocked) {
+                                    change.consume()
+                                    val dx = dragAmount.x / basePageWidthPx
+                                    val dy = dragAmount.y / basePageHeightPx
+                                    val newW = (image.widthRatio + dx).coerceIn(0.08f, 0.95f)
+                                    val newH = if (image.keepAspectRatio) {
+                                        newW * bmpAspect * pageAspectFactor
+                                    } else {
+                                        (image.heightRatio - dy).coerceIn(0.08f, 0.95f)
+                                    }
+                                    val newY = (image.yRatio + (image.heightRatio - newH)).coerceIn(-0.2f, 0.95f)
+                                    onUpdate(image.copy(yRatio = newY, widthRatio = newW, heightRatio = newH))
+                                }
+                            }
+                        }
+                )
+
+                // Bottom-Left Resize Handle
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .offset { IntOffset(-handleOffsetPx.roundToInt(), handleOffsetPx.roundToInt()) }
+                        .size(handleSizeDp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2196F3))
+                        .border(2.dp, Color.White, CircleShape)
+                        .pointerInput(image.id, image.isLocked) {
+                            detectDragGestures { change, dragAmount ->
+                                if (!image.isLocked) {
+                                    change.consume()
+                                    val dx = dragAmount.x / basePageWidthPx
+                                    val dy = dragAmount.y / basePageHeightPx
+                                    val newW = (image.widthRatio - dx).coerceIn(0.08f, 0.95f)
+                                    val newH = if (image.keepAspectRatio) {
+                                        newW * bmpAspect * pageAspectFactor
+                                    } else {
+                                        (image.heightRatio + dy).coerceIn(0.08f, 0.95f)
+                                    }
+                                    val newX = (image.xRatio + (image.widthRatio - newW)).coerceIn(-0.2f, 0.95f)
+                                    onUpdate(image.copy(xRatio = newX, widthRatio = newW, heightRatio = newH))
+                                }
+                            }
+                        }
+                )
+
+                // Bottom-Right Resize Handle
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset { IntOffset(handleOffsetPx.roundToInt(), handleOffsetPx.roundToInt()) }
+                        .size(handleSizeDp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2196F3))
+                        .border(2.dp, Color.White, CircleShape)
+                        .pointerInput(image.id, image.isLocked) {
+                            detectDragGestures { change, dragAmount ->
+                                if (!image.isLocked) {
+                                    change.consume()
+                                    val dx = dragAmount.x / basePageWidthPx
+                                    val dy = dragAmount.y / basePageHeightPx
+                                    val newW = (image.widthRatio + dx).coerceIn(0.08f, 0.95f)
+                                    val newH = if (image.keepAspectRatio) {
+                                        newW * bmpAspect * pageAspectFactor
+                                    } else {
+                                        (image.heightRatio + dy).coerceIn(0.08f, 0.95f)
+                                    }
+                                    onUpdate(image.copy(widthRatio = newW, heightRatio = newH))
+                                }
+                            }
+                        }
+                )
+
+                // Vertical Stem Line connecting bottom edge to rotation handle
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = 10.dp)
+                        .width(2.dp)
+                        .height(24.dp)
+                        .background(Color(0xFF2196F3))
+                )
+
+                // Bottom Center Rotation Handle (⟳)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = 34.dp)
+                        .size(30.dp)
+                        .shadow(4.dp, CircleShape)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .border(2.dp, Color(0xFF2196F3), CircleShape)
+                        .pointerInput(image.id, image.isLocked) {
+                            detectDragGestures { change, dragAmount ->
+                                if (!image.isLocked) {
+                                    change.consume()
+                                    val radius = (imgHeightPx / 2f + with(density) { 34.dp.toPx() }).coerceAtLeast(30f)
+                                    val dAngle = (dragAmount.x / radius) * (180f / Math.PI.toFloat())
+                                    var newDeg = (image.rotationDegrees + dAngle) % 360f
+                                    if (newDeg < 0f) newDeg += 360f
+                                    onUpdate(image.copy(rotationDegrees = newDeg))
+                                }
+                            }
+                        }
+                        .pointerInput(image.id) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    onUpdate(image.copy(rotationDegrees = 0f))
+                                    Toast.makeText(context, "Angle reset to 0°", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Rotate",
+                        tint = Color(0xFF2196F3),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+
+        // 3. Floating Action Bar directly above the image
+        if (isSelected) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .offset(y = (-48).dp)
+                    .offset(y = if (showOpacitySlider) 54.dp else 46.dp)
                     .wrapContentSize()
             ) {
                 Card(
@@ -403,7 +477,7 @@ fun CanvasImageOverlayItem(
                     border = BorderStroke(1.dp, Color(0xFF33333E)),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .offset(y = (-92).dp)
+                        .offset(y = 6.dp)
                         .width(220.dp)
                         .shadow(8.dp, RoundedCornerShape(12.dp))
                 ) {
@@ -438,7 +512,7 @@ fun CanvasImageOverlayItem(
                     border = BorderStroke(1.dp, Color(0xFF2F2F38)),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .offset(x = 190.dp, y = 0.dp)
+                        .offset(x = 180.dp, y = 20.dp)
                         .width(180.dp)
                         .shadow(12.dp, RoundedCornerShape(16.dp))
                 ) {
