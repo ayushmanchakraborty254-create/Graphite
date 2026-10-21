@@ -109,7 +109,7 @@ class AppUpdateManager(
                 val publishedAt = latest.optString("published_at", "")
 
                 // Find APK asset download URL
-                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-latest.apk"
+                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
                 val assets = latest.optJSONArray("assets")
                 if (assets != null) {
                     for (i in 0 until assets.length()) {

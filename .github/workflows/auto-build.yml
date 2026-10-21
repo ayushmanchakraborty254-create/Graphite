@@ -48,11 +48,10 @@ jobs:
           echo "msg=$COMMIT_MSG" >> $GITHUB_OUTPUT
           echo "date=$BUILD_DATE" >> $GITHUB_OUTPUT
           
-          # Find generated APK and copy to release names
+          # Find generated APK and copy to release name
           APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          cp "$APK_PATH" Graphite-latest.apk
           cp "$APK_PATH" Graphite-v1.0.0.apk
-          ls -lh Graphite-latest.apk
+          ls -lh Graphite-v1.0.0.apk
 
       - name: Update Latest Release
         uses: softprops/action-gh-release@v2
@@ -70,7 +69,6 @@ jobs:
           prerelease: false
           make_latest: true
           files: |
-            Graphite-latest.apk
             Graphite-v1.0.0.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
