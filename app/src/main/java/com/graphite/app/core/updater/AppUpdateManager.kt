@@ -131,11 +131,11 @@ class AppUpdateManager(
                 val localSha = BuildConfig.GIT_COMMIT_SHA
                 val localBuildTime = BuildConfig.BUILD_TIME_MILLIS
 
-                // Check dismissed SHA in SharedPreferences (user clicked Later or installed)
+                // Check snooze duration in SharedPreferences (user clicked Later)
                 if (context != null) {
                     val prefs = context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
-                    val dismissedSha = prefs.getString("dismissed_sha", null)
-                    if (!dismissedSha.isNullOrBlank() && dismissedSha.equals(releaseSha, ignoreCase = true)) {
+                    val snoozedUntil = prefs.getLong("snoozed_until_${releaseSha}", 0L)
+                    if (System.currentTimeMillis() < snoozedUntil) {
                         _updateState.value = UpdateState.Idle
                         withContext(Dispatchers.Main) { onComplete(false) }
                         return@launch
@@ -239,7 +239,8 @@ class AppUpdateManager(
         if (context != null && !sha.isNullOrBlank()) {
             context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
                 .edit()
-                .putString("dismissed_sha", sha)
+                .putLong("snoozed_until_${sha}", System.currentTimeMillis() + 30 * 60 * 1000L) // snooze 30 mins
+                .remove("dismissed_sha") // clear legacy permanent blacklist
                 .apply()
         }
         _updateState.value = UpdateState.Idle
@@ -335,7 +336,6 @@ fun AppUpdateModalDialog(
                 confirmButton = {
                     Button(
                         onClick = {
-                            updateManager.dismissUpdate(context, state.info.commitSha)
                             updateManager.downloadAndInstall(context, state.info.downloadUrl)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),

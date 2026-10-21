@@ -31,7 +31,8 @@ class GoogleAccountManager(
     private val secureStorage: SecureStorage,
     private val supabaseAuthManager: SupabaseAuthManager? = null,
     private val graphiteRepository: GraphiteRepository = GraphiteRepository,
-    private val webClientId: String = GraphiteConfig.googleWebClientId
+    private val webClientId: String = GraphiteConfig.googleWebClientId,
+    private val context: Context? = null
 ) {
 
     private val _currentUser = MutableStateFlow<GoogleProfile?>(null)
@@ -42,6 +43,32 @@ class GoogleAccountManager(
 
     init {
         restoreFromStorage()
+        if (context != null && _currentUser.value == null && !_isGuestMode.value) {
+            restoreSession(context)
+        }
+    }
+
+    fun restoreSession(ctx: Context) {
+        if (_currentUser.value != null || _isGuestMode.value) return
+        restoreFromStorage()
+        if (_currentUser.value != null || _isGuestMode.value) return
+
+        try {
+            val lastAccount = GoogleSignIn.getLastSignedInAccount(ctx)
+            if (lastAccount != null) {
+                val rawEmail = (lastAccount.account?.name ?: lastAccount.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+                if (rawEmail != null) {
+                    val name = lastAccount.displayName ?: rawEmail.substringBefore("@")
+                    val profile = GoogleProfile(
+                        email = rawEmail,
+                        displayName = name,
+                        photoUrl = lastAccount.photoUrl?.toString(),
+                        idToken = lastAccount.idToken
+                    )
+                    setProfileDirectly(profile)
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     fun hasActiveSession(): Boolean = _currentUser.value != null || _isGuestMode.value

@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        GraphiteApplication.instance.googleAccountManager.restoreSession(this)
         handleDeepLinkIntent(intent)
         handleShareIntent(intent)
         setContent {

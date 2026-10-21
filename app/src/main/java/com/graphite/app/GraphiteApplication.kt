@@ -41,18 +41,16 @@ class GraphiteApplication : Application() {
         super.onCreate()
         instance = this
 
-        secureStorage = try {
-            SecureStorage.createEncrypted(this)
-        } catch (_: Exception) {
-            // Fallback for emulator / non-keystore environments
-            SecureStorage.createInMemory()
-        }
-
+        secureStorage = SecureStorage.create(this)
         supabaseAuthManager = SupabaseAuthManager(secureStorage)
         supabaseNotesRepository = SupabaseNotesRepository(supabaseAuthManager)
         supabaseSyncManager = SupabaseSyncManager(supabaseAuthManager, supabaseNotesRepository)
         googleDriveManager = GoogleDriveManager(secureStorage)
-        googleAccountManager = com.graphite.app.core.auth.GoogleAccountManager(secureStorage, supabaseAuthManager)
+        googleAccountManager = com.graphite.app.core.auth.GoogleAccountManager(
+            secureStorage = secureStorage,
+            supabaseAuthManager = supabaseAuthManager,
+            context = this
+        )
         fileImportManager = com.graphite.app.core.importer.FileImportManager(
             supabaseAuthManager = supabaseAuthManager,
             supabaseSyncManager = supabaseSyncManager

@@ -22,6 +22,30 @@ interface SecureStorage {
         private const val PREFS_FILE = "graphite_encrypted_prefs"
 
         /**
+         * Robust storage creator:
+         * 1. Attempts EncryptedSharedPreferences.
+         * 2. If keystore keys or file are corrupted (e.g. from version update or signature change), clears corrupted file and retries.
+         * 3. If encryption is unsupported on the device, safely falls back to persistent disk-backed SharedPreferences (NEVER in-memory!).
+         */
+        fun create(context: Context): SecureStorage {
+            return try {
+                createEncrypted(context)
+            } catch (e: Exception) {
+                try {
+                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+                    val prefsFile = java.io.File(sharedPrefsDir, "$PREFS_FILE.xml")
+                    if (prefsFile.exists()) {
+                        prefsFile.delete()
+                    }
+                    createEncrypted(context)
+                } catch (_: Exception) {
+                    val fallbackPrefs = context.getSharedPreferences("graphite_persistent_prefs", Context.MODE_PRIVATE)
+                    SharedPreferencesSecureStorage(fallbackPrefs)
+                }
+            }
+        }
+
+        /**
          * Creates an EncryptedSharedPreferences backed storage using Android Keystore AES256-GCM.
          */
         fun createEncrypted(context: Context): SecureStorage {
