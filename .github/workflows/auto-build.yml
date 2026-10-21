@@ -65,6 +65,7 @@ jobs:
             This APK is automatically compiled and published on every commit pushed to `main`.
           draft: false
           prerelease: false
+          make_latest: true
           files: |
             Graphite-latest.apk
             Graphite-v1.0.0.apk
