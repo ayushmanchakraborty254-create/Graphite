@@ -45,6 +45,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -147,10 +157,36 @@ fun NoteshelfScreen(
     var folderForOptionsDialog by remember { mutableStateOf<FolderItem?>(null) }
     var isListView by remember { mutableStateOf(false) }
 
+    var showFoldersOnNotesScreen by remember {
+        mutableStateOf(sortPrefs.getBoolean("show_folders_on_screen", true))
+    }
+
+    // Drag and Drop state
+    var isDraggingNote by remember { mutableStateOf(false) }
+    var draggedNotebook by remember { mutableStateOf<NotebookItem?>(null) }
+    var dragTouchPositionInRoot by remember { mutableStateOf(Offset.Zero) }
+    var totalDragDistance by remember { mutableFloatStateOf(0f) }
+    var hoveredFolderId by remember { mutableStateOf<String?>(null) }
+    val folderBoundsMap = remember { mutableStateMapOf<String, Rect>() }
+
+    // Folder upload state
+    var uploadingFolderInfo by remember { mutableStateOf<Pair<FolderItem, Triple<Int, Int, String>?>?>(null) }
+    var isUploadingFolder by remember { mutableStateOf(false) }
+
     // Note Selection & Deletion state
     var selectedNotebookIds by remember { mutableStateOf(setOf<String>()) }
     var notesToDelete by remember { mutableStateOf<List<NotebookItem>?>(null) }
     var isDeletingNotesCloud by remember { mutableStateOf(false) }
+
+    LaunchedEffect(hasActiveSession) {
+        if (!hasActiveSession) {
+            selectedCategory = "All Notes"
+            selectedNotebookIds = emptySet()
+            isDraggingNote = false
+            draggedNotebook = null
+            hoveredFolderId = null
+        }
+    }
 
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -195,6 +231,39 @@ fun NoteshelfScreen(
                     isSyncingNotes = false
                     val count = dResult.getOrNull() ?: sResult.getOrNull() ?: 0
                     Toast.makeText(context, "Synced $count notes", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val handleUploadWholeFolder: (FolderItem) -> Unit = { folder ->
+        val folderNotes = notebooks.filter { it.folderId == folder.id && !it.isDeleted }
+        if (folderNotes.isEmpty()) {
+            Toast.makeText(context, "Folder \"${folder.name}\" has no notes to upload.", Toast.LENGTH_SHORT).show()
+        } else if (!driveManager.hasDrivePermission(context)) {
+            selectedNotebookForUpload = null
+            val intent = driveManager.createAuthorizationIntent(context)
+            driveAuthLauncher.launch(intent)
+        } else {
+            isUploadingFolder = true
+            uploadingFolderInfo = Pair(folder, Triple(0, folderNotes.size, "Preparing folder in Google Drive..."))
+            scope.launch {
+                val result = driveManager.uploadEntireFolder(
+                    context = context,
+                    folder = folder,
+                    items = folderNotes,
+                    onProgress = { current, total, itemTitle ->
+                        uploadingFolderInfo = Pair(folder, Triple(current, total, itemTitle))
+                    }
+                )
+                isUploadingFolder = false
+                uploadingFolderInfo = null
+                if (result.isSuccess) {
+                    val count = result.getOrNull() ?: 0
+                    Toast.makeText(context, "Uploaded folder \"${folder.name}\" ($count notes) to Google Drive!", Toast.LENGTH_LONG).show()
+                    syncManager.syncNotes()
+                } else {
+                    Toast.makeText(context, "Folder upload failed: ${result.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -364,144 +433,148 @@ fun NoteshelfScreen(
                 }
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            // Folders & Subfolders Section (strictly visible only when user has active session)
+            if (hasActiveSession) {
+                Spacer(modifier = Modifier.height(16.dp))
 
-            // Folders & Subfolders Section
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Folders",
-                    color = Color.Gray,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Icon(
-                    imageVector = Icons.Default.KeyboardArrowDown,
-                    contentDescription = null,
-                    tint = Color.Gray,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-
-            val rootFolders = folders.filter { it.parentId == null }
-            rootFolders.forEach { folder ->
-                val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
-                val subfolders = folders.filter { it.parentId == folder.id }
-                val folderColor = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(modifier = Modifier.weight(1f)) {
-                        SidebarItem(
-                            title = folder.name,
-                            icon = Icons.Default.Folder,
-                            iconSize = 24.dp,
-                            iconTint = folderColor,
-                            count = noteCount,
-                            isSelected = selectedCategory == folder.id,
-                            onLongClick = { folderForOptionsDialog = folder },
-                            onClick = {
-                                selectedCategory = folder.id
-                                if (!isTablet) sidebarVisible = false
-                            }
-                        )
-                    }
-                    IconButton(
-                        onClick = { folderForOptionsDialog = folder },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Folder Settings",
-                            tint = Color.Gray,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            selectedParentFolderForSubfolder = folder
-                            showNewFolderDialog = true
-                        },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CreateNewFolder,
-                            contentDescription = "Add Subfolder",
-                            tint = Color.Gray,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-
-                // Render subfolders indented
-                subfolders.forEach { subfolder ->
-                    val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
-                    val subColor = subfolder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
+                if (folders.isNotEmpty()) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            SidebarItem(
-                                title = subfolder.name,
-                                icon = Icons.Default.FolderOpen,
-                                iconSize = 22.dp,
-                                iconTint = subColor,
-                                count = subNoteCount,
-                                isSelected = selectedCategory == subfolder.id,
-                                onLongClick = { folderForOptionsDialog = subfolder },
-                                onClick = {
-                                    selectedCategory = subfolder.id
-                                    if (!isTablet) sidebarVisible = false
-                                }
-                            )
-                        }
-                        IconButton(
-                            onClick = { folderForOptionsDialog = subfolder },
-                            modifier = Modifier.size(24.dp)
+                        Text(
+                            text = "Folders",
+                            color = Color.Gray,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            tint = Color.Gray,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    val rootFolders = folders.filter { it.parentId == null }
+                    rootFolders.forEach { folder ->
+                        val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
+                        val subfolders = folders.filter { it.parentId == folder.id }
+                        val folderColor = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.MoreVert,
-                                contentDescription = "Subfolder Settings",
-                                tint = Color.Gray,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            Box(modifier = Modifier.weight(1f)) {
+                                SidebarItem(
+                                    title = folder.name,
+                                    icon = Icons.Default.Folder,
+                                    iconSize = 24.dp,
+                                    iconTint = folderColor,
+                                    count = noteCount,
+                                    isSelected = selectedCategory == folder.id,
+                                    onLongClick = { folderForOptionsDialog = folder },
+                                    onClick = {
+                                        selectedCategory = folder.id
+                                        if (!isTablet) sidebarVisible = false
+                                    }
+                                )
+                            }
+                            IconButton(
+                                onClick = { folderForOptionsDialog = folder },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "Folder Settings",
+                                    tint = Color.Gray,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    selectedParentFolderForSubfolder = folder
+                                    showNewFolderDialog = true
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CreateNewFolder,
+                                    contentDescription = "Add Subfolder",
+                                    tint = Color.Gray,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        // Render subfolders indented
+                        subfolders.forEach { subfolder ->
+                            val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
+                            val subColor = subfolder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    SidebarItem(
+                                        title = subfolder.name,
+                                        icon = Icons.Default.FolderOpen,
+                                        iconSize = 22.dp,
+                                        iconTint = subColor,
+                                        count = subNoteCount,
+                                        isSelected = selectedCategory == subfolder.id,
+                                        onLongClick = { folderForOptionsDialog = subfolder },
+                                        onClick = {
+                                            selectedCategory = subfolder.id
+                                            if (!isTablet) sidebarVisible = false
+                                        }
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { folderForOptionsDialog = subfolder },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = "Subfolder Settings",
+                                        tint = Color.Gray,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-            }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable {
-                        selectedParentFolderForSubfolder = null
-                        showNewFolderDialog = true
-                    }
-                    .padding(vertical = 8.dp, horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AddCircleOutline,
-                    contentDescription = "New Folder",
-                    tint = GraphiteOrange,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "New Folder",
-                    color = GraphiteOrange,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            selectedParentFolderForSubfolder = null
+                            showNewFolderDialog = true
+                        }
+                        .padding(vertical = 8.dp, horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddCircleOutline,
+                        contentDescription = "New Folder",
+                        tint = GraphiteOrange,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "New Folder",
+                        color = GraphiteOrange,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
     }
@@ -763,6 +836,33 @@ fun NoteshelfScreen(
                                 }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(if (showFoldersOnNotesScreen) "Hide Folders on Screen" else "Show Folders on Screen", color = Color.White)
+                                        Icon(
+                                            imageVector = if (showFoldersOnNotesScreen) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                            contentDescription = null,
+                                            tint = GraphiteOrange,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    showFoldersOnNotesScreen = !showFoldersOnNotesScreen
+                                    sortPrefs.edit().putBoolean("show_folders_on_screen", showFoldersOnNotesScreen).apply()
+                                    moreMenuExpanded = false
+                                    Toast.makeText(
+                                        context,
+                                        if (showFoldersOnNotesScreen) "Folders shown on notes screen" else "Folders hidden from notes screen",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("New Folder", color = GraphiteOrange) },
                                 onClick = {
                                     moreMenuExpanded = false
@@ -918,7 +1018,183 @@ fun NoteshelfScreen(
                     }
                 }
 
-                if (sortedNotebooks.isEmpty()) {
+                val activeFolder = folders.find { it.id == selectedCategory }
+                val isInsideFolder = activeFolder != null
+                val hasFoldersToShow = hasActiveSession && showFoldersOnNotesScreen && selectedCategory == "All Notes" && searchQuery.isBlank() && folders.isNotEmpty()
+                val rootFoldersToShow = if (hasFoldersToShow) folders.filter { it.parentId == null } else emptyList()
+
+                // Filter / Category Chips Row matching Image 1
+                if (selectedCategory != "Trash") {
+                    if (isInsideFolder && activeFolder != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF1E1E22))
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { selectedCategory = "All Notes" }
+                                    .padding(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to All Notes",
+                                    tint = GraphiteOrange,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("All Notes", color = GraphiteOrange, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilledTonalButton(
+                                    onClick = { handleUploadWholeFolder(activeFolder) },
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = Color(0xFF1B5E20),
+                                        contentColor = Color(0xFF81C784)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Upload Folder to Drive", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                IconButton(
+                                    onClick = { folderForOptionsDialog = activeFolder },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.Settings, contentDescription = "Folder Settings", tint = Color.LightGray, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = selectedCategory == "All Notes",
+                                    onClick = { selectedCategory = "All Notes" },
+                                    label = { Text("All", fontWeight = FontWeight.SemiBold, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = GraphiteOrange,
+                                        selectedLabelColor = Color.White,
+                                        containerColor = Color(0xFF1E1E1E),
+                                        labelColor = Color.LightGray
+                                    ),
+                                    border = null,
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+
+                                FilterChip(
+                                    selected = selectedCategory == "Starred",
+                                    onClick = { selectedCategory = if (selectedCategory == "Starred") "All Notes" else "Starred" },
+                                    label = { Text("★ Favorites", fontWeight = FontWeight.SemiBold, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = GraphiteOrange,
+                                        selectedLabelColor = Color.White,
+                                        containerColor = Color(0xFF1E1E1E),
+                                        labelColor = Color.LightGray
+                                    ),
+                                    border = null,
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+
+                                if (hasActiveSession) {
+                                    FilterChip(
+                                        selected = showFoldersOnNotesScreen,
+                                        onClick = {
+                                            showFoldersOnNotesScreen = !showFoldersOnNotesScreen
+                                            sortPrefs.edit().putBoolean("show_folders_on_screen", showFoldersOnNotesScreen).apply()
+                                            Toast.makeText(
+                                                context,
+                                                if (showFoldersOnNotesScreen) "Folders shown on notes screen" else "Folders hidden from notes screen",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        },
+                                        label = {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Icon(
+                                                    imageVector = if (showFoldersOnNotesScreen) Icons.Default.Folder else Icons.Default.FolderOff,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Text(if (showFoldersOnNotesScreen) "Folders" else "Folders: Off", fontSize = 12.sp)
+                                            }
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = Color(0xFF263238),
+                                            selectedLabelColor = Color(0xFF64B5F6),
+                                            selectedLeadingIconColor = Color(0xFF64B5F6),
+                                            containerColor = Color(0xFF1E1E1E),
+                                            labelColor = Color.Gray
+                                        ),
+                                        border = BorderStroke(1.dp, if (showFoldersOnNotesScreen) Color(0xFF1976D2) else Color(0xFF333333)),
+                                        shape = RoundedCornerShape(16.dp)
+                                    )
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "↓ ${currentSortOption.substringBefore(" ")}",
+                                    color = Color.Gray,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .clickable { moreMenuExpanded = true }
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+                                IconButton(
+                                    onClick = { isListView = !isListView },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isListView) Icons.Default.GridView else Icons.Default.ViewList,
+                                        contentDescription = "Toggle View",
+                                        tint = Color.LightGray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        selectedNotebookIds = if (selectedNotebookIds.isEmpty()) {
+                                            setOfNotNull(sortedNotebooks.firstOrNull()?.id)
+                                        } else {
+                                            emptySet()
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircleOutline,
+                                        contentDescription = "Selection Mode",
+                                        tint = if (selectedNotebookIds.isNotEmpty()) GraphiteOrange else Color.LightGray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (sortedNotebooks.isEmpty() && rootFoldersToShow.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -946,14 +1222,14 @@ fun NoteshelfScreen(
                             }
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
-                                text = if (!hasActiveSession) "Account Required" else if (selectedCategory == "Recordings") "No audio recordings yet" else "No notebooks found",
+                                text = if (!hasActiveSession) "Account Required" else if (selectedCategory == "Recordings") "No audio recordings yet" else if (isInsideFolder) "Folder is empty" else "No notebooks found",
                                 color = Color.White,
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = if (!hasActiveSession) "Sign in with Google to sync notes across devices or use a Guest Account for offline notes." else if (selectedCategory == "Recordings") "Voice notes and audio clips recorded in your notebooks will appear here." else "Tap New Notebook or Quick Note above to create one.",
+                                text = if (!hasActiveSession) "Sign in with Google to sync notes across devices or use a Guest Account for offline notes." else if (selectedCategory == "Recordings") "Voice notes and audio clips recorded in your notebooks will appear here." else if (isInsideFolder) "Drag notes into this folder or tap New Notebook to create one." else "Tap New Notebook or Quick Note above to create one.",
                                 color = Color.Gray,
                                 fontSize = 13.sp,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -979,7 +1255,28 @@ fun NoteshelfScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
-                        items(sortedNotebooks) { notebook ->
+                        if (hasFoldersToShow) {
+                            items(rootFoldersToShow, key = { "folder_list_${it.id}" }) { folder ->
+                                val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
+                                FolderListRow(
+                                    folder = folder,
+                                    noteCount = noteCount,
+                                    isHoveredForDrop = (hoveredFolderId == folder.id),
+                                    onClick = { selectedCategory = folder.id },
+                                    onLongClick = { folderForOptionsDialog = folder },
+                                    onUploadFolder = { handleUploadWholeFolder(folder) },
+                                    onOpenOptions = { folderForOptionsDialog = folder },
+                                    onDeleteFolder = {
+                                        GraphiteRepository.deleteFolder(folder.id)
+                                        Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.onGloballyPositioned { coords ->
+                                        folderBoundsMap[folder.id] = coords.boundsInRoot()
+                                    }
+                                )
+                            }
+                        }
+                        items(sortedNotebooks, key = { "note_${it.id}" }) { notebook ->
                             NotebookListRow(
                                 notebook = notebook,
                                 isSelected = notebook.id in selectedNotebookIds,
@@ -995,6 +1292,46 @@ fun NoteshelfScreen(
                                 },
                                 onLongClick = {
                                     toggleNoteSelection(notebook.id)
+                                },
+                                onDragStart = { rootPos ->
+                                    isDraggingNote = true
+                                    draggedNotebook = notebook
+                                    dragTouchPositionInRoot = rootPos
+                                    totalDragDistance = 0f
+                                },
+                                onDrag = { dragAmount ->
+                                    dragTouchPositionInRoot += dragAmount
+                                    totalDragDistance += dragAmount.getDistance()
+                                    hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
+                                        rect.contains(dragTouchPositionInRoot)
+                                    }?.key
+                                },
+                                onDragEnd = {
+                                    if (hoveredFolderId != null && draggedNotebook != null) {
+                                        val target = folders.find { it.id == hoveredFolderId }
+                                        val toMove = if (draggedNotebook!!.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
+                                            selectedNotebookIds
+                                        } else {
+                                            setOf(draggedNotebook!!.id)
+                                        }
+                                        GraphiteRepository.moveNotebooksToFolder(toMove, hoveredFolderId!!)
+                                        val msg = if (toMove.size == 1) "Moved \"${draggedNotebook!!.title}\" to ${target?.name ?: "folder"}"
+                                                  else "Moved ${toMove.size} notes to ${target?.name ?: "folder"}"
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        selectedNotebookIds = emptySet()
+                                    } else if (totalDragDistance < 15f) {
+                                        toggleNoteSelection(notebook.id)
+                                    }
+                                    isDraggingNote = false
+                                    draggedNotebook = null
+                                    hoveredFolderId = null
+                                    totalDragDistance = 0f
+                                },
+                                onDragCancel = {
+                                    isDraggingNote = false
+                                    draggedNotebook = null
+                                    hoveredFolderId = null
+                                    totalDragDistance = 0f
                                 },
                                 onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
                                 onSetPassword = { noteToChangePassword = notebook },
@@ -1021,13 +1358,35 @@ fun NoteshelfScreen(
                     }
                 } else {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 140.dp),
+                        columns = GridCells.Adaptive(minSize = 135.dp),
                         modifier = Modifier.fillMaxSize(),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
-                        items(sortedNotebooks) { notebook ->
+                        if (hasFoldersToShow) {
+                            items(rootFoldersToShow, key = { "folder_${it.id}" }) { folder ->
+                                val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
+                                FolderThumbnailCard(
+                                    folder = folder,
+                                    noteCount = noteCount,
+                                    isHoveredForDrop = (hoveredFolderId == folder.id),
+                                    onClick = { selectedCategory = folder.id },
+                                    onLongClick = { folderForOptionsDialog = folder },
+                                    onUploadFolder = { handleUploadWholeFolder(folder) },
+                                    onOpenOptions = { folderForOptionsDialog = folder },
+                                    onDeleteFolder = {
+                                        GraphiteRepository.deleteFolder(folder.id)
+                                        Toast.makeText(context, "Folder deleted", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.onGloballyPositioned { coords ->
+                                        folderBoundsMap[folder.id] = coords.boundsInRoot()
+                                    }
+                                )
+                            }
+                        }
+
+                        items(sortedNotebooks, key = { "note_${it.id}" }) { notebook ->
                             NotebookThumbnailCard(
                                 notebook = notebook,
                                 isSelected = notebook.id in selectedNotebookIds,
@@ -1043,6 +1402,46 @@ fun NoteshelfScreen(
                                 },
                                 onLongClick = {
                                     toggleNoteSelection(notebook.id)
+                                },
+                                onDragStart = { rootPos ->
+                                    isDraggingNote = true
+                                    draggedNotebook = notebook
+                                    dragTouchPositionInRoot = rootPos
+                                    totalDragDistance = 0f
+                                },
+                                onDrag = { dragAmount ->
+                                    dragTouchPositionInRoot += dragAmount
+                                    totalDragDistance += dragAmount.getDistance()
+                                    hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
+                                        rect.contains(dragTouchPositionInRoot)
+                                    }?.key
+                                },
+                                onDragEnd = {
+                                    if (hoveredFolderId != null && draggedNotebook != null) {
+                                        val target = folders.find { it.id == hoveredFolderId }
+                                        val toMove = if (draggedNotebook!!.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
+                                            selectedNotebookIds
+                                        } else {
+                                            setOf(draggedNotebook!!.id)
+                                        }
+                                        GraphiteRepository.moveNotebooksToFolder(toMove, hoveredFolderId!!)
+                                        val msg = if (toMove.size == 1) "Moved \"${draggedNotebook!!.title}\" to ${target?.name ?: "folder"}"
+                                                  else "Moved ${toMove.size} notes to ${target?.name ?: "folder"}"
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        selectedNotebookIds = emptySet()
+                                    } else if (totalDragDistance < 15f) {
+                                        toggleNoteSelection(notebook.id)
+                                    }
+                                    isDraggingNote = false
+                                    draggedNotebook = null
+                                    hoveredFolderId = null
+                                    totalDragDistance = 0f
+                                },
+                                onDragCancel = {
+                                    isDraggingNote = false
+                                    draggedNotebook = null
+                                    hoveredFolderId = null
+                                    totalDragDistance = 0f
                                 },
                                 onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
                                 onSetPassword = { noteToChangePassword = notebook },
@@ -1070,6 +1469,118 @@ fun NoteshelfScreen(
                 }
             }
         }
+    }
+
+    // Floating Drag-and-Drop Note Overlay
+    if (isDraggingNote && draggedNotebook != null) {
+        val note = draggedNotebook!!
+        val count = if (note.id in selectedNotebookIds && selectedNotebookIds.size > 1) selectedNotebookIds.size else 1
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(100f)
+        ) {
+            Card(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (dragTouchPositionInRoot.x - 70.dp.toPx()).toInt(),
+                            (dragTouchPositionInRoot.y - 70.dp.toPx()).toInt()
+                        )
+                    }
+                    .size(width = 145.dp, height = 90.dp)
+                    .rotate(-3f)
+                    .shadow(16.dp, RoundedCornerShape(12.dp)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF222226)),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(2.dp, if (hoveredFolderId != null) GraphiteOrange else Color(0xFF64B5F6))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val isPdf = note.mimeType?.contains("pdf") == true || note.filePath?.endsWith(".pdf") == true
+                        Icon(
+                            imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
+                            contentDescription = null,
+                            tint = if (hoveredFolderId != null) GraphiteOrange else Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        if (count > 1) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(GraphiteOrange)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("$count", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    Text(
+                        text = note.title,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (hoveredFolderId != null) "Drop to move inside" else "Drag over folder to drop",
+                        color = if (hoveredFolderId != null) GraphiteOrange else Color.LightGray,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+    }
+
+    // Upload Entire Folder Progress Dialog
+    if (isUploadingFolder && uploadingFolderInfo != null) {
+        val (f, prog) = uploadingFolderInfo!!
+        val (curr, total, title) = prog ?: Triple(0, 1, "")
+        AlertDialog(
+            onDismissRequest = {},
+            containerColor = GraphiteSurfaceVariant,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                    Text("Uploading \"${f.name}\"", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Uploading $curr of $total items to Google Drive:",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    LinearProgressIndicator(
+                        progress = { if (total > 0) curr.toFloat() / total.toFloat() else 0f },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = GraphiteOrange,
+                        trackColor = Color(0xFF333333)
+                    )
+                }
+            },
+            confirmButton = {}
+        )
     }
 
         // Mobile slide-over drawer overlay
@@ -1184,6 +1695,7 @@ fun NoteshelfScreen(
             folder = folderForOptionsDialog!!,
             allFolders = folders,
             onDismiss = { folderForOptionsDialog = null },
+            onUploadFolder = { handleUploadWholeFolder(folderForOptionsDialog!!) },
             onSave = { newName, newColorHex, newParentId ->
                 GraphiteRepository.updateFolder(folderForOptionsDialog!!.id, newName, newColorHex, newParentId)
                 folderForOptionsDialog = null
@@ -1607,6 +2119,362 @@ private fun PdfThumbnailImage(filePath: String, modifier: Modifier = Modifier) {
     }
 }
 
+private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
+    if (folder.colorHex != null) {
+        val base = Color(folder.colorHex)
+        return base to Color(0x77000000)
+    }
+    val nameLower = folder.name.lowercase()
+    return when {
+        nameLower.contains("music") -> Color(0xFF5C93F8) to Color(0xFF1E53B0)
+        nameLower.contains("clg") || nameLower.contains("sem") -> Color(0xFF64B5F6) to Color(0xFF1565C0)
+        nameLower.contains("college") || nameLower.contains("school") -> Color(0xFF81C784) to Color(0xFF2E7D32)
+        nameLower.contains("other") -> Color(0xFFFFB74D) to Color(0xFFD84315)
+        nameLower.contains("project") -> Color(0xFFBA68C8) to Color(0xFF6A1B9A)
+        nameLower.contains("lecture") -> Color(0xFF4DB6AC) to Color(0xFF00695C)
+        else -> {
+            val index = Math.abs(folder.id.hashCode()) % 4
+            when (index) {
+                0 -> Color(0xFF5C93F8) to Color(0xFF1E53B0)
+                1 -> Color(0xFF64B5F6) to Color(0xFF1565C0)
+                2 -> Color(0xFF81C784) to Color(0xFF2E7D32)
+                else -> Color(0xFFFFB74D) to Color(0xFFD84315)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FolderThumbnailCard(
+    folder: FolderItem,
+    noteCount: Int,
+    isHoveredForDrop: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onUploadFolder: () -> Unit,
+    onOpenOptions: () -> Unit,
+    onDeleteFolder: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val (folderColor, letterColor) = remember(folder.colorHex, folder.id, folder.name) {
+        getFolderColors(folder)
+    }
+    val firstLetter = folder.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (isHoveredForDrop) GraphiteOrange.copy(alpha = 0.25f) else Color.Transparent)
+            .then(
+                if (isHoveredForDrop) Modifier.border(2.5.dp, GraphiteOrange, RoundedCornerShape(12.dp))
+                else Modifier
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Folder Visual Representation matching Image 1
+        Box(
+            modifier = Modifier
+                .width(130.dp)
+                .height(115.dp)
+                .graphicsLayer {
+                    if (isHoveredForDrop) {
+                        scaleX = 1.05f
+                        scaleY = 1.05f
+                    }
+                }
+        ) {
+            // Folder Tab at Top-Left
+            Box(
+                modifier = Modifier
+                    .width(56.dp)
+                    .height(20.dp)
+                    .clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp))
+                    .background(folderColor.copy(alpha = 0.88f))
+            )
+            // Folder Main Body
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(folderColor)
+                    .shadow(4.dp, RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                // Large initial letter in center matching Image 1
+                Text(
+                    text = firstLetter,
+                    color = letterColor,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                // Drop Hover Indicator Overlay
+                if (isHoveredForDrop) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoveToInbox,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Drop Here",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Title Row with Down Chevron matching Image 1
+        Box(contentAlignment = Alignment.Center) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { menuExpanded = true }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = folder.name,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = "Folder Options",
+                    tint = Color.LightGray,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+                modifier = Modifier.background(GraphiteSurfaceVariant)
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Open Folder", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = GraphiteOrange) },
+                    onClick = {
+                        menuExpanded = false
+                        onClick()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Upload Whole Folder to Drive", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
+                    onClick = {
+                        menuExpanded = false
+                        onUploadFolder()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Folder Settings (Rename/Color)", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = Color.LightGray) },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenOptions()
+                    }
+                )
+                HorizontalDivider(color = Color(0xFF333333))
+                DropdownMenuItem(
+                    text = { Text("Delete Folder", color = Color(0xFFFF5252)) },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFF5252)) },
+                    onClick = {
+                        menuExpanded = false
+                        onDeleteFolder()
+                    }
+                )
+            }
+        }
+
+        Text(
+            text = "$noteCount ${if (noteCount == 1) "item" else "items"}",
+            color = Color.Gray,
+            fontSize = 10.sp
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FolderListRow(
+    folder: FolderItem,
+    noteCount: Int,
+    isHoveredForDrop: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onUploadFolder: () -> Unit,
+    onOpenOptions: () -> Unit,
+    onDeleteFolder: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val (folderColor, letterColor) = remember(folder.colorHex, folder.id, folder.name) {
+        getFolderColors(folder)
+    }
+    val firstLetter = folder.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isHoveredForDrop) GraphiteOrange.copy(alpha = 0.25f) else Color(0xFF18181B))
+            .then(
+                if (isHoveredForDrop) Modifier.border(2.dp, GraphiteOrange, RoundedCornerShape(10.dp))
+                else Modifier.border(1.dp, Color(0xFF2E2E32), RoundedCornerShape(10.dp))
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Folder Visual Representation
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(folderColor),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = firstLetter,
+                color = letterColor,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = folder.name,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Color.Gray,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "$noteCount ${if (noteCount == 1) "item" else "items"}",
+                color = Color.Gray,
+                fontSize = 11.sp
+            )
+        }
+
+        IconButton(
+            onClick = onUploadFolder,
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CloudUpload,
+                contentDescription = "Upload Folder",
+                tint = Color(0xFF4CAF50),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        Box {
+            IconButton(
+                onClick = { menuExpanded = true },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "Folder Options",
+                    tint = Color.Gray,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+                modifier = Modifier.background(GraphiteSurfaceVariant)
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Open Folder", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = GraphiteOrange) },
+                    onClick = {
+                        menuExpanded = false
+                        onClick()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Upload Whole Folder to Drive", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
+                    onClick = {
+                        menuExpanded = false
+                        onUploadFolder()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Folder Settings (Rename/Color)", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = Color.LightGray) },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenOptions()
+                    }
+                )
+                HorizontalDivider(color = Color(0xFF333333))
+                DropdownMenuItem(
+                    text = { Text("Delete Folder", color = Color(0xFFFF5252)) },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFF5252)) },
+                    onClick = {
+                        menuExpanded = false
+                        onDeleteFolder()
+                    }
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotebookThumbnailCard(
@@ -1626,9 +2494,14 @@ private fun NotebookThumbnailCard(
     onDelete: () -> Unit,
     onUploadToDrive: () -> Unit,
     onOpenSplitScreen: (() -> Unit)? = null,
-    onSetPassword: (() -> Unit)? = null
+    onSetPassword: (() -> Unit)? = null,
+    onDragStart: ((Offset) -> Unit)? = null,
+    onDrag: ((Offset) -> Unit)? = null,
+    onDragEnd: (() -> Unit)? = null,
+    onDragCancel: (() -> Unit)? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    var cardBoundsInRoot by remember { mutableStateOf(Rect.Zero) }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
     val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
@@ -1647,10 +2520,29 @@ private fun NotebookThumbnailCard(
                 if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
                 else Modifier
             )
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .onGloballyPositioned { coords ->
+                cardBoundsInRoot = coords.boundsInRoot()
+            }
+            .pointerInput(notebook.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { localOffset ->
+                        onDragStart?.invoke(cardBoundsInRoot.topLeft + localOffset)
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        onDrag?.invoke(dragAmount)
+                    },
+                    onDragEnd = {
+                        onDragEnd?.invoke()
+                    },
+                    onDragCancel = {
+                        onDragCancel?.invoke()
+                    }
+                )
+            }
+            .clickable {
+                onClick()
+            }
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -2098,15 +2990,32 @@ private fun NotebookThumbnailCard(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Title and Timestamp matching Page 4 with Cloud Status Indicator
-        Text(
-            text = notebook.title,
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        // Title and Timestamp matching Image 1 with down chevron and Cloud Status Indicator
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .clickable { menuExpanded = true }
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+        ) {
+            Text(
+                text = notebook.title,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = "Options",
+                tint = Color.LightGray,
+                modifier = Modifier.size(15.dp)
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp)
@@ -2146,8 +3055,13 @@ private fun NotebookListRow(
     onRestore: () -> Unit,
     onPermanentlyDelete: () -> Unit,
     onDelete: () -> Unit,
-    onUploadToDrive: () -> Unit
+    onUploadToDrive: () -> Unit,
+    onDragStart: ((Offset) -> Unit)? = null,
+    onDrag: ((Offset) -> Unit)? = null,
+    onDragEnd: (() -> Unit)? = null,
+    onDragCancel: (() -> Unit)? = null
 ) {
+    var rowBoundsInRoot by remember { mutableStateOf(Rect.Zero) }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
     val isKeepText = notebook.mimeType == "text/keep" ||
@@ -2165,10 +3079,29 @@ private fun NotebookListRow(
                 if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
                 else Modifier
             )
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .onGloballyPositioned { coords ->
+                rowBoundsInRoot = coords.boundsInRoot()
+            }
+            .pointerInput(notebook.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { localOffset ->
+                        onDragStart?.invoke(rowBoundsInRoot.topLeft + localOffset)
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        onDrag?.invoke(dragAmount)
+                    },
+                    onDragEnd = {
+                        onDragEnd?.invoke()
+                    },
+                    onDragCancel = {
+                        onDragCancel?.invoke()
+                    }
+                )
+            }
+            .clickable {
+                onClick()
+            }
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2744,7 +3677,8 @@ private fun FolderOptionsDialog(
     allFolders: List<FolderItem>,
     onDismiss: () -> Unit,
     onSave: (newName: String, newColorHex: Long?, newParentId: String?) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onUploadFolder: (() -> Unit)? = null
 ) {
     var name by remember { mutableStateOf(folder.name) }
     var selectedColorHex by remember { mutableStateOf(folder.colorHex ?: 0xFFFFD54F) }
@@ -2865,6 +3799,32 @@ private fun FolderOptionsDialog(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Inside \"${parent.name}\"", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                }
+
+                if (onUploadFolder != null) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF142416),
+                        border = BorderStroke(1.dp, Color(0xFF2E7D32)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onDismiss()
+                                onUploadFolder()
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50), modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text("Upload Whole Folder to Drive", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                Text("Uploads all notes, PDFs, and files inside this folder", color = Color.LightGray, fontSize = 10.sp)
+                            }
                         }
                     }
                 }

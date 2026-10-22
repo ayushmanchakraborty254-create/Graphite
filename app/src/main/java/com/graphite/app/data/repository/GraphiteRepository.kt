@@ -64,21 +64,16 @@ object GraphiteRepository {
     private val _books = MutableStateFlow<List<Book>>(emptyList())
     val books: StateFlow<List<Book>> = _books.asStateFlow()
 
-    // Isolated notebook and book collections partitioned by user ID to guarantee strict multi-user privacy
+    // Isolated notebook, book, and folder collections partitioned by user ID to guarantee strict multi-user privacy
     private val userNotebooksMap = mutableMapOf<String, MutableList<NotebookItem>>()
     private val userBooksMap = mutableMapOf<String, MutableList<Book>>()
+    private val userFoldersMap = mutableMapOf<String, MutableList<FolderItem>>()
     private var activeUserId: String? = null
 
     private val _notebooks = MutableStateFlow<List<NotebookItem>>(emptyList())
     val notebooks: StateFlow<List<NotebookItem>> = _notebooks.asStateFlow()
 
-    private val _folders = MutableStateFlow(
-        listOf(
-            FolderItem("my_notes", "My Notes", 0),
-            FolderItem("lectures", "Lectures", 0),
-            FolderItem("projects", "Projects", 0)
-        )
-    )
+    private val _folders = MutableStateFlow<List<FolderItem>>(emptyList())
     val folders: StateFlow<List<FolderItem>> = _folders.asStateFlow()
 
     private val _stats = MutableStateFlow(ReadingStats(totalHoursRead = 0.0f, totalBooks = 0, notesCount = 0))
@@ -88,15 +83,17 @@ object GraphiteRepository {
 
     /**
      * Switches the active authenticated user, strictly isolating the visible workspace.
-     * When signing out (userId == null), switches to the local "guest" workspace rather than wiping data.
+     * When signing out (userId == null), switches to the unauthenticated workspace:
+     * clears notebooks, books, and folders completely.
      */
     fun setActiveUser(userId: String?) {
         activeUserId = userId
 
         if (userId == null) {
-            // Unauthenticated state: completely clear visible notebooks and books!
+            // Unauthenticated state: completely clear visible notebooks, books, and folders!
             _notebooks.value = emptyList()
             _books.value = emptyList()
+            _folders.value = emptyList()
             _stats.update {
                 it.copy(notesCount = 0, totalBooks = 0)
             }
@@ -131,6 +128,25 @@ object GraphiteRepository {
         }
         _books.value = userBooks.toList()
         cleanBookDuplicatesAndGhosts()
+
+        // 3. Partitioned Folders: Load user folders or seed initial defaults
+        val userFolders = userFoldersMap.getOrPut(currentUid) {
+            mutableListOf(
+                FolderItem("my_notes", "My Notes", 0, colorHex = 0xFF42A5F5, userId = currentUid),
+                FolderItem("lectures", "Lectures", 0, colorHex = 0xFF64B5F6, userId = currentUid),
+                FolderItem("projects", "Projects", 0, colorHex = 0xFF81C784, userId = currentUid)
+            )
+        }
+        val defaultFolders = userFoldersMap["default"]
+        if (!defaultFolders.isNullOrEmpty() && currentUid != "default") {
+            val existingFolderIds = userFolders.map { it.id }.toSet()
+            val toMigrateFolders = defaultFolders.filter { it.id !in existingFolderIds }
+            if (toMigrateFolders.isNotEmpty()) {
+                userFolders.addAll(toMigrateFolders.map { it.copy(userId = currentUid) })
+                defaultFolders.removeAll(toMigrateFolders)
+            }
+        }
+        _folders.value = userFolders.toList()
 
         _stats.update {
             it.copy(
@@ -677,25 +693,33 @@ object GraphiteRepository {
     }
 
     fun addFolder(name: String, parentId: String? = null, colorHex: Long? = null) {
-        val newFolder = FolderItem(UUID.randomUUID().toString(), name.trim(), 0, parentId = parentId, colorHex = colorHex)
-        _folders.update { it + newFolder }
+        val currentUid = activeUserId ?: "default"
+        val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        val newFolder = FolderItem(UUID.randomUUID().toString(), name.trim(), 0, parentId = parentId, colorHex = colorHex, userId = currentUid)
+        userList.add(newFolder)
+        if (activeUserId != null) {
+            _folders.value = userList.toList()
+        }
         saveToDisk()
     }
 
     fun updateFolder(folderId: String, newName: String? = null, newColorHex: Long? = null, newParentId: String? = null) {
-        _folders.update { list ->
-            list.map { f ->
-                if (f.id == folderId) {
-                    val resolvedParent = if (newParentId == "__ROOT__") null else (newParentId ?: f.parentId)
-                    f.copy(
-                        name = newName?.trim() ?: f.name,
-                        colorHex = newColorHex ?: f.colorHex,
-                        parentId = resolvedParent
-                    )
-                } else f
+        val currentUid = activeUserId ?: "default"
+        val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == folderId }
+        if (idx != -1) {
+            val f = userList[idx]
+            val resolvedParent = if (newParentId == "__ROOT__") null else (newParentId ?: f.parentId)
+            userList[idx] = f.copy(
+                name = newName?.trim() ?: f.name,
+                colorHex = newColorHex ?: f.colorHex,
+                parentId = resolvedParent
+            )
+            if (activeUserId != null) {
+                _folders.value = userList.toList()
             }
+            saveToDisk()
         }
-        saveToDisk()
     }
 
     fun deleteFolder(folderId: String) {
@@ -712,7 +736,11 @@ object GraphiteRepository {
         if (modified) {
             _notebooks.value = userList.filter { !it.isDeleted }
         }
-        _folders.update { list -> list.filterNot { it.id == folderId || it.parentId == folderId } }
+        val folderList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        folderList.removeAll { it.id == folderId || it.parentId == folderId }
+        if (activeUserId != null) {
+            _folders.value = folderList.toList()
+        }
         saveToDisk()
     }
 
@@ -885,22 +913,49 @@ object GraphiteRepository {
             val foldersFile = File(context.filesDir, "graphite_folders_storage.json")
             if (foldersFile.exists()) {
                 try {
-                    val arr = JSONArray(foldersFile.readText(Charsets.UTF_8))
-                    val loaded = mutableListOf<FolderItem>()
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        loaded.add(
-                            FolderItem(
-                                id = obj.getString("id"),
-                                name = obj.getString("name"),
-                                noteCount = obj.optInt("noteCount", 0),
-                                parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
-                                colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null
+                    val rawText = foldersFile.readText(Charsets.UTF_8).trim()
+                    if (rawText.startsWith("{")) {
+                        val rootObj = JSONObject(rawText)
+                        userFoldersMap.clear()
+                        for (uid in rootObj.keys()) {
+                            val arr = rootObj.getJSONArray(uid)
+                            val list = mutableListOf<FolderItem>()
+                            for (i in 0 until arr.length()) {
+                                val obj = arr.getJSONObject(i)
+                                list.add(
+                                    FolderItem(
+                                        id = obj.getString("id"),
+                                        name = obj.getString("name"),
+                                        noteCount = obj.optInt("noteCount", 0),
+                                        parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
+                                        colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null,
+                                        userId = if (obj.has("userId") && !obj.isNull("userId")) obj.getString("userId") else uid
+                                    )
+                                )
+                            }
+                            userFoldersMap[uid] = list
+                        }
+                    } else if (rawText.startsWith("[")) {
+                        val arr = JSONArray(rawText)
+                        val loaded = mutableListOf<FolderItem>()
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.getJSONObject(i)
+                            loaded.add(
+                                FolderItem(
+                                    id = obj.getString("id"),
+                                    name = obj.getString("name"),
+                                    noteCount = obj.optInt("noteCount", 0),
+                                    parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
+                                    colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null
+                                )
                             )
-                        )
+                        }
+                        userFoldersMap["default"] = loaded
                     }
-                    if (loaded.isNotEmpty()) {
-                        _folders.value = loaded
+                    if (activeUserId != null) {
+                        _folders.value = userFoldersMap[activeUserId] ?: emptyList()
+                    } else {
+                        _folders.value = emptyList()
                     }
                 } catch (_: Exception) {}
             }
@@ -936,17 +991,22 @@ object GraphiteRepository {
             booksFile.writeText(booksRootObj.toString(), Charsets.UTF_8)
 
             val foldersFile = File(context.filesDir, "graphite_folders_storage.json")
-            val foldersArr = JSONArray()
-            for (f in _folders.value) {
-                foldersArr.put(JSONObject().apply {
-                    put("id", f.id)
-                    put("name", f.name)
-                    put("noteCount", f.noteCount)
-                    if (f.parentId != null) put("parentId", f.parentId)
-                    if (f.colorHex != null) put("colorHex", f.colorHex)
-                })
+            val foldersRootObj = JSONObject()
+            for ((uid, list) in userFoldersMap) {
+                val arr = JSONArray()
+                for (f in list) {
+                    arr.put(JSONObject().apply {
+                        put("id", f.id)
+                        put("name", f.name)
+                        put("noteCount", f.noteCount)
+                        if (f.parentId != null) put("parentId", f.parentId)
+                        if (f.colorHex != null) put("colorHex", f.colorHex)
+                        if (f.userId != null) put("userId", f.userId)
+                    })
+                }
+                foldersRootObj.put(uid, arr)
             }
-            foldersFile.writeText(foldersArr.toString(), Charsets.UTF_8)
+            foldersFile.writeText(foldersRootObj.toString(), Charsets.UTF_8)
         } catch (e: Exception) {
             android.util.Log.e("GraphiteRepository", "Failed to save storage to disk", e)
         }

@@ -22,6 +22,7 @@ import com.google.api.services.drive.model.File as DriveFile
 import com.graphite.app.core.config.GraphiteConfig
 import com.graphite.app.core.security.SecureStorage
 import com.graphite.app.core.supabase.InkSerialization
+import com.graphite.app.data.model.FolderItem
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.data.repository.GraphiteRepository
 import kotlinx.coroutines.CoroutineDispatcher
@@ -766,6 +767,60 @@ class GoogleDriveManager(
             )
             error
         }
+    }
+
+    /**
+     * Directly uploads an entire folder and all its contents (notebooks, PDFs, text files) to Google Drive.
+     * Automatically creates or targets a Google Drive folder matching the folder's name.
+     */
+    suspend fun uploadEntireFolder(
+        context: Context,
+        folder: FolderItem,
+        items: List<NotebookItem>,
+        onProgress: (current: Int, total: Int, itemTitle: String) -> Unit = { _, _, _ -> }
+    ): Result<Int> = withContext(ioDispatcher) {
+        val accountEmail = getAuthorizedAccountEmail()
+            ?: getResolvedAccountEmail(context)
+        if (accountEmail.isNullOrBlank()) {
+            return@withContext Result.failure(Exception("Google Drive authorization required. Please authorize first."))
+        }
+
+        val uploader = uploaderProvider(context)
+
+        // 1. Target or create matching folder in Google Drive
+        val sanitizedFolderName = folder.name.trim().takeIf { it.isNotBlank() } ?: "Folder"
+        val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
+        val targetDriveFolder = existingFolders.find { it.name.equals(sanitizedFolderName, ignoreCase = true) }
+            ?: uploader.createFolder(accountEmail, sanitizedFolderName, "root").getOrNull()
+            ?: DriveFolder("root", "My Drive")
+
+        if (items.isEmpty()) {
+            return@withContext Result.success(0)
+        }
+
+        var uploadedCount = 0
+        for (i in items.indices) {
+            val item = items[i]
+            onProgress(i + 1, items.size, item.title)
+            try {
+                val rawName = item.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                val safeFileName = if (rawName.endsWith(".pdf", ignoreCase = true)) rawName else "$rawName.pdf"
+                val pdfBytes = NotePdfGenerator.generatePdf(item)
+                val res = uploader.upload(
+                    accountEmail = accountEmail,
+                    fileName = safeFileName,
+                    mimeType = "application/pdf",
+                    contentBytes = pdfBytes,
+                    folderId = targetDriveFolder.id
+                )
+                if (res is DriveUploadResult.Success) {
+                    uploadedCount++
+                    GraphiteRepository.updateNotebookDriveStatus(item.id, res.fileId, true)
+                }
+            } catch (_: Exception) {}
+        }
+
+        Result.success(uploadedCount)
     }
 
     /**
