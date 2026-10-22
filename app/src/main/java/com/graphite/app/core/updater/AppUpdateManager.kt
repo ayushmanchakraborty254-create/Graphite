@@ -83,6 +83,9 @@ class AppUpdateManager(
     private val _updateState = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val updateState: StateFlow<UpdateState> = _updateState.asStateFlow()
 
+    private val _latestAvailableUpdate = MutableStateFlow<UpdateInfo?>(null)
+    val latestAvailableUpdate: StateFlow<UpdateInfo?> = _latestAvailableUpdate.asStateFlow()
+
     private val githubRepo = "ayushmanchakraborty254-create/Graphite"
     private val apiUrl = "https://api.github.com/repos/$githubRepo/releases"
 
@@ -154,17 +157,6 @@ class AppUpdateManager(
                 val localSha = BuildConfig.GIT_COMMIT_SHA.trim()
                 val localBuildTime = BuildConfig.BUILD_TIME_MILLIS
 
-                // Check snooze duration only on automatic background checks, NEVER on manual checks
-                if (!isManualCheck && context != null) {
-                    val prefs = context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
-                    val snoozedUntil = prefs.getLong("snoozed_until_${releaseSha}", 0L)
-                    if (System.currentTimeMillis() < snoozedUntil) {
-                        _updateState.value = UpdateState.Idle
-                        withContext(Dispatchers.Main) { onComplete(false) }
-                        return@launch
-                    }
-                }
-
                 // Check if the update is genuinely newer
                 var isNewer = false
                 val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
@@ -197,9 +189,25 @@ class AppUpdateManager(
                         publishedAt = publishedAt,
                         isNewer = true
                     )
+                    _latestAvailableUpdate.value = updateInfo
+
+                    // Check snooze duration only on automatic background checks, NEVER on manual checks
+                    val prefs = context?.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
+                    val snoozedUntil = if (!isManualCheck && prefs != null) {
+                        prefs.getLong("snoozed_until_${releaseSha}", 0L)
+                    } else 0L
+
+                    if (System.currentTimeMillis() < snoozedUntil) {
+                        // Snoozed from popup, but remains available in Me tab bar
+                        _updateState.value = UpdateState.Idle
+                        withContext(Dispatchers.Main) { onComplete(true) }
+                        return@launch
+                    }
+
                     _updateState.value = UpdateState.Available(updateInfo)
                     withContext(Dispatchers.Main) { onComplete(true) }
                 } else {
+                    _latestAvailableUpdate.value = null
                     _updateState.value = UpdateState.Idle
                     withContext(Dispatchers.Main) { onComplete(false) }
                 }

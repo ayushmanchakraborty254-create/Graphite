@@ -36,6 +36,7 @@ import com.graphite.app.core.theme.GraphiteBlack
 import com.graphite.app.core.theme.GraphiteOrange
 import com.graphite.app.core.theme.GraphiteOutline
 import com.graphite.app.core.theme.GraphiteSurfaceVariant
+import com.graphite.app.core.updater.UpdateState
 import com.graphite.app.data.repository.GraphiteRepository
 import kotlinx.coroutines.launch
 
@@ -58,6 +59,10 @@ fun MeScreen(
     val authState by authManager.authState.collectAsState()
     val syncStatus by syncManager.syncStatus.collectAsState()
     val driveAuthStatus by driveManager.authStatus.collectAsState()
+
+    val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
+    val latestUpdate by appUpdateManager.latestAvailableUpdate.collectAsState()
+    val updateState by appUpdateManager.updateState.collectAsState()
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -123,6 +128,129 @@ fun MeScreen(
                 fontFamily = FontFamily.Serif
             )
             GoogleProfileTopBarIcon()
+        }
+
+        // New Update Available Banner Bar in Me Tab
+        if (latestUpdate != null) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable {
+                        when (val s = updateState) {
+                            is UpdateState.ReadyToInstall -> appUpdateManager.installApk(context, s.apkFile)
+                            is UpdateState.Downloading -> {}
+                            else -> appUpdateManager.downloadAndInstall(context, latestUpdate!!.downloadUrl)
+                        }
+                    },
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1408)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.85f)),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(GraphiteOrange.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SystemUpdate,
+                                contentDescription = "New Update Available",
+                                tint = GraphiteOrange,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "New Update Available",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(GraphiteOrange)
+                                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = "NEW",
+                                        color = Color.White,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Black
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = latestUpdate!!.versionName.ifBlank { "Latest Graphite build is ready" },
+                                color = Color(0xFFCCCCCC),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        when (val s = updateState) {
+                            is UpdateState.Downloading -> {
+                                Text(
+                                    text = "${s.progressPercent}%",
+                                    color = GraphiteOrange,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            is UpdateState.ReadyToInstall -> {
+                                Button(
+                                    onClick = { appUpdateManager.installApk(context, s.apkFile) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text("Install", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            else -> {
+                                Button(
+                                    onClick = { appUpdateManager.downloadAndInstall(context, latestUpdate!!.downloadUrl) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text("Download", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+
+                    if (updateState is UpdateState.Downloading) {
+                        val dlState = updateState as UpdateState.Downloading
+                        Spacer(modifier = Modifier.height(10.dp))
+                        LinearProgressIndicator(
+                            progress = { if (dlState.totalBytes > 0) (dlState.bytesDownloaded.toFloat() / dlState.totalBytes.toFloat()).coerceIn(0f, 1f) else 0f },
+                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                            color = GraphiteOrange,
+                            trackColor = Color(0xFF333338)
+                        )
+                    }
+                }
+            }
         }
 
         // Top 2-Column Grid Cards matching Page 3
@@ -491,9 +619,21 @@ fun MeScreen(
                 SettingItemRow(
                     icon = Icons.Default.SystemUpdate,
                     title = "Check for Updates",
+                    badge = if (latestUpdate != null) {
+                        {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(GraphiteOrange)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("UPDATE AVAILABLE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    } else null,
                     onClick = {
                         android.widget.Toast.makeText(context, "Checking for updates...", android.widget.Toast.LENGTH_SHORT).show()
-                        GraphiteApplication.instance.appUpdateManager.checkForUpdates(context, isManualCheck = true) { hasUpdate ->
+                        appUpdateManager.checkForUpdates(context, isManualCheck = true) { hasUpdate ->
                             if (!hasUpdate) {
                                 android.widget.Toast.makeText(context, "Graphite is up to date!", android.widget.Toast.LENGTH_SHORT).show()
                             }
@@ -665,6 +805,7 @@ fun MeScreen(
 private fun SettingItemRow(
     icon: ImageVector,
     title: String,
+    badge: @Composable (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     Row(
@@ -690,6 +831,10 @@ private fun SettingItemRow(
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
             )
+            if (badge != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                badge()
+            }
         }
         Icon(
             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
