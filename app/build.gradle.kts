@@ -163,6 +163,9 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.coil.compose)
 
+    // ML Kit Handwriting & Text Recognition
+    implementation(libs.mlkit.text.recognition)
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.android)

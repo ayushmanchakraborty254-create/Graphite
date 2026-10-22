@@ -129,23 +129,30 @@ fun CanvasImageOverlayItem(
     val imgW = (currentWidthRatio * basePageWidthPx).coerceAtLeast(50f)
     val imgH = (currentHeightRatio * basePageHeightPx).coerceAtLeast(50f)
 
-    // Layout margins: generous padding around image so all handles and rotation knob are completely within layout bounds
+    // Inner padding around image so all 4 corner handles are completely within layout bounds
     val padAroundDp = 36.dp
-    val padBottomDp = 64.dp
     val padAroundPx = with(density) { padAroundDp.toPx() }
-    val padBottomPx = with(density) { padBottomDp.toPx() }
 
     val rotatedBoxWPx = imgW + padAroundPx * 2
-    val rotatedBoxHPx = imgH + padAroundPx + padBottomPx
+    val rotatedBoxHPx = imgH + padAroundPx * 2
 
     val barPadTopDp = if (isSelected) 60.dp else 0.dp
     val barPadTopPx = with(density) { barPadTopDp.toPx() }
 
-    val outerLeftPx = (currentXRatio * basePageWidthPx) - padAroundPx
-    val outerTopPx = (currentYRatio * basePageHeightPx) - padAroundPx - barPadTopPx
+    // Rotation handle radius from center
+    val rotRadiusPx = imgH / 2f + with(density) { 36.dp.toPx() }
+    val maxReachPx = maxOf(imgW / 2f + padAroundPx, rotRadiusPx + with(density) { 32.dp.toPx() })
+
     val minOuterWPx = with(density) { 340.dp.toPx() }
-    val outerWPx = maxOf(rotatedBoxWPx, if (isSelected) minOuterWPx else rotatedBoxWPx)
-    val outerHPx = rotatedBoxHPx + barPadTopPx
+    val outerWPx = maxOf(minOuterWPx, maxReachPx * 2f)
+    val outerHPx = maxOf(rotatedBoxHPx + barPadTopPx, maxReachPx * 2f + barPadTopPx)
+
+    // The outer Box is centered on the image's center
+    val outerLeftPx = (currentXRatio * basePageWidthPx) + imgW / 2f - outerWPx / 2f
+    val outerTopPx = (currentYRatio * basePageHeightPx) + imgH / 2f - outerHPx / 2f
+
+    val imgCenterOuterX = outerWPx / 2f
+    val imgCenterOuterY = outerHPx / 2f
 
     Box(
         modifier = Modifier
@@ -154,21 +161,24 @@ fun CanvasImageOverlayItem(
                 width = with(density) { outerWPx.toDp() },
                 height = with(density) { outerHPx.toDp() }
             )
-            .zIndex(if (isSelected) 100f else (if (currentZIndex < 0) -10f else currentZIndex.toFloat()))
+            .zIndex(if (currentZIndex < 0) -10f else (if (isSelected) 20f else currentZIndex.toFloat()))
     ) {
-        // Rotated Core Container: holds image, selection boundary, 4 corner handles, and rotation knob
+        // Rotated Core Container: holds image, selection boundary, 4 corner handles, and stem line
         Box(
             modifier = Modifier
-                .offset { IntOffset(0, barPadTopPx.roundToInt()) }
+                .offset {
+                    IntOffset(
+                        (imgCenterOuterX - rotatedBoxWPx / 2f).roundToInt(),
+                        (imgCenterOuterY - rotatedBoxHPx / 2f).roundToInt()
+                    )
+                }
                 .size(
                     width = with(density) { rotatedBoxWPx.toDp() },
                     height = with(density) { rotatedBoxHPx.toDp() }
                 )
                 .graphicsLayer {
                     rotationZ = currentRotation
-                    val cx = padAroundPx + imgW / 2f
-                    val cy = padAroundPx + imgH / 2f
-                    transformOrigin = TransformOrigin(cx / rotatedBoxWPx, cy / rotatedBoxHPx)
+                    transformOrigin = TransformOrigin(0.5f, 0.5f)
                 }
         ) {
             // 1. Image Bitmap Box with single-finger drag gesture to move the image
@@ -246,7 +256,7 @@ fun CanvasImageOverlayItem(
                 )
             }
 
-            // 2. Selection border & interactive handles (when isSelected)
+            // 2. Selection border & interactive corner handles (when isSelected)
             if (isSelected) {
                 // Blue selection boundary border
                 Box(
@@ -258,7 +268,6 @@ fun CanvasImageOverlayItem(
 
                 val handleVisualDp = 20.dp
                 val handleTouchDp = 36.dp
-                val handleVisualPx = with(density) { handleVisualDp.toPx() }
                 val handleTouchPx = with(density) { handleTouchDp.toPx() }
                 val halfTouchPx = handleTouchPx / 2f
 
@@ -531,87 +540,115 @@ fun CanvasImageOverlayItem(
                     )
                 }
 
-                // Vertical Stem Line connecting bottom edge to rotation handle
-                val centerX = padAroundPx + imgW / 2f
+                // Vertical Stem Line from bottom edge of image
+                val cxInRotated = padAroundPx + imgW / 2f
                 Box(
                     modifier = Modifier
-                        .offset { IntOffset((centerX - 1.dp.toPx()).roundToInt(), (padAroundPx + imgH).roundToInt()) }
+                        .offset { IntOffset((cxInRotated - 1.dp.toPx()).roundToInt(), (padAroundPx + imgH).roundToInt()) }
                         .width(2.dp)
                         .height(24.dp)
                         .background(Color(0xFF2196F3))
                 )
+            }
+        }
 
-                // Bottom Center Rotation Handle (⟳)
-                val rotKnobSizeDp = 32.dp
-                val rotKnobTouchDp = 44.dp
-                val rotKnobTouchPx = with(density) { rotKnobTouchDp.toPx() }
-                val halfKnobTouchPx = rotKnobTouchPx / 2f
+        // 3. Bottom Rotation Handle (⟳) - Placed in the UNROTATED outer container
+        // This eliminates the fidget-spinner runaway feedback loop completely!
+        if (isSelected) {
+            val rotKnobSizeDp = 32.dp
+            val rotKnobTouchDp = 44.dp
+            val rotKnobTouchPx = with(density) { rotKnobTouchDp.toPx() }
+            val halfKnobTouchPx = rotKnobTouchPx / 2f
 
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            IntOffset(
-                                (centerX - halfKnobTouchPx).roundToInt(),
-                                (padAroundPx + imgH + 24.dp.toPx() - halfKnobTouchPx + 16.dp.toPx()).roundToInt()
-                            )
-                        }
-                        .size(rotKnobTouchDp)
-                        .pointerInput(image.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var prevX = down.position.x
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
+            val rad = Math.toRadians(currentRotation.toDouble())
+            val knobCenterX = imgCenterOuterX - rotRadiusPx * sin(rad).toFloat()
+            val knobCenterY = imgCenterOuterY + rotRadiusPx * cos(rad).toFloat()
+
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (knobCenterX - halfKnobTouchPx).roundToInt(),
+                            (knobCenterY - halfKnobTouchPx).roundToInt()
+                        )
+                    }
+                    .size(rotKnobTouchDp)
+                    .pointerInput(image.id) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) {
+                                    onSave(
+                                        image.copy(
+                                            xRatio = currentXRatio,
+                                            yRatio = currentYRatio,
+                                            widthRatio = currentWidthRatio,
+                                            heightRatio = currentHeightRatio,
+                                            rotationDegrees = currentRotation
                                         )
-                                        break
+                                    )
+                                    break
+                                }
+                                if (!isLocked) {
+                                    change.consume()
+                                    // Finger position in the unrotated outer container
+                                    val fingerX = (knobCenterX - halfKnobTouchPx) + change.position.x
+                                    val fingerY = (knobCenterY - halfKnobTouchPx) + change.position.y
+                                    val dx = fingerX - imgCenterOuterX
+                                    val dy = fingerY - imgCenterOuterY
+
+                                    // Direct mathematical 1:1 finger tracking
+                                    var targetDeg = Math.toDegrees(atan2(-dx.toDouble(), dy.toDouble())).toFloat()
+                                    if (targetDeg < 0f) targetDeg += 360f
+
+                                    // Magnetic snap near cardinal angles (0°, 90°, 180°, 270°)
+                                    val snappedDeg = when {
+                                        abs(targetDeg - 0f) < 4f || abs(targetDeg - 360f) < 4f -> 0f
+                                        abs(targetDeg - 90f) < 4f -> 90f
+                                        abs(targetDeg - 180f) < 4f -> 180f
+                                        abs(targetDeg - 270f) < 4f -> 270f
+                                        else -> targetDeg
                                     }
-                                    val dx = change.position.x - prevX
-                                    prevX = change.position.x
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val dAngle = dx * 0.7f
-                                        var newDeg = (currentRotation + dAngle) % 360f
-                                        if (newDeg < 0f) newDeg += 360f
-                                        currentRotation = newDeg
-                                        onUpdateDraft(image.copy(rotationDegrees = currentRotation))
-                                    }
+
+                                    currentRotation = snappedDeg
+                                    onUpdateDraft(image.copy(rotationDegrees = currentRotation))
                                 }
                             }
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(rotKnobSizeDp)
+                        .shadow(4.dp, CircleShape)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .border(2.dp, Color(0xFF2196F3), CircleShape)
+                        .clickable {
+                            // Tap to reset to 0°
+                            currentRotation = 0f
+                            val updated = image.copy(rotationDegrees = 0f)
+                            onUpdateDraft(updated)
+                            onSave(updated)
+                            Toast.makeText(context, "Angle reset to 0°", Toast.LENGTH_SHORT).show()
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(rotKnobSizeDp)
-                            .shadow(4.dp, CircleShape)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                            .border(2.dp, Color(0xFF2196F3), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Rotate",
-                            tint = Color(0xFF2196F3),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Rotate",
+                        tint = Color(0xFF2196F3),
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
 
-        // 3. Floating Action Bar directly above the image
+        // 4. Floating Action Bar directly above the image
         if (isSelected) {
             Box(
                 modifier = Modifier
@@ -750,7 +787,7 @@ fun CanvasImageOverlayItem(
                                 expanded = showContextMenu,
                                 onDismissRequest = { showContextMenu = false },
                                 modifier = Modifier
-                                    .width(200.dp)
+                                    .width(210.dp)
                                     .background(Color(0xFF1E1E24))
                                     .border(1.dp, Color(0xFF33333E), RoundedCornerShape(12.dp))
                             ) {
@@ -784,7 +821,7 @@ fun CanvasImageOverlayItem(
                                                 )
                                                 onUpdateDraft(updated)
                                                 onSave(updated)
-                                                Toast.makeText(context, "Sent to Back (behind ink)", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "Sent to Back (behind ink, shapes & text)", Toast.LENGTH_SHORT).show()
                                                 showContextMenu = false
                                             },
                                             modifier = Modifier.size(32.dp)
@@ -858,7 +895,7 @@ fun CanvasImageOverlayItem(
                                                 )
                                                 onUpdateDraft(updated)
                                                 onSave(updated)
-                                                Toast.makeText(context, "Brought to Front (above ink)", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "Brought to Front (above ink, shapes & text)", Toast.LENGTH_SHORT).show()
                                                 showContextMenu = false
                                             },
                                             modifier = Modifier.size(32.dp)

@@ -149,6 +149,8 @@ fun CanvasEditorScreen(
     var parsedDoc by remember { mutableStateOf<ParsedDocument?>(null) }
     var pdfPageCount by remember { mutableIntStateOf(0) }
     var pdfAspectRatio by remember { mutableFloatStateOf(1.414f) }
+    val basePageWidth = (screenWidth - 24.dp).coerceAtLeast(320.dp)
+    val basePageHeight = basePageWidth * pdfAspectRatio
 
     // Tool & Mode state
     var isReadOnlyMode by remember { mutableStateOf(false) } // ⊘ button
@@ -371,6 +373,58 @@ fun CanvasEditorScreen(
         val serialized = newImages.map { it.serialize() }
         currentLines.addAll(serialized)
         GraphiteRepository.updateNotebookLines(notebookId, currentLines)
+    }
+
+    // Convert handwriting ink strokes to text boxes using ML Kit
+    fun convertHandwritingToText(targetPageIdx: Int = currentPageIndex) {
+        val strokesToConvert = if (selectedStrokeIndices.isNotEmpty() && activePageForStroke == targetPageIdx) {
+            uiState.strokes.filterIndexed { index, _ -> selectedStrokeIndices.contains(index) }
+        } else {
+            uiState.strokes.filter { it.pageIndex == targetPageIdx }
+        }
+
+        if (strokesToConvert.isEmpty()) {
+            Toast.makeText(context, "No handwriting found to convert", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(context, "Recognizing handwriting...", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val result = HandwritingRecognizerHelper.recognizeStrokes(strokesToConvert)
+            if (result != null && result.text.isNotBlank()) {
+                val pageBaseWPx = with(density) { basePageWidth.toPx() }.coerceAtLeast(1f)
+                val pageBaseHPx = with(density) { basePageHeight.toPx() }.coerceAtLeast(1f)
+
+                val xRatio = (result.bounds.left / pageBaseWPx).coerceIn(0.04f, 0.85f)
+                val yRatio = (result.bounds.top / pageBaseHPx).coerceIn(0.04f, 0.90f)
+
+                val newBox = CanvasTextBox(
+                    id = java.util.UUID.randomUUID().toString(),
+                    pageIndex = targetPageIdx,
+                    xRatio = xRatio,
+                    yRatio = yRatio,
+                    text = result.text,
+                    fontSizeSp = 16f,
+                    colorHex = "#1F1F1F"
+                )
+
+                if (selectedStrokeIndices.isNotEmpty() && activePageForStroke == targetPageIdx) {
+                    workspaceViewModel.deleteStrokes(selectedStrokeIndices)
+                    selectedStrokeIndices = emptySet()
+                    lassoBounds = null
+                } else {
+                    val pageIndices = uiState.strokes.mapIndexedNotNull { i, s -> if (s.pageIndex == targetPageIdx) i else null }.toSet()
+                    workspaceViewModel.deleteStrokes(pageIndices)
+                }
+
+                val updated = localTextBoxes + newBox
+                saveTextBoxes(updated)
+                editingTextBoxId = newBox.id
+                Toast.makeText(context, "Converted: \"${result.text.take(30)}\"", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Could not recognize text. Please write clearly and try again.", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     // Auto-prune empty text boxes whenever switching away from the Text Tool
@@ -661,8 +715,6 @@ fun CanvasEditorScreen(
         // ==========================================
         // 1. CONTINUOUS MULTI-PAGE DOCUMENT VIEWPORT
         // ==========================================
-        val basePageWidth = (screenWidth - 24.dp).coerceAtLeast(320.dp)
-        val basePageHeight = basePageWidth * pdfAspectRatio
         val canonicalScale = (basePageWidth.value / 720f).coerceIn(0.50f, 1.25f)
         val scaledPageWidth = basePageWidth * zoomScale
         val scaledPageHeight = basePageHeight * zoomScale
@@ -1552,6 +1604,11 @@ fun CanvasEditorScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         IconButton(onClick = {
+                                            convertHandwritingToText(pageIdx)
+                                        }, modifier = Modifier.size(30.dp)) {
+                                            Icon(Icons.Default.Spellcheck, contentDescription = "Convert to Text", tint = Color(0xFF00BCD4), modifier = Modifier.size(17.dp))
+                                        }
+                                        IconButton(onClick = {
                                             workspaceViewModel.deleteStrokes(selectedStrokeIndices)
                                             selectedStrokeIndices = emptySet()
                                             lassoBounds = null
@@ -1999,6 +2056,13 @@ fun CanvasEditorScreen(
                                         }
                                     }
                                 )
+                                FloatingToolButton(
+                                    icon = Icons.Default.Spellcheck,
+                                    isSelected = false,
+                                    onClick = {
+                                        convertHandwritingToText(currentPageIndex)
+                                    }
+                                )
                             }
                         }
                     }
@@ -2309,6 +2373,13 @@ fun CanvasEditorScreen(
                             isSelected = selectedStudioTool == StudioTool.PRESENT,
                             onClick = {
                                 selectedStudioTool = if (selectedStudioTool == StudioTool.PRESENT) StudioTool.PEN else StudioTool.PRESENT
+                            }
+                        )
+                        FloatingToolButton(
+                            icon = Icons.Default.Spellcheck,
+                            isSelected = false,
+                            onClick = {
+                                convertHandwritingToText(currentPageIndex)
                             }
                         )
 
