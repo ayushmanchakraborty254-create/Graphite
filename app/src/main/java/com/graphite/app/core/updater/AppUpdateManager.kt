@@ -232,7 +232,11 @@ class AppUpdateManager(
                     val updateFile = File(destDir, "Graphite-update.apk")
                     if (updateFile.exists()) updateFile.delete()
 
-                    val uri = Uri.parse(downloadUrl)
+                    val fastUrl = if (downloadUrl.startsWith("https://github.com/")) {
+                        "https://ghproxy.net/$downloadUrl"
+                    } else downloadUrl
+
+                    val uri = Uri.parse(fastUrl)
                     val request = DownloadManager.Request(uri)
                         .setTitle("Graphite Update")
                         .setDescription("Downloading latest build from GitHub...")
@@ -314,13 +318,26 @@ class AppUpdateManager(
             if (useFallback) {
                 // High-speed OkHttp direct streaming fallback
                 try {
+                    val streamUrl = if (downloadUrl.startsWith("https://github.com/")) {
+                        "https://ghproxy.net/$downloadUrl"
+                    } else downloadUrl
+
                     val request = Request.Builder()
-                        .url(downloadUrl)
+                        .url(streamUrl)
                         .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
                         .addHeader("Accept", "*/*")
                         .build()
 
-                    val response = httpClient.newCall(request).execute()
+                    var response = httpClient.newCall(request).execute()
+                    if (!response.isSuccessful && streamUrl != downloadUrl) {
+                        // Fallback to original direct GitHub URL if mirror failed
+                        val directRequest = Request.Builder()
+                            .url(downloadUrl)
+                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .addHeader("Accept", "*/*")
+                            .build()
+                        response = httpClient.newCall(directRequest).execute()
+                    }
                     if (!response.isSuccessful) {
                         _updateState.value = UpdateState.Error("Failed to download update: HTTP ${response.code}")
                         return@launch
