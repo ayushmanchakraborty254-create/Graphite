@@ -22,7 +22,9 @@ data class Book(
     val userId: String? = null,
     val driveFolderId: String? = null,
     val driveFolderName: String? = null
-)
+) {
+    val isCloudOnly: Boolean get() = filePath == null && !driveFileId.isNullOrBlank()
+}
 
 enum class BookCoverType {
     TREASURE_ISLAND,

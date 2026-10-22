@@ -94,10 +94,13 @@ fun BookshelfScreen(
     var currentSortOption by remember { mutableStateOf("Title (A-Z)") }
     var isGridView by remember { mutableStateOf(false) }
 
-    // Google Drive 2-Way Sync state
+    // Google Drive 2-Way Sync & Cloud Folder state
     var showDriveSyncDialog by remember { mutableStateOf(false) }
+    var showLinkCloudFolderBrowser by remember { mutableStateOf(false) }
     val isSyncingDrive by driveManager.isSyncingBookshelf.collectAsState()
     val driveSyncStatus by driveManager.bookshelfSyncStatus.collectAsState()
+    val activeDriveFolder by driveManager.activeBookshelfFolder.collectAsState()
+    val linkedCloudFolders by driveManager.linkedCloudFolders.collectAsState()
 
     // Book Selection & Deletion state
     var selectedBookIds by remember { mutableStateOf(setOf<String>()) }
@@ -143,11 +146,12 @@ fun BookshelfScreen(
         }
     }
 
-    val curatedFolders by driveManager.curatedBookshelfFolders.collectAsState()
     val standardCategories = listOf("All Books", "Favorites", "Unread", "Completed")
-    val categories = remember(curatedFolders) {
-        if (curatedFolders.isEmpty()) standardCategories
-        else standardCategories + curatedFolders.map { "📁 ${it.name}" }
+    val categories = remember(activeDriveFolder, linkedCloudFolders) {
+        val list = standardCategories.toMutableList()
+        activeDriveFolder?.let { list.add("🔄 ${it.name}") }
+        linkedCloudFolders.forEach { list.add("☁ ${it.name}") }
+        list
     }
 
     Box(
@@ -193,9 +197,15 @@ fun BookshelfScreen(
                                 selectedCategory == "Completed" -> book.progressPercent >= 100
                                 selectedCategory == "Unread" -> book.progressPercent == 0
                                 selectedCategory == "Favorites" -> book.isFavorite
-                                selectedCategory.startsWith("📁 ") -> {
-                                    val folderName = selectedCategory.removePrefix("📁 ")
-                                    val folder = curatedFolders.find { it.name.equals(folderName, ignoreCase = true) }
+                                selectedCategory.startsWith("🔄 ") -> {
+                                    val folderName = selectedCategory.removePrefix("🔄 ")
+                                    book.driveFolderId == activeDriveFolder?.id ||
+                                            book.driveFolderName.equals(folderName, ignoreCase = true) ||
+                                            !book.isCloudOnly
+                                }
+                                selectedCategory.startsWith("☁ ") -> {
+                                    val folderName = selectedCategory.removePrefix("☁ ")
+                                    val folder = linkedCloudFolders.find { it.name.equals(folderName, ignoreCase = true) }
                                     book.driveFolderId == folder?.id || (book.driveFolderName != null && book.driveFolderName.equals(folderName, ignoreCase = true))
                                 }
                                 else -> true
@@ -418,8 +428,8 @@ fun BookshelfScreen(
                 )
             )
 
-            // Interactive Drive Folder Chips (when user has connected Google Drive folders)
-            if (curatedFolders.isNotEmpty()) {
+            // Interactive Drive Folder Chips (when user has 2-way sync folder or linked cloud folders)
+            if (activeDriveFolder != null || linkedCloudFolders.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -444,17 +454,18 @@ fun BookshelfScreen(
                         }
                     }
 
-                    curatedFolders.forEach { folder ->
-                        item(key = folder.id) {
-                            val folderCatName = "📁 ${folder.name}"
-                            val isSelected = selectedCategory == folderCatName
-                            val count = books.count { it.driveFolderId == folder.id || it.driveFolderName.equals(folder.name, ignoreCase = true) }
+                    // 2-Way Sync Folder Chip
+                    activeDriveFolder?.let { folder ->
+                        item(key = "sync_${folder.id}") {
+                            val catName = "🔄 ${folder.name}"
+                            val isSelected = selectedCategory == catName
+                            val count = books.count { it.driveFolderId == folder.id || (!it.isCloudOnly && it.driveFolderId == null) }
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
-                                color = if (isSelected) Color(0xFF2A2215) else Color(0xFF1E1E1E),
-                                border = BorderStroke(1.dp, if (isSelected) GraphiteOrange else Color(0xFF333333)),
+                                color = if (isSelected) Color(0xFF1B2E1E) else Color(0xFF161E17),
+                                border = BorderStroke(1.dp, if (isSelected) Color(0xFF4CAF50) else Color(0xFF2E4E32)),
                                 modifier = Modifier.clickable {
-                                    selectedCategory = if (isSelected) "All Books" else folderCatName
+                                    selectedCategory = if (isSelected) "All Books" else catName
                                 }
                             ) {
                                 Row(
@@ -462,37 +473,100 @@ fun BookshelfScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.Folder,
+                                        imageVector = Icons.Default.CloudSync,
                                         contentDescription = null,
-                                        tint = if (isSelected) GraphiteOrange else Color.Gray,
+                                        tint = Color(0xFF81C784),
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = "${folder.name} ($count)",
-                                        color = if (isSelected) Color.White else Color.LightGray,
+                                        color = if (isSelected) Color.White else Color(0xFFC8E6C9),
                                         fontSize = 12.sp,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                                     )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Surface(
+                                        color = Color(0xFF2E7D32).copy(alpha = 0.4f),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "2-Way",
+                                            color = Color(0xFFA5D6A7),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
+                    // Linked Cloud Folders (Zero Storage)
+                    linkedCloudFolders.forEach { folder ->
+                        item(key = "cloud_${folder.id}") {
+                            val catName = "☁ ${folder.name}"
+                            val isSelected = selectedCategory == catName
+                            val count = books.count { it.driveFolderId == folder.id }
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isSelected) Color(0xFF142436) else Color(0xFF121A24),
+                                border = BorderStroke(1.dp, if (isSelected) Color(0xFF2196F3) else Color(0xFF223A52)),
+                                modifier = Modifier.clickable {
+                                    selectedCategory = if (isSelected) "All Books" else catName
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cloud,
+                                        contentDescription = null,
+                                        tint = Color(0xFF64B5F6),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "${folder.name} ($count)",
+                                        color = if (isSelected) Color.White else Color(0xFFBBDEFB),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Surface(
+                                        color = Color(0xFF1976D2).copy(alpha = 0.4f),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "0 MB",
+                                            color = Color(0xFF90CAF9),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Add / Link Cloud Folder Chip
                     item {
                         Surface(
                             shape = RoundedCornerShape(16.dp),
                             color = Color.Transparent,
-                            border = BorderStroke(1.dp, Color(0xFF444444)),
-                            modifier = Modifier.clickable { showDriveSyncDialog = true }
+                            border = BorderStroke(1.dp, Color(0xFF1E88E5).copy(alpha = 0.6f)),
+                            modifier = Modifier.clickable { showLinkCloudFolderBrowser = true }
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.Add, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.CloudDownload, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Add Folder", color = GraphiteOrange, fontSize = 12.sp)
+                                Text("Link Cloud Folder", color = Color(0xFF90CAF9), fontSize = 12.sp)
                             }
                         }
                     }
@@ -505,9 +579,15 @@ fun BookshelfScreen(
                     selectedCategory == "Completed" -> book.progressPercent >= 100
                     selectedCategory == "Unread" -> book.progressPercent == 0
                     selectedCategory == "Favorites" -> book.isFavorite
-                    selectedCategory.startsWith("📁 ") -> {
-                        val folderName = selectedCategory.removePrefix("📁 ")
-                        val folder = curatedFolders.find { it.name.equals(folderName, ignoreCase = true) }
+                    selectedCategory.startsWith("🔄 ") -> {
+                        val folderName = selectedCategory.removePrefix("🔄 ")
+                        book.driveFolderId == activeDriveFolder?.id ||
+                                book.driveFolderName.equals(folderName, ignoreCase = true) ||
+                                !book.isCloudOnly
+                    }
+                    selectedCategory.startsWith("☁ ") -> {
+                        val folderName = selectedCategory.removePrefix("☁ ")
+                        val folder = linkedCloudFolders.find { it.name.equals(folderName, ignoreCase = true) }
                         book.driveFolderId == folder?.id || (book.driveFolderName != null && book.driveFolderName.equals(folderName, ignoreCase = true))
                     }
                     else -> true
@@ -616,10 +696,27 @@ fun BookshelfScreen(
                                 },
                                 onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
                                 onUploadToDrive = {
+                                    val currentSynced = driveManager.getBookshelfSyncedFolder()
+                                    if (currentSynced == null) {
+                                        showDriveSyncDialog = true
+                                        Toast.makeText(context, "Please configure a Google Drive sync folder first", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        scope.launch {
+                                            val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                            val msg = if (res is DriveUploadResult.Success) "Uploaded to \"${currentSynced.name}\"" else "Upload failed"
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                onDownloadToDevice = {
                                     scope.launch {
-                                        val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
-                                        val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Downloading \"${book.title}\" for offline reading...", Toast.LENGTH_SHORT).show()
+                                        val res = driveManager.downloadCloudBookToDevice(context, book)
+                                        if (res.isSuccess) {
+                                            Toast.makeText(context, "Downloaded to device for offline reading", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Download failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 },
                                 onDelete = { booksToDelete = listOf(book) }
@@ -649,10 +746,27 @@ fun BookshelfScreen(
                                 },
                                 onToggleFavorite = { GraphiteRepository.toggleFavoriteBook(book.id) },
                                 onUploadToDrive = {
+                                    val currentSynced = driveManager.getBookshelfSyncedFolder()
+                                    if (currentSynced == null) {
+                                        showDriveSyncDialog = true
+                                        Toast.makeText(context, "Please configure a Google Drive sync folder first", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        scope.launch {
+                                            val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
+                                            val msg = if (res is DriveUploadResult.Success) "Uploaded to \"${currentSynced.name}\"" else "Upload failed"
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                onDownloadToDevice = {
                                     scope.launch {
-                                        val res = driveManager.uploadBookToSyncedDriveFolder(context, book)
-                                        val msg = if (res is DriveUploadResult.Success) "Uploaded to Drive folder" else "Upload failed"
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Downloading \"${book.title}\" for offline reading...", Toast.LENGTH_SHORT).show()
+                                        val res = driveManager.downloadCloudBookToDevice(context, book)
+                                        if (res.isSuccess) {
+                                            Toast.makeText(context, "Downloaded to device for offline reading", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Download failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 },
                                 onDelete = { booksToDelete = listOf(book) }
@@ -687,6 +801,33 @@ fun BookshelfScreen(
                 modifier = Modifier.size(28.dp)
             )
         }
+    }
+
+    // Google Drive Link Cloud Folder Browser Dialog
+    if (showLinkCloudFolderBrowser) {
+        DriveFolderBrowserDialog(
+            driveManager = driveManager,
+            initialFolder = DriveFolder.ROOT,
+            onFolderSelected = { chosen ->
+                showLinkCloudFolderBrowser = false
+                scope.launch {
+                    Toast.makeText(context, "Linking \"${chosen.name}\" from Drive...", Toast.LENGTH_SHORT).show()
+                    val res = driveManager.importDriveCloudFolder(context, chosen)
+                    if (res.isSuccess) {
+                        val count = res.getOrDefault(0)
+                        Toast.makeText(context, "Linked \"${chosen.name}\" with $count books (0 MB storage used)", Toast.LENGTH_LONG).show()
+                        selectedCategory = "☁ ${chosen.name}"
+                    } else {
+                        Toast.makeText(context, "Failed to link folder: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onLaunchPicker = {
+                Toast.makeText(context, "Please select a folder from the list", Toast.LENGTH_SHORT).show()
+            },
+            isAuthorizingPicker = false,
+            onDismiss = { showLinkCloudFolderBrowser = false }
+        )
     }
 
     // Google Drive 2-Way Sync Dialog
@@ -817,10 +958,12 @@ private fun BookshelfDriveSyncDialog(
     val activeFolder by driveManager.activeBookshelfFolder.collectAsState()
     val defaultFolder by driveManager.defaultBookshelfFolder.collectAsState()
     val curatedFolders by driveManager.curatedBookshelfFolders.collectAsState()
+    val linkedCloudFolders by driveManager.linkedCloudFolders.collectAsState()
     val isSyncing by driveManager.isSyncingBookshelf.collectAsState()
     val syncStatusMsg by driveManager.bookshelfSyncStatus.collectAsState()
 
     var showDriveFolderBrowser by remember { mutableStateOf(false) }
+    var showLinkCloudFolderBrowserInDialog by remember { mutableStateOf(false) }
     var showCustomFolderDialog by remember { mutableStateOf(false) }
     var customFolderInput by remember { mutableStateOf("") }
     var isAuthorizingPicker by remember { mutableStateOf(false) }
@@ -936,181 +1079,73 @@ private fun BookshelfDriveSyncDialog(
                     }
                 }
 
-                // Curated Folders Section
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                // 2-WAY SYNC SECTION (OFFLINE STORAGE)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.CloudSync, contentDescription = null, tint = Color(0xFF81C784), modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "2-Way Sync Folder (Offline Storage)",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 14.sp
+                        )
+                    }
                     Text(
-                        text = "Your Synced Folders",
-                        color = Color.White,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = "Tap to switch destination. Star ★ to set as default cross-device folder.",
+                        text = "PDFs here are downloaded to your device for offline reading, and local books are uploaded here.",
                         color = Color.Gray,
                         fontSize = 11.sp
                     )
 
-                    val displayCuratedFolders = remember(curatedFolders) {
-                        val result = mutableListOf<DriveFolder>()
-                        for (f in curatedFolders) {
-                            val idx = result.indexOfFirst {
-                                it.id == f.id || it.name.trim().equals(f.name.trim(), ignoreCase = true)
-                            }
-                            if (idx >= 0) {
-                                val existing = result[idx]
-                                if ((existing.id.startsWith("default_") || existing.id.startsWith("custom_")) &&
-                                    (!f.id.startsWith("default_") && !f.id.startsWith("custom_"))
-                                ) {
-                                    result[idx] = f
-                                }
-                            } else {
-                                result.add(f)
-                            }
-                        }
-                        result
-                    }
-
-                    if (displayCuratedFolders.isEmpty()) {
+                    if (activeFolder == null) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = Color(0xFF1E1E1E),
                             border = BorderStroke(1.dp, Color(0xFF333333)),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showDriveFolderBrowser = true }
                         ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(26.dp))
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text("No Drive Folders Connected", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    "Tap 'Browse & Select Any Drive Folder' below to connect your Google Drive folder and stream PDFs.",
-                                    color = Color.Gray,
-                                    fontSize = 11.sp,
-                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                )
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(22.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("No 2-Way Sync Folder Set", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("Tap to select or create a Drive folder for offline sync", color = Color.Gray, fontSize = 11.sp)
+                                }
+                                Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color.Gray)
                             }
                         }
                     } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            displayCuratedFolders.forEach { folder ->
-                                val isSelected = activeFolder != null && (
-                                    folder.id == activeFolder?.id ||
-                                    (folder.id.startsWith("default_") && activeFolder?.id?.startsWith("default_") == true) ||
-                                    folder.name.equals(activeFolder?.name, ignoreCase = true)
-                                )
-                                val isDefault = defaultFolder != null && (
-                                    folder.id == defaultFolder?.id ||
-                                    (folder.id.startsWith("default_") && defaultFolder?.id?.startsWith("default_") == true) ||
-                                    folder.name.equals(defaultFolder?.name, ignoreCase = true)
-                                )
-
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isSelected) Color(0xFF2A2215) else Color(0xFF1E1E1E),
-                                    border = BorderStroke(
-                                        width = if (isSelected) 1.5.dp else 1.dp,
-                                        color = if (isSelected) GraphiteOrange else Color(0xFF333333)
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            driveManager.setBookshelfSyncedFolder(folder)
-                                            Toast.makeText(context, "Active folder: ${folder.name}", Toast.LENGTH_SHORT).show()
-                                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF162318),
+                            border = BorderStroke(1.dp, Color(0xFF2E7D32)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF81C784), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(activeFolder?.name ?: "", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text("2-Way Synced • Offline Available", color = Color(0xFFA5D6A7), fontSize = 10.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = { showDriveFolderBrowser = true },
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = GraphiteOrange)
                                 ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.Folder,
-                                            contentDescription = null,
-                                            tint = if (isSelected) GraphiteOrange else Color.LightGray,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = folder.name,
-                                            color = Color.White,
-                                            fontSize = 13.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-
-                                        if (isDefault) {
-                                            Surface(
-                                                color = GraphiteOrange.copy(alpha = 0.2f),
-                                                shape = RoundedCornerShape(4.dp),
-                                                border = BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.5f))
-                                            ) {
-                                                Text(
-                                                    text = "★ Default",
-                                                    color = GraphiteOrange,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                )
-                                            }
-                                        } else {
-                                            IconButton(
-                                                onClick = {
-                                                    driveManager.setDefaultBookshelfFolder(folder)
-                                                    Toast.makeText(context, "${folder.name} set as default cross-device folder", Toast.LENGTH_SHORT).show()
-                                                },
-                                                modifier = Modifier.size(24.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.StarBorder,
-                                                    contentDescription = "Set as Default",
-                                                    tint = Color.Gray,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                            }
-                                        }
-
-                                        if (!isDefault) {
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            IconButton(
-                                                onClick = {
-                                                    driveManager.removeCuratedBookshelfFolder(folder.id)
-                                                    Toast.makeText(context, "Removed ${folder.name}", Toast.LENGTH_SHORT).show()
-                                                },
-                                                modifier = Modifier.size(24.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Close,
-                                                    contentDescription = "Remove from list",
-                                                    tint = Color.LightGray.copy(alpha = 0.6f),
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                            }
-                                        }
-                                    }
+                                    Text("Change", fontSize = 11.sp)
                                 }
                             }
                         }
-                    }
-                }
-
-                // Folder action buttons: Browse Any Folder or Enter Custom Folder
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { showDriveFolderBrowser = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2C3E50))
-                    ) {
-                        Icon(Icons.Default.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF64B5F6))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Browse & Select Any Drive Folder", color = Color.White)
                     }
 
                     Row(
@@ -1126,26 +1161,108 @@ private fun BookshelfDriveSyncDialog(
                             shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
                         ) {
-                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Enter Folder Name", fontSize = 12.sp)
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("New Folder Name", fontSize = 11.sp)
                         }
 
                         OutlinedButton(
-                            onClick = {
-                                driveManager.resetBookshelfSyncedFolderToDefault()
-                                val def = defaultFolder
-                                if (def != null) {
-                                    Toast.makeText(context, "Reset to default: ${def.name}", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "No default folder set", Toast.LENGTH_SHORT).show()
-                                }
-                            },
+                            onClick = { showDriveFolderBrowser = true },
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.LightGray)
                         ) {
-                            Text("Reset to Default", fontSize = 12.sp)
+                            Icon(Icons.Default.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Browse Drive", fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = Color(0xFF2A2A2A))
+
+                // LINKED CLOUD FOLDERS SECTION (0 MB LOCAL STORAGE)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Cloud, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Linked Cloud Folders (0 MB Local Storage)",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 14.sp
+                        )
+                    }
+                    Text(
+                        text = "Browse and read PDFs on demand without taking any device storage.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+
+                    if (linkedCloudFolders.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF131B24),
+                            border = BorderStroke(1.dp, Color(0xFF1E2D3D)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showLinkCloudFolderBrowserInDialog = true }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.CloudQueue, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(22.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("No Cloud Folders Linked", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("Tap to link a Drive folder with books (0 MB storage)", color = Color(0xFF90CAF9), fontSize = 11.sp)
+                                }
+                                Icon(Icons.Default.Add, contentDescription = null, tint = Color(0xFF64B5F6))
+                            }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            linkedCloudFolders.forEach { cloudFolder ->
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFF131D28),
+                                    border = BorderStroke(1.dp, Color(0xFF1E3A5F)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.Cloud, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(cloudFolder.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                            Text("Cloud Library • Stream on demand (0 MB)", color = Color(0xFF90CAF9), fontSize = 10.sp)
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                driveManager.removeLinkedCloudFolder(cloudFolder.id)
+                                                Toast.makeText(context, "Unlinked ${cloudFolder.name}", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Unlink", tint = Color.LightGray, modifier = Modifier.size(14.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Button(
+                            onClick = { showLinkCloudFolderBrowserInDialog = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A334E))
+                        ) {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF64B5F6))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Link Another Drive Folder", color = Color.White, fontSize = 12.sp)
                         }
                     }
                 }
@@ -1155,7 +1272,8 @@ private fun BookshelfDriveSyncDialog(
             Button(
                 onClick = {
                     if (activeFolder == null) {
-                        Toast.makeText(context, "Please select or connect a Drive folder first", Toast.LENGTH_SHORT).show()
+                        showDriveFolderBrowser = true
+                        Toast.makeText(context, "Please select a 2-way sync folder first", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
                     scope.launch {
@@ -1242,6 +1360,31 @@ private fun BookshelfDriveSyncDialog(
         )
     }
 
+    if (showLinkCloudFolderBrowserInDialog) {
+        DriveFolderBrowserDialog(
+            driveManager = driveManager,
+            initialFolder = DriveFolder.ROOT,
+            onFolderSelected = { chosen ->
+                showLinkCloudFolderBrowserInDialog = false
+                scope.launch {
+                    Toast.makeText(context, "Linking \"${chosen.name}\" from Drive...", Toast.LENGTH_SHORT).show()
+                    val res = driveManager.importDriveCloudFolder(context, chosen)
+                    if (res.isSuccess) {
+                        val count = res.getOrDefault(0)
+                        Toast.makeText(context, "Linked \"${chosen.name}\" with $count books (0 MB storage used)", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "Failed to link folder: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onLaunchPicker = {
+                Toast.makeText(context, "Please select a folder from the browser list", Toast.LENGTH_SHORT).show()
+            },
+            isAuthorizingPicker = false,
+            onDismiss = { showLinkCloudFolderBrowserInDialog = false }
+        )
+    }
+
     if (showCustomFolderDialog) {
         AlertDialog(
             onDismissRequest = { showCustomFolderDialog = false },
@@ -1307,6 +1450,7 @@ private fun BookshelfItemRow(
     onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     onUploadToDrive: () -> Unit,
+    onDownloadToDevice: () -> Unit = {},
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1379,12 +1523,12 @@ private fun BookshelfItemRow(
                 fontSize = 13.sp,
                 maxLines = 1
             )
-            if (!book.driveFolderName.isNullOrBlank() || (book.filePath == null && !book.driveFileId.isNullOrBlank())) {
+            if (!book.driveFolderName.isNullOrBlank() || book.isCloudOnly) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (!book.driveFolderName.isNullOrBlank()) {
                         Surface(
-                            color = Color(0xFF2C3E50).copy(alpha = 0.6f),
+                            color = Color(0xFF1E2D3D),
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Row(
@@ -1397,13 +1541,21 @@ private fun BookshelfItemRow(
                             }
                         }
                     }
-                    if (book.filePath == null && !book.driveFileId.isNullOrBlank()) {
+                    if (book.isCloudOnly) {
                         Spacer(modifier = Modifier.width(4.dp))
                         Surface(
-                            color = Color(0xFF1B2A1E),
-                            shape = RoundedCornerShape(4.dp)
+                            color = Color(0xFF132238),
+                            shape = RoundedCornerShape(4.dp),
+                            border = BorderStroke(0.5.dp, Color(0xFF1E88E5))
                         ) {
-                            Text("☁ Streamed", color = Color(0xFF81C784), fontSize = 10.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Cloud, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(11.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("Cloud • 0 MB", color = Color(0xFF90CAF9), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                     }
                 }
@@ -1460,13 +1612,35 @@ private fun BookshelfItemRow(
                         menuExpanded = false
                     }
                 )
-                DropdownMenuItem(
-                    text = { Text("Upload to Google Drive", color = GraphiteOrange) },
-                    onClick = {
-                        menuExpanded = false
-                        onUploadToDrive()
-                    }
-                )
+                if (book.isCloudOnly) {
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Download, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Download to Device", color = Color(0xFF90CAF9))
+                            }
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onDownloadToDevice()
+                        }
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Upload to Google Drive", color = GraphiteOrange)
+                            }
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onUploadToDrive()
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Delete Book", color = Color(0xFFFF5252)) },
                     onClick = {
@@ -1489,6 +1663,7 @@ private fun BookshelfItemGridCard(
     onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     onUploadToDrive: () -> Unit,
+    onDownloadToDevice: () -> Unit = {},
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1542,39 +1717,124 @@ private fun BookshelfItemGridCard(
                     modifier = Modifier.padding(4.dp).size(20.dp).align(Alignment.TopEnd)
                 )
             }
-            if (book.filePath == null && !book.driveFileId.isNullOrBlank()) {
+            if (book.isCloudOnly) {
                 Surface(
-                    color = Color(0xFF1B2A1E).copy(alpha = 0.9f),
+                    color = Color(0xFF132238).copy(alpha = 0.92f),
                     shape = RoundedCornerShape(4.dp),
+                    border = BorderStroke(0.5.dp, Color(0xFF1E88E5)),
                     modifier = Modifier.padding(4.dp).align(Alignment.BottomStart)
                 ) {
-                    Text("☁ Stream", color = Color(0xFF81C784), fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                    Row(
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Cloud, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(10.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("0 MB", color = Color(0xFF90CAF9), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = book.title,
-            color = Color.White,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        if (!book.driveFolderName.isNullOrBlank()) {
-            Text(
-                text = "📁 ${book.driveFolderName}",
-                color = Color(0xFF64B5F6),
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = book.title,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (!book.driveFolderName.isNullOrBlank()) {
+                    Text(
+                        text = "📁 ${book.driveFolderName}",
+                        color = Color(0xFF64B5F6),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = "${book.progressPercent}%",
+                    color = Color(0xFF757575),
+                    fontSize = 11.sp
+                )
+            }
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "More",
+                        tint = Color(0xFF757575),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier.background(GraphiteSurfaceVariant)
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Open Book", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onOpen()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (book.isFavorite) "Remove from Favorites" else "Add to Favorites", color = Color.White) },
+                        onClick = {
+                            menuExpanded = false
+                            onToggleFavorite()
+                        }
+                    )
+                    if (book.isCloudOnly) {
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Download, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Download to Device", color = Color(0xFF90CAF9))
+                                }
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDownloadToDevice()
+                            }
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Upload to Google Drive", color = GraphiteOrange)
+                                }
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onUploadToDrive()
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("Delete Book", color = Color(0xFFFF5252)) },
+                        onClick = {
+                            menuExpanded = false
+                            onDelete()
+                        }
+                    )
+                }
+            }
         }
-        Text(
-            text = "${book.progressPercent}%",
-            color = Color(0xFF757575),
-            fontSize = 11.sp
-        )
     }
 }
 
