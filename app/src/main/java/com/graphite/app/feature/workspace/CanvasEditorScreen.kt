@@ -251,7 +251,16 @@ fun CanvasEditorScreen(
 
     // Canvas Text Box state
     var localTextBoxes by remember { mutableStateOf<List<CanvasTextBox>>(emptyList()) }
+    var selectedTextBoxId by remember { mutableStateOf<String?>(null) }
     var editingTextBoxId by remember { mutableStateOf<String?>(null) }
+    var textToolFontFamily by remember { mutableStateOf("Roboto") }
+    var textToolFontSize by remember { mutableFloatStateOf(16f) }
+    var textToolColorHex by remember { mutableStateOf("#1F1F1F") }
+    var textToolBold by remember { mutableStateOf(false) }
+    var textToolItalic by remember { mutableStateOf(false) }
+    var textToolUnderline by remember { mutableStateOf(false) }
+    var textToolStrikethrough by remember { mutableStateOf(false) }
+    var textToolAlignment by remember { mutableStateOf("Left") }
     var textToolTapDownX by remember { mutableFloatStateOf(0f) }
     var textToolTapDownY by remember { mutableFloatStateOf(0f) }
 
@@ -375,20 +384,21 @@ fun CanvasEditorScreen(
         GraphiteRepository.updateNotebookLines(notebookId, currentLines)
     }
 
-    // Convert handwriting ink strokes to text boxes using ML Kit
+    // Convert handwriting ink strokes to text boxes (Strictly bound to Lasso selection)
     fun convertHandwritingToText(targetPageIdx: Int = currentPageIndex) {
-        val strokesToConvert = if (selectedStrokeIndices.isNotEmpty() && activePageForStroke == targetPageIdx) {
-            uiState.strokes.filterIndexed { index, _ -> selectedStrokeIndices.contains(index) }
-        } else {
-            uiState.strokes.filter { it.pageIndex == targetPageIdx }
-        }
-
-        if (strokesToConvert.isEmpty()) {
-            Toast.makeText(context, "No handwriting found to convert", Toast.LENGTH_SHORT).show()
+        if (selectedStrokeIndices.isEmpty() || activePageForStroke != targetPageIdx) {
+            selectedStudioTool = StudioTool.LASSO
+            Toast.makeText(context, "Lasso the handwriting you want to convert", Toast.LENGTH_SHORT).show()
             return
         }
 
-        Toast.makeText(context, "Recognizing handwriting...", Toast.LENGTH_SHORT).show()
+        val strokesToConvert = uiState.strokes.filterIndexed { index, _ -> selectedStrokeIndices.contains(index) }
+        if (strokesToConvert.isEmpty()) {
+            Toast.makeText(context, "No handwriting found in selection", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(context, "Recognizing handwriting (AI & Multilingual)...", Toast.LENGTH_SHORT).show()
         scope.launch {
             val result = HandwritingRecognizerHelper.recognizeStrokes(strokesToConvert)
             if (result != null && result.text.isNotBlank()) {
@@ -405,21 +415,19 @@ fun CanvasEditorScreen(
                     yRatio = yRatio,
                     text = result.text,
                     fontSizeSp = 16f,
-                    colorHex = "#1F1F1F"
+                    colorHex = textToolColorHex,
+                    fontFamily = textToolFontFamily,
+                    isAutoWidth = true
                 )
 
-                if (selectedStrokeIndices.isNotEmpty() && activePageForStroke == targetPageIdx) {
-                    workspaceViewModel.deleteStrokes(selectedStrokeIndices)
-                    selectedStrokeIndices = emptySet()
-                    lassoBounds = null
-                } else {
-                    val pageIndices = uiState.strokes.mapIndexedNotNull { i, s -> if (s.pageIndex == targetPageIdx) i else null }.toSet()
-                    workspaceViewModel.deleteStrokes(pageIndices)
-                }
+                workspaceViewModel.deleteStrokes(selectedStrokeIndices)
+                selectedStrokeIndices = emptySet()
+                lassoBounds = null
 
                 val updated = localTextBoxes + newBox
                 saveTextBoxes(updated)
-                editingTextBoxId = newBox.id
+                selectedTextBoxId = newBox.id
+                selectedStudioTool = StudioTool.TEXT
                 Toast.makeText(context, "Converted: \"${result.text.take(30)}\"", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(context, "Could not recognize text. Please write clearly and try again.", Toast.LENGTH_SHORT).show()
@@ -942,18 +950,17 @@ fun CanvasEditorScreen(
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .pointerInput(selectedStudioTool, pageIdx, editingTextBoxId) {
+                                        .pointerInput(selectedStudioTool, pageIdx, selectedTextBoxId) {
                                             detectTapGestures { tapOffset ->
-                                                if (editingTextBoxId != null) {
-                                                    // Tapping outside finishes current editing session:
-                                                    // Auto-saves if text was typed, auto-deletes if blank!
-                                                    val cur = localTextBoxes.find { it.id == editingTextBoxId }
+                                                if (selectedTextBoxId != null) {
+                                                    // Tapping outside deselects current text box
+                                                    val cur = localTextBoxes.find { it.id == selectedTextBoxId }
                                                     val cleaned = if (cur != null && cur.text.trim().isEmpty()) {
-                                                        localTextBoxes.filterNot { it.id == editingTextBoxId }
+                                                        localTextBoxes.filterNot { it.id == selectedTextBoxId }
                                                     } else {
                                                         localTextBoxes
                                                     }
-                                                    editingTextBoxId = null
+                                                    selectedTextBoxId = null
                                                     saveTextBoxes(cleaned)
                                                 } else {
                                                     // Prune any previous empty boxes before creating a new one
@@ -968,12 +975,19 @@ fun CanvasEditorScreen(
                                                         xRatio = xRatio,
                                                         yRatio = yRatio,
                                                         text = "",
-                                                        fontSizeSp = 15f,
-                                                        colorHex = "#1F1F1F"
+                                                        fontSizeSp = textToolFontSize,
+                                                        colorHex = textToolColorHex,
+                                                        fontFamily = textToolFontFamily,
+                                                        isBold = textToolBold,
+                                                        isItalic = textToolItalic,
+                                                        isUnderline = textToolUnderline,
+                                                        isStrikethrough = textToolStrikethrough,
+                                                        textAlign = textToolAlignment,
+                                                        isAutoWidth = true
                                                     )
                                                     val updated = cleaned + newBox
                                                     saveTextBoxes(updated)
-                                                    editingTextBoxId = newBox.id
+                                                    selectedTextBoxId = newBox.id
                                                 }
                                             }
                                         }
@@ -1634,17 +1648,18 @@ fun CanvasEditorScreen(
                             pageBoxes.forEach { box ->
                                 CanvasTextBoxOverlayItem(
                                     box = box,
-                                    isEditing = editingTextBoxId == box.id,
-                                    isTextToolActive = selectedStudioTool == StudioTool.TEXT,
+                                    isSelected = selectedTextBoxId == box.id,
                                     basePageWidthPx = pageBaseW,
                                     basePageHeightPx = pageBaseH,
                                     pageScale = canonicalScale,
-                                    onStartEditing = {
+                                    onSelect = {
                                         selectedStudioTool = StudioTool.TEXT
-                                        editingTextBoxId = box.id
+                                        selectedTextBoxId = box.id
                                     },
                                     onFinishEditing = { updatedBox ->
-                                        editingTextBoxId = null
+                                        if (selectedTextBoxId == updatedBox.id && updatedBox.text.trim().isEmpty()) {
+                                            selectedTextBoxId = null
+                                        }
                                         val updated = if (updatedBox.text.trim().isEmpty()) {
                                             localTextBoxes.filterNot { it.id == updatedBox.id }
                                         } else {
@@ -1656,7 +1671,7 @@ fun CanvasEditorScreen(
                                         localTextBoxes = localTextBoxes.map { if (it.id == draft.id) draft else it }
                                     },
                                     onDelete = {
-                                        editingTextBoxId = null
+                                        if (selectedTextBoxId == box.id) selectedTextBoxId = null
                                         val updated = localTextBoxes.filterNot { it.id == box.id }
                                         saveTextBoxes(updated)
                                     },
@@ -1790,114 +1805,6 @@ fun CanvasEditorScreen(
                         modifier = Modifier.size(28.dp)
                     ) {
                         Icon(Icons.Default.Add, contentDescription = "Zoom In", tint = Color.LightGray, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-
-            // ==========================================
-            // FLOATING TEXT INPUT BAR (when TEXT tool is active)
-            // ==========================================
-            AnimatedVisibility(
-                visible = selectedStudioTool == StudioTool.TEXT && !isReadOnlyMode,
-                enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
-                exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 90.dp, bottom = 20.dp)
-                    .imePadding()
-            ) {
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22).copy(alpha = 0.98f)),
-                    border = BorderStroke(1.5.dp, Color(0xFF00BCD4)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .shadow(12.dp, RoundedCornerShape(16.dp))
-                ) {
-                    var typedText by remember { mutableStateOf("") }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.TextFields,
-                            contentDescription = null,
-                            tint = Color(0xFF00BCD4),
-                            modifier = Modifier.size(22.dp)
-                        )
-
-                        BasicTextField(
-                            value = typedText,
-                            onValueChange = { typedText = it },
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF28282E))
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
-                            cursorBrush = SolidColor(Color(0xFF00BCD4)),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(
-                                onDone = {
-                                    if (typedText.isNotBlank()) {
-                                        val pageTag = if (currentPageIndex > 0) "[PAGE:$currentPageIndex] " else ""
-                                        val repoNote = GraphiteRepository.getNotebook(notebookId)
-                                        val freshLines = (repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()).toMutableList()
-                                        val textLines = typedText.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { "$pageTag$it" }
-                                        freshLines.addAll(textLines)
-                                        GraphiteRepository.updateNotebookLines(notebookId, freshLines)
-                                        Toast.makeText(context, "Added to Page ${currentPageIndex + 1}!", Toast.LENGTH_SHORT).show()
-                                        typedText = ""
-                                    }
-                                }
-                            ),
-                            decorationBox = { innerTextField ->
-                                if (typedText.isEmpty()) {
-                                    Text(
-                                        "Type note on Page ${currentPageIndex + 1}...",
-                                        color = Color.Gray,
-                                        fontSize = 13.sp
-                                    )
-                                }
-                                innerTextField()
-                            }
-                        )
-
-                        Button(
-                            onClick = {
-                                if (typedText.isNotBlank()) {
-                                    val pageTag = if (currentPageIndex > 0) "[PAGE:$currentPageIndex] " else ""
-                                    val repoNote = GraphiteRepository.getNotebook(notebookId)
-                                    val freshLines = (repoNote?.previewLines ?: notebook?.previewLines ?: emptyList()).toMutableList()
-                                    val textLines = typedText.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { "$pageTag$it" }
-                                    freshLines.addAll(textLines)
-                                    GraphiteRepository.updateNotebookLines(notebookId, freshLines)
-                                    Toast.makeText(context, "Added to Page ${currentPageIndex + 1}!", Toast.LENGTH_SHORT).show()
-                                    typedText = ""
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00BCD4)),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                        ) {
-                            Text("Add", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-
-                        IconButton(
-                            onClick = { selectedStudioTool = StudioTool.PEN },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Close Text Tool",
-                                tint = Color.LightGray,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
                     }
                 }
             }
@@ -2063,6 +1970,421 @@ fun CanvasEditorScreen(
                                         convertHandwritingToText(currentPageIndex)
                                     }
                                 )
+                            }
+                        }
+
+                        // === SECONDARY TEXT SUB-TOOLBAR (UNDER MIDDLE BAR - MATCHING REFERENCE IMAGE 2) ===
+                        AnimatedVisibility(
+                            visible = (selectedStudioTool == StudioTool.TEXT || selectedTextBoxId != null) && !isReadOnlyMode,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
+                        ) {
+                            val activeBox = localTextBoxes.firstOrNull { it.id == selectedTextBoxId }
+                            val curFont = activeBox?.fontFamily ?: textToolFontFamily
+                            val curSize = activeBox?.fontSizeSp ?: textToolFontSize
+                            val curColor = activeBox?.colorHex ?: textToolColorHex
+                            val curBold = activeBox?.isBold ?: textToolBold
+                            val curItalic = activeBox?.isItalic ?: textToolItalic
+                            val curUnder = activeBox?.isUnderline ?: textToolUnderline
+                            val curStrike = activeBox?.isStrikethrough ?: textToolStrikethrough
+                            val curAlign = activeBox?.textAlign ?: textToolAlignment
+
+                            var showFontMenu by remember { mutableStateOf(false) }
+                            var showSizeMenu by remember { mutableStateOf(false) }
+                            var showColorPicker by remember { mutableStateOf(false) }
+
+                            fun updateFormatting(
+                                font: String = curFont,
+                                size: Float = curSize,
+                                colorHex: String = curColor,
+                                bold: Boolean = curBold,
+                                italic: Boolean = curItalic,
+                                under: Boolean = curUnder,
+                                strike: Boolean = curStrike,
+                                align: String = curAlign
+                            ) {
+                                textToolFontFamily = font
+                                textToolFontSize = size
+                                textToolColorHex = colorHex
+                                textToolBold = bold
+                                textToolItalic = italic
+                                textToolUnderline = under
+                                textToolStrikethrough = strike
+                                textToolAlignment = align
+
+                                if (activeBox != null) {
+                                    val updated = localTextBoxes.map {
+                                        if (it.id == activeBox.id) {
+                                            it.copy(
+                                                fontFamily = font,
+                                                fontSizeSp = size,
+                                                colorHex = colorHex,
+                                                isBold = bold,
+                                                isItalic = italic,
+                                                isUnderline = under,
+                                                isStrikethrough = strike,
+                                                textAlign = align
+                                            )
+                                        } else it
+                                    }
+                                    saveTextBoxes(updated)
+                                }
+                            }
+
+                            Card(
+                                shape = RoundedCornerShape(14.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.96f)),
+                                border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                                modifier = Modifier
+                                    .padding(top = 6.dp)
+                                    .shadow(6.dp, RoundedCornerShape(14.dp))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    // Undo / Redo buttons
+                                    IconButton(
+                                        onClick = { workspaceViewModel.undo() },
+                                        enabled = uiState.canUndo,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.Undo,
+                                            contentDescription = "Undo",
+                                            tint = if (uiState.canUndo) Color.White else Color.DarkGray,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { workspaceViewModel.redo() },
+                                        enabled = uiState.canRedo,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.Redo,
+                                            contentDescription = "Redo",
+                                            tint = if (uiState.canRedo) Color.White else Color.DarkGray,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .height(18.dp)
+                                            .background(Color(0xFF333338))
+                                    )
+
+                                    // Color Presets (Black, Red, Cyan, Palette)
+                                    val presets = listOf("#1F1F1F", "#E53935", "#00BCD4")
+                                    presets.forEach { hex ->
+                                        val isChosen = curColor.equals(hex, ignoreCase = true)
+                                        val c = try { Color(android.graphics.Color.parseColor(hex)) } catch (_: Exception) { Color.Black }
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .background(c)
+                                                .border(
+                                                    1.5.dp,
+                                                    if (isChosen) Color.White else Color(0xFF44444A),
+                                                    CircleShape
+                                                )
+                                                .clickable {
+                                                    updateFormatting(colorHex = hex)
+                                                }
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { showColorPicker = !showColorPicker },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Palette,
+                                            contentDescription = "Color Picker",
+                                            tint = Color(0xFF2196F3),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Compact Color Picker Popup
+                                    if (showColorPicker) {
+                                        DropdownMenu(
+                                            expanded = showColorPicker,
+                                            onDismissRequest = { showColorPicker = false },
+                                            modifier = Modifier.background(Color(0xFF252528))
+                                        ) {
+                                            val extraColors = listOf(
+                                                "#1F1F1F", "#2196F3", "#D32F2F", "#388E3C",
+                                                "#F57C00", "#7B1FA2", "#00BCD4", "#E91E63"
+                                            )
+                                            Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                extraColors.forEach { hex ->
+                                                    val c = try { Color(android.graphics.Color.parseColor(hex)) } catch (_: Exception) { Color.Black }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(22.dp)
+                                                            .clip(CircleShape)
+                                                            .background(c)
+                                                            .border(
+                                                                1.5.dp,
+                                                                if (curColor.equals(hex, ignoreCase = true)) Color.White else Color.Transparent,
+                                                                CircleShape
+                                                            )
+                                                            .clickable {
+                                                                updateFormatting(colorHex = hex)
+                                                                showColorPicker = false
+                                                            }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .height(18.dp)
+                                            .background(Color(0xFF333338))
+                                    )
+
+                                    // Font Family Dropdown ("Roboto" / "Default" / "Serif" / "Monospace" / "Cursive")
+                                    Box {
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF2C2C32))
+                                                .clickable { showFontMenu = true }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                        ) {
+                                            Text(
+                                                text = curFont,
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                tint = Color.LightGray,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = showFontMenu,
+                                            onDismissRequest = { showFontMenu = false },
+                                            modifier = Modifier.background(Color(0xFF252528))
+                                        ) {
+                                            listOf("Roboto", "Serif", "Monospace", "Cursive").forEach { fontName ->
+                                                DropdownMenuItem(
+                                                    text = { Text(fontName, color = Color.White) },
+                                                    onClick = {
+                                                        updateFormatting(font = fontName)
+                                                        showFontMenu = false
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Font Size Selector
+                                    Box {
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF2C2C32))
+                                                .clickable { showSizeMenu = true }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Text(
+                                                text = "${curSize.roundToInt()}",
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                tint = Color.LightGray,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = showSizeMenu,
+                                            onDismissRequest = { showSizeMenu = false },
+                                            modifier = Modifier.background(Color(0xFF252528))
+                                        ) {
+                                            listOf(10, 12, 14, 16, 18, 20, 24, 28, 32, 40).forEach { s ->
+                                                DropdownMenuItem(
+                                                    text = { Text("$s pt", color = Color.White) },
+                                                    onClick = {
+                                                        updateFormatting(size = s.toFloat())
+                                                        showSizeMenu = false
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .height(18.dp)
+                                            .background(Color(0xFF333338))
+                                    )
+
+                                    // Text Alignment
+                                    IconButton(
+                                        onClick = {
+                                            val nextAlign = when (curAlign.lowercase()) {
+                                                "left" -> "Center"
+                                                "center" -> "Right"
+                                                else -> "Left"
+                                            }
+                                            updateFormatting(align = nextAlign)
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = when (curAlign.lowercase()) {
+                                                "center" -> Icons.Default.FormatAlignCenter
+                                                "right" -> Icons.Default.FormatAlignRight
+                                                else -> Icons.Default.FormatAlignLeft
+                                            },
+                                            contentDescription = "Text Alignment",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Bold Button
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (curBold) Color(0xFF2196F3).copy(alpha = 0.25f) else Color.Transparent)
+                                            .border(1.dp, if (curBold) Color(0xFF2196F3) else Color.Transparent, RoundedCornerShape(6.dp))
+                                            .clickable { updateFormatting(bold = !curBold) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FormatBold,
+                                            contentDescription = "Bold",
+                                            tint = if (curBold) Color(0xFF2196F3) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Italic Button
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (curItalic) Color(0xFF2196F3).copy(alpha = 0.25f) else Color.Transparent)
+                                            .border(1.dp, if (curItalic) Color(0xFF2196F3) else Color.Transparent, RoundedCornerShape(6.dp))
+                                            .clickable { updateFormatting(italic = !curItalic) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FormatItalic,
+                                            contentDescription = "Italic",
+                                            tint = if (curItalic) Color(0xFF2196F3) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Underline Button
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (curUnder) Color(0xFF2196F3).copy(alpha = 0.25f) else Color.Transparent)
+                                            .border(1.dp, if (curUnder) Color(0xFF2196F3) else Color.Transparent, RoundedCornerShape(6.dp))
+                                            .clickable { updateFormatting(under = !curUnder) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FormatUnderlined,
+                                            contentDescription = "Underline",
+                                            tint = if (curUnder) Color(0xFF2196F3) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Strikethrough Button
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (curStrike) Color(0xFF2196F3).copy(alpha = 0.25f) else Color.Transparent)
+                                            .border(1.dp, if (curStrike) Color(0xFF2196F3) else Color.Transparent, RoundedCornerShape(6.dp))
+                                            .clickable { updateFormatting(strike = !curStrike) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FormatStrikethrough,
+                                            contentDescription = "Strikethrough",
+                                            tint = if (curStrike) Color(0xFF2196F3) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .height(18.dp)
+                                            .background(Color(0xFF333338))
+                                    )
+
+                                    // Text Box Format Icon [T]
+                                    IconButton(
+                                        onClick = {
+                                            if (activeBox != null) {
+                                                val toggled = !activeBox.isAutoWidth
+                                                updateFormatting()
+                                                val updated = localTextBoxes.map {
+                                                    if (it.id == activeBox.id) it.copy(isAutoWidth = toggled) else it
+                                                }
+                                                saveTextBoxes(updated)
+                                                Toast.makeText(context, if (toggled) "Auto-width enabled" else "Fixed width", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.TextFields,
+                                            contentDescription = "Text Box Style",
+                                            tint = Color(0xFF2196F3),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+
+                                    // Collapse / Close arrow
+                                    IconButton(
+                                        onClick = {
+                                            selectedTextBoxId = null
+                                            selectedStudioTool = StudioTool.PEN
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowUp,
+                                            contentDescription = "Close Sub-toolbar",
+                                            tint = Color.LightGray,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

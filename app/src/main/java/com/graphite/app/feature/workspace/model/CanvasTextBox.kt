@@ -20,11 +20,14 @@ data class CanvasTextBox(
     val isBold: Boolean = false,
     val isItalic: Boolean = false,
     val isUnderline: Boolean = false,
+    val isStrikethrough: Boolean = false,
+    val textAlign: String = "Left", // "Left", "Center", "Right"
+    val isAutoWidth: Boolean = true, // Whether width dynamically expands with typed text
     val fontFamily: String = "Default" // "Default", "Serif", "Monospace", "Cursive"
 ) {
     fun serialize(): String {
         val b64Text = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        return "[GRAPHITE_TEXTBOX:id=$id;page=$pageIndex;x=$xRatio;y=$yRatio;w=$widthRatio;size=$fontSizeSp;col=$colorHex;bold=$isBold;italic=$isItalic;under=$isUnderline;font=$fontFamily;text=$b64Text]"
+        return "[GRAPHITE_TEXTBOX:id=$id;page=$pageIndex;x=$xRatio;y=$yRatio;w=$widthRatio;size=$fontSizeSp;col=$colorHex;bold=$isBold;italic=$isItalic;under=$isUnderline;strike=$isStrikethrough;align=$textAlign;autoW=$isAutoWidth;font=$fontFamily;text=$b64Text]"
     }
 
     companion object {
@@ -46,6 +49,9 @@ data class CanvasTextBox(
                 val isBold = parts["bold"]?.toBooleanStrictOrNull() ?: false
                 val isItalic = parts["italic"]?.toBooleanStrictOrNull() ?: false
                 val isUnderline = parts["under"]?.toBooleanStrictOrNull() ?: false
+                val isStrike = parts["strike"]?.toBooleanStrictOrNull() ?: false
+                val align = parts["align"]?.takeIf { it.isNotBlank() } ?: "Left"
+                val autoW = parts["autoW"]?.toBooleanStrictOrNull() ?: (w <= 0.15f || parts["w"] == null)
                 val fontFamily = parts["font"]?.takeIf { it.isNotBlank() } ?: "Default"
 
                 val rawText = parts["text"] ?: ""
@@ -65,13 +71,16 @@ data class CanvasTextBox(
                     pageIndex = page,
                     xRatio = x,
                     yRatio = y,
-                    widthRatio = w.coerceIn(0.12f, 0.95f),
+                    widthRatio = w.coerceIn(0.08f, 0.95f),
                     text = decodedText,
                     fontSizeSp = size,
                     colorHex = col,
                     isBold = isBold,
                     isItalic = isItalic,
                     isUnderline = isUnderline,
+                    isStrikethrough = isStrike,
+                    textAlign = align,
+                    isAutoWidth = autoW,
                     fontFamily = fontFamily
                 )
             } catch (_: Exception) {

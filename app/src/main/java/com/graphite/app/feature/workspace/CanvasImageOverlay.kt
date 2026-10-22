@@ -553,10 +553,10 @@ fun CanvasImageOverlayItem(
         }
 
         // 3. Bottom Rotation Handle (⟳) - Placed in the UNROTATED outer container
-        // This eliminates the fidget-spinner runaway feedback loop completely!
+        // Uses stable accumulated coordinate tracking to eliminate jitter, lag, and feedback loops
         if (isSelected) {
             val rotKnobSizeDp = 32.dp
-            val rotKnobTouchDp = 44.dp
+            val rotKnobTouchDp = 48.dp
             val rotKnobTouchPx = with(density) { rotKnobTouchDp.toPx() }
             val halfKnobTouchPx = rotKnobTouchPx / 2f
 
@@ -577,44 +577,68 @@ fun CanvasImageOverlayItem(
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
+                            
+                            // Initialize stable finger position in outer container space at touch-down
+                            var stableFingerX = (knobCenterX - halfKnobTouchPx) + down.position.x
+                            var stableFingerY = (knobCenterY - halfKnobTouchPx) + down.position.y
+                            var prevPointerPos = down.position
+                            var totalMovedPx = 0f
+
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (!change.pressed) {
-                                    onSave(
-                                        image.copy(
-                                            xRatio = currentXRatio,
-                                            yRatio = currentYRatio,
-                                            widthRatio = currentWidthRatio,
-                                            heightRatio = currentHeightRatio,
-                                            rotationDegrees = currentRotation
+                                    if (totalMovedPx < 10f) {
+                                        // Quick tap: smoothly reset angle to 0°
+                                        currentRotation = 0f
+                                        val updated = image.copy(rotationDegrees = 0f)
+                                        onUpdateDraft(updated)
+                                        onSave(updated)
+                                        Toast.makeText(context, "Angle reset to 0°", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        onSave(
+                                            image.copy(
+                                                xRatio = currentXRatio,
+                                                yRatio = currentYRatio,
+                                                widthRatio = currentWidthRatio,
+                                                heightRatio = currentHeightRatio,
+                                                rotationDegrees = currentRotation
+                                            )
                                         )
-                                    )
+                                    }
                                     break
                                 }
                                 if (!isLocked) {
+                                    val moveDelta = change.position - prevPointerPos
+                                    prevPointerPos = change.position
+                                    totalMovedPx += moveDelta.getDistance()
                                     change.consume()
-                                    // Finger position in the unrotated outer container
-                                    val fingerX = (knobCenterX - halfKnobTouchPx) + change.position.x
-                                    val fingerY = (knobCenterY - halfKnobTouchPx) + change.position.y
-                                    val dx = fingerX - imgCenterOuterX
-                                    val dy = fingerY - imgCenterOuterY
 
-                                    // Direct mathematical 1:1 finger tracking
+                                    // Accumulate physical drag movement onto stable coordinate
+                                    stableFingerX += moveDelta.x
+                                    stableFingerY += moveDelta.y
+
+                                    val dx = stableFingerX - imgCenterOuterX
+                                    val dy = stableFingerY - imgCenterOuterY
+
+                                    // Compute exact angular tracking
                                     var targetDeg = Math.toDegrees(atan2(-dx.toDouble(), dy.toDouble())).toFloat()
                                     if (targetDeg < 0f) targetDeg += 360f
 
-                                    // Magnetic snap near cardinal angles (0°, 90°, 180°, 270°)
+                                    // Magnetic snap near cardinal angles (0°, 90°, 180°, 270°) and diagonals (45°, 135°, 225°, 315°)
                                     val snappedDeg = when {
-                                        abs(targetDeg - 0f) < 4f || abs(targetDeg - 360f) < 4f -> 0f
-                                        abs(targetDeg - 90f) < 4f -> 90f
-                                        abs(targetDeg - 180f) < 4f -> 180f
-                                        abs(targetDeg - 270f) < 4f -> 270f
+                                        abs(targetDeg - 0f) < 5f || abs(targetDeg - 360f) < 5f -> 0f
+                                        abs(targetDeg - 90f) < 5f -> 90f
+                                        abs(targetDeg - 180f) < 5f -> 180f
+                                        abs(targetDeg - 270f) < 5f -> 270f
+                                        abs(targetDeg - 45f) < 3f -> 45f
+                                        abs(targetDeg - 135f) < 3f -> 135f
+                                        abs(targetDeg - 225f) < 3f -> 225f
+                                        abs(targetDeg - 315f) < 3f -> 315f
                                         else -> targetDeg
                                     }
 
                                     currentRotation = snappedDeg
-                                    onUpdateDraft(image.copy(rotationDegrees = currentRotation))
                                 }
                             }
                         }
@@ -627,15 +651,7 @@ fun CanvasImageOverlayItem(
                         .shadow(4.dp, CircleShape)
                         .clip(CircleShape)
                         .background(Color.White)
-                        .border(2.dp, Color(0xFF2196F3), CircleShape)
-                        .clickable {
-                            // Tap to reset to 0°
-                            currentRotation = 0f
-                            val updated = image.copy(rotationDegrees = 0f)
-                            onUpdateDraft(updated)
-                            onSave(updated)
-                            Toast.makeText(context, "Angle reset to 0°", Toast.LENGTH_SHORT).show()
-                        },
+                        .border(2.dp, Color(0xFF2196F3), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
