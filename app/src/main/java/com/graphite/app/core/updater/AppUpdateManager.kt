@@ -55,7 +55,12 @@ sealed class UpdateState {
     object Idle : UpdateState()
     object Checking : UpdateState()
     data class Available(val info: UpdateInfo) : UpdateState()
-    data class Downloading(val progressPercent: Int) : UpdateState()
+    data class Downloading(
+        val progressPercent: Int,
+        val bytesDownloaded: Long = 0L,
+        val totalBytes: Long = 0L,
+        val speedKbps: Long = 0L
+    ) : UpdateState()
     data class ReadyToInstall(val apkFile: File) : UpdateState()
     data class Error(val message: String) : UpdateState()
 }
@@ -201,7 +206,7 @@ class AppUpdateManager(
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
         lastDownloadUrl = downloadUrl
-        _updateState.value = UpdateState.Downloading(0)
+        _updateState.value = UpdateState.Downloading(0, 0L, 0L, 0L)
         downloadJob?.cancel()
         downloadJob = CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -222,23 +227,38 @@ class AppUpdateManager(
                 val apkFile = File(context.cacheDir, "Graphite-update.apk")
                 if (apkFile.exists()) apkFile.delete()
 
-                val inputStream = body.byteStream()
-                val outputStream = FileOutputStream(apkFile)
+                val inputStream = java.io.BufferedInputStream(body.byteStream(), 262144)
+                val outputStream = java.io.BufferedOutputStream(FileOutputStream(apkFile), 262144)
 
-                val buffer = ByteArray(32768)
+                val buffer = ByteArray(131072) // 128 KB buffer for high socket throughput
                 var bytesRead: Int
                 var totalBytesRead = 0L
-                var lastProgressPercent = -1
+                var lastUpdateTime = System.currentTimeMillis()
+                var bytesSinceLastUpdate = 0L
+                var currentSpeed = 0L
 
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     outputStream.write(buffer, 0, bytesRead)
                     totalBytesRead += bytesRead
-                    if (contentLength > 0) {
-                        val progress = ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
-                        if (progress != lastProgressPercent) {
-                            lastProgressPercent = progress
-                            _updateState.value = UpdateState.Downloading(progress)
-                        }
+                    bytesSinceLastUpdate += bytesRead
+
+                    val now = System.currentTimeMillis()
+                    val elapsed = now - lastUpdateTime
+                    if (elapsed >= 120L) { // Update every 120ms so user sees smooth progress
+                        currentSpeed = if (elapsed > 0) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
+                        lastUpdateTime = now
+                        bytesSinceLastUpdate = 0L
+
+                        val progress = if (contentLength > 0) {
+                            ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
+                        } else 0
+
+                        _updateState.value = UpdateState.Downloading(
+                            progressPercent = progress,
+                            bytesDownloaded = totalBytesRead,
+                            totalBytes = contentLength,
+                            speedKbps = currentSpeed
+                        )
                     }
                 }
 
@@ -438,22 +458,58 @@ fun AppUpdateModalDialog(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         LinearProgressIndicator(
-                            progress = { state.progressPercent / 100f },
+                            progress = { if (state.totalBytes > 0) (state.bytesDownloaded.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f) else 0f },
                             modifier = Modifier.fillMaxWidth().height(8.dp),
                             color = GraphiteOrange,
                             trackColor = Color(0xFF333333)
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "${state.progressPercent}% downloaded",
-                            color = Color.LightGray,
-                            fontSize = 13.sp
-                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val currMb = state.bytesDownloaded / 1048576f
+                            val totalMb = if (state.totalBytes > 0) state.totalBytes / 1048576f else 0f
+                            Text(
+                                text = if (totalMb > 0f) String.format(Locale.US, "%.1f / %.1f MB", currMb, totalMb) else String.format(Locale.US, "%.1f MB", currMb),
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            val speedText = if (state.speedKbps >= 1024) {
+                                String.format(Locale.US, "%.1f MB/s", state.speedKbps / 1024f)
+                            } else {
+                                "${state.speedKbps} KB/s"
+                            }
+                            Text(
+                                text = if (state.speedKbps > 0) speedText else "Downloading...",
+                                color = GraphiteOrange,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { updateManager.cancelDownload(context) }) {
-                        Text("Cancel", color = Color(0xFFFF5252))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val dlUrl = updateManager.lastDownloadUrl
+                        if (!dlUrl.isNullOrBlank()) {
+                            TextButton(
+                                onClick = {
+                                    updateManager.cancelDownload(context)
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(dlUrl)).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            ) {
+                                Text("Open in Browser", color = Color(0xFF64B5F6), fontSize = 12.sp)
+                            }
+                        }
+                        TextButton(onClick = { updateManager.cancelDownload(context) }) {
+                            Text("Cancel", color = Color(0xFFFF5252), fontSize = 12.sp)
+                        }
                     }
                 },
                 containerColor = GraphiteSurfaceVariant,
