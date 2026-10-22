@@ -114,8 +114,9 @@ class AppUpdateManager(
                 val body = latest.optString("body", "Bug fixes and improvements.")
                 val publishedAt = latest.optString("published_at", "")
 
-                // Find APK asset download URL
+                // Find APK asset download URL and accurate asset upload timestamp
                 var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
+                var assetTimestamp = publishedAt
                 val assets = latest.optJSONArray("assets")
                 if (assets != null) {
                     for (i in 0 until assets.length()) {
@@ -123,6 +124,8 @@ class AppUpdateManager(
                         val name = asset.optString("name", "")
                         if (name.endsWith(".apk", ignoreCase = true)) {
                             apkUrl = asset.optString("browser_download_url", apkUrl)
+                            val upd = asset.optString("updated_at", "")
+                            if (upd.isNotBlank()) assetTimestamp = upd
                             break
                         }
                     }
@@ -150,16 +153,20 @@ class AppUpdateManager(
 
                 // Check if the update is genuinely newer
                 var isNewer = false
-                if (localSha.isNotBlank() && !localSha.equals("dev", ignoreCase = true) && releaseSha.isNotBlank()) {
-                    // Exact commit SHA comparison: only newer if remote SHA does NOT match installed SHA
-                    isNewer = !releaseSha.equals(localSha, ignoreCase = true)
-                } else if (localSha.equals("dev", ignoreCase = true) && publishedAt.isNotBlank()) {
-                    // Only fallback to timestamp comparison if running an uncommitted local build
+                if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
+                    if (localSha.isNotBlank() && !localSha.equals("dev", ignoreCase = true)) {
+                        // Exact commit SHA comparison: newer if remote SHA does NOT match installed SHA
+                        isNewer = !releaseSha.equals(localSha, ignoreCase = true)
+                    } else {
+                        // Local build has no commit sha or is dev, so a published release is newer
+                        isNewer = true
+                    }
+                } else if (assetTimestamp.isNotBlank()) {
                     try {
                         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
                         sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
-                        val remoteTime = sdf.parse(publishedAt)?.time ?: 0L
-                        if (remoteTime > localBuildTime + 300_000) {
+                        val remoteTime = sdf.parse(assetTimestamp)?.time ?: 0L
+                        if (remoteTime > localBuildTime + 60_000) {
                             isNewer = true
                         }
                     } catch (_: Exception) {}

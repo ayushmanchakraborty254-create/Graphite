@@ -489,6 +489,19 @@ fun MeScreen(
                 )
                 HorizontalDivider(color = GraphiteOutline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
                 SettingItemRow(
+                    icon = Icons.Default.SystemUpdate,
+                    title = "Check for Updates",
+                    onClick = {
+                        android.widget.Toast.makeText(context, "Checking for updates...", android.widget.Toast.LENGTH_SHORT).show()
+                        GraphiteApplication.instance.appUpdateManager.checkForUpdates(context) { hasUpdate ->
+                            if (!hasUpdate) {
+                                android.widget.Toast.makeText(context, "Graphite is up to date!", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                )
+                HorizontalDivider(color = GraphiteOutline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
+                SettingItemRow(
                     icon = Icons.Default.Settings,
                     title = "Setting",
                     onClick = { showSettingsDialog = true }

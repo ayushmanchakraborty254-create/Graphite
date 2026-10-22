@@ -88,8 +88,23 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
+                val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                            appUpdateManager.checkForUpdates(context)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                    }
+                }
                 LaunchedEffect(Unit) {
-                    appUpdateManager.checkForUpdates(context)
+                    while (true) {
+                        appUpdateManager.checkForUpdates(context)
+                        kotlinx.coroutines.delay(120_000L) // Auto re-check every 2 minutes while active
+                    }
                 }
                 com.graphite.app.core.updater.AppUpdateModalDialog(updateManager = appUpdateManager, context = context)
 
