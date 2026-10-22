@@ -190,8 +190,7 @@ fun ReadingScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             BookCover(
-                                coverType = book.coverType,
-                                title = book.title,
+                                book = book,
                                 modifier = Modifier.width(90.dp).height(125.dp)
                             )
                             Text(
@@ -264,8 +263,7 @@ private fun RecentBookCard(
     ) {
         // Book Cover Thumbnail
         BookCover(
-            coverType = book.coverType,
-            title = book.title,
+            book = book,
             modifier = Modifier
                 .width(68.dp)
                 .height(96.dp)

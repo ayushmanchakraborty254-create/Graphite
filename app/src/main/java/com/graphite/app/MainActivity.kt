@@ -29,6 +29,11 @@ import android.content.Intent
 import com.graphite.app.core.drive.GoogleDriveUploadWorkflow
 import com.graphite.app.data.repository.GraphiteRepository
 import android.net.Uri
+import android.widget.Toast
+import kotlinx.coroutines.launch
+import com.graphite.app.core.importer.ImportDestination
+import com.graphite.app.core.importer.ImportDestinationDialog
+import com.graphite.app.core.importer.ImportResult
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
@@ -69,22 +74,53 @@ class MainActivity : ComponentActivity() {
                 val isRootTab = currentDestination is ActiveDestination.MainTab
                 val context = androidx.compose.ui.platform.LocalContext.current
                 val sharedUri by sharedUriToOpen
+                val coroutineScope = rememberCoroutineScope()
+                var isImportingFile by remember { mutableStateOf(false) }
 
-                LaunchedEffect(sharedUri) {
-                    val uri = sharedUri ?: return@LaunchedEffect
-                    try {
-                        val result = GraphiteApplication.instance.fileImportManager.importToNotes(context, uri)
-                        when (result) {
-                            is com.graphite.app.core.importer.ImportResult.SuccessNotebook -> {
-                                currentDestination = ActiveDestination.CanvasEditor(result.notebook.id)
+                val activeSharedUri = sharedUri
+                if (activeSharedUri != null) {
+                    ImportDestinationDialog(
+                        uri = activeSharedUri,
+                        isImporting = isImportingFile,
+                        onSelectDestination = { dest ->
+                            coroutineScope.launch {
+                                isImportingFile = true
+                                try {
+                                    val result = when (dest) {
+                                        ImportDestination.BOOKSHELF -> {
+                                            GraphiteApplication.instance.fileImportManager.importToBookshelf(context, activeSharedUri)
+                                        }
+                                        else -> {
+                                            GraphiteApplication.instance.fileImportManager.importToNotes(context, activeSharedUri)
+                                        }
+                                    }
+                                    when (result) {
+                                        is ImportResult.SuccessNotebook -> {
+                                            selectedTab = NavigationTab.NOTESHELF
+                                            currentDestination = ActiveDestination.CanvasEditor(result.notebook.id)
+                                            Toast.makeText(context, "Saved to Noteshelf", Toast.LENGTH_SHORT).show()
+                                        }
+                                        is ImportResult.SuccessBook -> {
+                                            selectedTab = NavigationTab.BOOKSHELF
+                                            currentDestination = ActiveDestination.ReaderView(result.book.id)
+                                            Toast.makeText(context, "Saved to Bookshelf", Toast.LENGTH_SHORT).show()
+                                        }
+                                        is ImportResult.Error -> {
+                                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed to open file: ${e.message}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isImportingFile = false
+                                    sharedUriToOpen.value = null
+                                }
                             }
-                            is com.graphite.app.core.importer.ImportResult.SuccessBook -> {
-                                currentDestination = ActiveDestination.ReaderView(result.book.id)
-                            }
-                            else -> {}
+                        },
+                        onDismiss = {
+                            sharedUriToOpen.value = null
                         }
-                    } catch (_: Exception) {}
-                    sharedUriToOpen.value = null
+                    )
                 }
 
                 val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
