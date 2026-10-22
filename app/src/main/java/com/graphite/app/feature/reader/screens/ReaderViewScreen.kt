@@ -50,9 +50,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.graphite.app.GraphiteApplication
 import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.core.importer.ParsedDocument
 import com.graphite.app.core.importer.SlideContent
@@ -86,10 +88,15 @@ fun ReaderViewScreen(
     }
 
     val ext = book.filePath?.substringAfterLast('.', "")?.lowercase() ?: ""
-    val isPdf = (book.filePath != null && ext == "pdf") || book.mimeType.contains("pdf", ignoreCase = true)
+    val isPdf = (book.filePath != null && ext == "pdf") || book.mimeType.contains("pdf", ignoreCase = true) || !book.driveFileId.isNullOrBlank()
     val isPptx = ext in listOf("pptx", "ppt") || book.coverType == BookCoverType.CE_PPT || book.mimeType.contains("presentation", ignoreCase = true)
     val isDocx = ext in listOf("docx", "doc") || book.mimeType.contains("word", ignoreCase = true)
     val isXlsx = ext in listOf("xlsx", "xls", "csv") || book.mimeType.contains("spreadsheet", ignoreCase = true) || book.mimeType.contains("sheet", ignoreCase = true)
+
+    var resolvedFilePath by remember(book.id) { mutableStateOf(book.filePath) }
+    var isStreamingDriveFile by remember { mutableStateOf(false) }
+    var streamingDriveError by remember { mutableStateOf<String?>(null) }
+    var streamRetryTrigger by remember { mutableIntStateOf(0) }
 
     var currentProgress by remember { mutableFloatStateOf((book.progressPercent).toFloat()) }
     var fontSize by remember { mutableFloatStateOf(16f) }
@@ -117,9 +124,49 @@ fun ReaderViewScreen(
         }
     }
 
-    LaunchedEffect(book.filePath) {
+    // On-demand streaming from Google Drive if local file path is absent
+    LaunchedEffect(book.id, book.filePath, book.driveFileId, streamRetryTrigger) {
         if (!book.filePath.isNullOrBlank()) {
-            val file = File(book.filePath)
+            resolvedFilePath = book.filePath
+        } else if (!book.driveFileId.isNullOrBlank()) {
+            val cachedFile = File(context.cacheDir, "stream_${book.driveFileId}.pdf")
+            if (cachedFile.exists() && cachedFile.length() > 0) {
+                resolvedFilePath = cachedFile.absolutePath
+            } else {
+                isStreamingDriveFile = true
+                streamingDriveError = null
+                withContext(Dispatchers.IO) {
+                    try {
+                        val driveManager = GraphiteApplication.instance.googleDriveManager
+                        val result = driveManager.streamFileBytes(context, book.driveFileId)
+                        if (result.isSuccess) {
+                            val bytes = result.getOrThrow()
+                            cachedFile.writeBytes(bytes)
+                            withContext(Dispatchers.Main) {
+                                resolvedFilePath = cachedFile.absolutePath
+                                isStreamingDriveFile = false
+                            }
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                streamingDriveError = result.exceptionOrNull()?.message ?: "Could not stream file from Drive"
+                                isStreamingDriveFile = false
+                            }
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            streamingDriveError = e.message ?: "Streaming error"
+                            isStreamingDriveFile = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(resolvedFilePath) {
+        val currentPath = resolvedFilePath
+        if (!currentPath.isNullOrBlank()) {
+            val file = File(currentPath)
             if (file.exists()) {
                 isLoadingDoc = true
                 withContext(Dispatchers.IO) {
@@ -169,11 +216,11 @@ fun ReaderViewScreen(
                         isPptx = isPptx,
                         isBookmarked = isBookmarked,
                         onNavigateBack = onNavigateBack,
-                        onOpenExternal = if (book.filePath != null) {
+                        onOpenExternal = if (resolvedFilePath != null) {
                             {
                                 DocumentContentParser.openWithExternalApp(
                                     context,
-                                    File(book.filePath),
+                                    File(resolvedFilePath!!),
                                     book.mimeType
                                 )
                             }
@@ -198,9 +245,43 @@ fun ReaderViewScreen(
                 .background(GraphiteBlack)
         ) {
             when {
-                isPdf && book.filePath != null -> {
+                isStreamingDriveFile -> {
+                    Box(modifier = Modifier.fillMaxSize().background(GraphiteBlack), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(44.dp), strokeWidth = 3.dp)
+                            Text("Streaming from Google Drive...", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text(book.title, color = Color.LightGray, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Fast on-demand streaming without consuming permanent storage", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+                }
+                streamingDriveError != null -> {
+                    Box(modifier = Modifier.fillMaxSize().background(GraphiteBlack), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Icon(Icons.Default.CloudOff, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(48.dp))
+                            Text("Unable to stream document", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Text(streamingDriveError ?: "Connection error", color = Color.LightGray, fontSize = 13.sp, textAlign = TextAlign.Center)
+                            Button(
+                                onClick = { streamRetryTrigger++ },
+                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Retry Streaming", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+                isPdf && resolvedFilePath != null -> {
                     PdfDocumentViewer(
-                        filePath = book.filePath,
+                        filePath = resolvedFilePath!!,
                         currentPageIndex = pdfCurrentPage,
                         totalPages = maxOf(1, pdfTotalPages),
                         onTotalPagesLoaded = { count ->
@@ -241,11 +322,11 @@ fun ReaderViewScreen(
                             isPptx = isPptx,
                             isBookmarked = isBookmarked,
                             onNavigateBack = onNavigateBack,
-                            onOpenExternal = if (book.filePath != null) {
+                            onOpenExternal = if (resolvedFilePath != null) {
                                 {
                                     DocumentContentParser.openWithExternalApp(
                                         context,
-                                        File(book.filePath),
+                                        File(resolvedFilePath!!),
                                         book.mimeType
                                     )
                                 }

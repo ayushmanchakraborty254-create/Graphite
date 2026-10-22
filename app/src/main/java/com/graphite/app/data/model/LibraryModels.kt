@@ -19,7 +19,9 @@ data class Book(
     val isBookmarked: Boolean = false,
     val isFavorite: Boolean = false,
     val driveFileId: String? = null,
-    val userId: String? = null
+    val userId: String? = null,
+    val driveFolderId: String? = null,
+    val driveFolderName: String? = null
 )
 
 enum class BookCoverType {

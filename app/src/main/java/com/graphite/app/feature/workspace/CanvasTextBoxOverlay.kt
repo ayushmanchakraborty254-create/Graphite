@@ -5,6 +5,7 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
@@ -350,6 +351,12 @@ fun CanvasTextBoxOverlayItem(
                         Modifier
                             .background(Color(0xFF2196F3).copy(alpha = 0.04f))
                             .border(1.5.dp, Color(0xFF2196F3), RoundedCornerShape(4.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                try { focusRequester.requestFocus() } catch (_: Exception) {}
+                            }
                     } else {
                         Modifier.clickable { onSelect() }
                     }

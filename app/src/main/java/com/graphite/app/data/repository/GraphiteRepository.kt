@@ -278,7 +278,7 @@ object GraphiteRepository {
         saveToDisk()
     }
 
-    fun addBook(title: String, author: String, content: String) {
+    fun addBook(title: String, author: String, content: String): Book {
         val newBook = Book(
             title = disambiguateBookTitle(title),
             author = author,
@@ -287,10 +287,10 @@ object GraphiteRepository {
             content = content,
             userId = activeUserId ?: "guest"
         )
-        addBook(newBook)
+        return addBook(newBook)
     }
 
-    fun addBook(book: Book) {
+    fun addBook(book: Book): Book {
         val currentUid = activeUserId ?: "guest"
         val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
         val scopedBook = if (book.userId.isNullOrBlank()) book.copy(userId = currentUid) else book
@@ -300,20 +300,28 @@ object GraphiteRepository {
             (scopedBook.driveFileId != null && it.driveFileId == scopedBook.driveFileId) ||
             normalizeBookTitle(it.title) == normalized
         }
+        val resultingBook: Book
         if (existingIndex >= 0) {
             val existing = userBookList[existingIndex]
-            userBookList[existingIndex] = existing.copy(
+            val updated = existing.copy(
                 filePath = scopedBook.filePath ?: existing.filePath,
                 driveFileId = scopedBook.driveFileId ?: existing.driveFileId,
+                driveFolderId = scopedBook.driveFolderId ?: existing.driveFolderId,
+                driveFolderName = scopedBook.driveFolderName ?: existing.driveFolderName,
                 mimeType = if (scopedBook.mimeType.isNotBlank()) scopedBook.mimeType else existing.mimeType,
-                content = if (scopedBook.content.isNotBlank()) scopedBook.content else existing.content
+                content = if (scopedBook.content.isNotBlank()) scopedBook.content else existing.content,
+                totalChapters = if (scopedBook.totalChapters > 1) scopedBook.totalChapters else existing.totalChapters
             )
+            userBookList[existingIndex] = updated
+            resultingBook = updated
         } else {
             userBookList.add(0, scopedBook)
+            resultingBook = scopedBook
         }
         _books.value = userBookList.toList()
         _stats.update { it.copy(totalBooks = _books.value.size) }
         saveToDisk()
+        return resultingBook
     }
 
     fun disambiguateNoteTitle(baseTitle: String): String {
@@ -791,16 +799,14 @@ object GraphiteRepository {
                 // Filter out legacy mock books
                 if (book.id == "book_treasure_island" || book.id == "book_ce_ppt") continue
 
-                // Filter out non-PDF files if user requested PDF only
+                // Filter out non-PDF files if user requested PDF only (allow Drive-streamed books where filePath is null)
                 val isNonPdf = (book.filePath != null && !book.filePath.endsWith(".pdf", ignoreCase = true)) ||
-                        (book.mimeType.isNotBlank() && book.mimeType != "application/pdf")
+                        (book.mimeType.isNotBlank() && book.mimeType != "application/pdf" && !book.mimeType.contains("pdf", ignoreCase = true))
                 if (isNonPdf) continue
 
-                // Filter out raw UUID / random Drive ID books from earlier erroneous sync
-                val isRawIdTitle = book.title.length > 20 && (
-                        book.title.matches(Regex("^[a-zA-Z0-9_-]{20,}$")) ||
-                        book.title.matches(Regex("^[0-9a-fA-F-]{36}$"))
-                )
+                // Filter out raw UUID / random Drive ID books from earlier erroneous sync (never delete normal hyphenated titles)
+                val isRawIdTitle = book.title.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")) ||
+                        (book.title.length in 28..45 && book.title.matches(Regex("^[a-zA-Z0-9_]{28,}$")) && !book.title.contains(" ") && !book.title.contains("-"))
                 if (isRawIdTitle) continue
 
                 val normalized = normalizeBookTitle(book.title)
@@ -1193,6 +1199,8 @@ object GraphiteRepository {
             put("isFavorite", book.isFavorite)
             put("driveFileId", book.driveFileId)
             put("userId", book.userId)
+            book.driveFolderId?.let { put("driveFolderId", it) }
+            book.driveFolderName?.let { put("driveFolderName", it) }
         }
     }
 
@@ -1212,7 +1220,9 @@ object GraphiteRepository {
             isBookmarked = json.optBoolean("isBookmarked", false),
             isFavorite = json.optBoolean("isFavorite", false),
             driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null,
-            userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null
+            userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null,
+            driveFolderId = if (json.has("driveFolderId") && !json.isNull("driveFolderId")) json.getString("driveFolderId") else null,
+            driveFolderName = if (json.has("driveFolderName") && !json.isNull("driveFolderName")) json.getString("driveFolderName") else null
         )
     }
 }

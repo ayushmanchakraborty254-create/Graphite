@@ -253,6 +253,8 @@ fun CanvasEditorScreen(
     var localTextBoxes by remember { mutableStateOf<List<CanvasTextBox>>(emptyList()) }
     var selectedTextBoxId by remember { mutableStateOf<String?>(null) }
     var editingTextBoxId by remember { mutableStateOf<String?>(null) }
+    var lastCreatedTextBoxTime by remember { mutableLongStateOf(0L) }
+    var isConvertingHandwriting by remember { mutableStateOf(false) }
     var textToolFontFamily by remember { mutableStateOf("Roboto") }
     var textToolFontSize by remember { mutableFloatStateOf(16f) }
     var textToolColorHex by remember { mutableStateOf("#1F1F1F") }
@@ -386,6 +388,7 @@ fun CanvasEditorScreen(
 
     // Convert handwriting ink strokes to text boxes (Strictly bound to Lasso selection)
     fun convertHandwritingToText(targetPageIdx: Int = currentPageIndex) {
+        if (isConvertingHandwriting) return
         if (selectedStrokeIndices.isEmpty() || activePageForStroke != targetPageIdx) {
             selectedStudioTool = StudioTool.LASSO
             Toast.makeText(context, "Lasso the handwriting you want to convert", Toast.LENGTH_SHORT).show()
@@ -398,39 +401,47 @@ fun CanvasEditorScreen(
             return
         }
 
+        isConvertingHandwriting = true
         Toast.makeText(context, "Recognizing handwriting (AI & Multilingual)...", Toast.LENGTH_SHORT).show()
         scope.launch {
-            val result = HandwritingRecognizerHelper.recognizeStrokes(strokesToConvert)
-            if (result != null && result.text.isNotBlank()) {
-                val pageBaseWPx = with(density) { basePageWidth.toPx() }.coerceAtLeast(1f)
-                val pageBaseHPx = with(density) { basePageHeight.toPx() }.coerceAtLeast(1f)
+            try {
+                val result = HandwritingRecognizerHelper.recognizeStrokes(strokesToConvert)
+                if (result != null && result.text.isNotBlank()) {
+                    val pageBaseWPx = with(density) { basePageWidth.toPx() }.coerceAtLeast(1f)
+                    val pageBaseHPx = with(density) { basePageHeight.toPx() }.coerceAtLeast(1f)
 
-                val xRatio = (result.bounds.left / pageBaseWPx).coerceIn(0.04f, 0.85f)
-                val yRatio = (result.bounds.top / pageBaseHPx).coerceIn(0.04f, 0.90f)
+                    val xRatio = (result.bounds.left / pageBaseWPx).coerceIn(0.04f, 0.85f)
+                    val yRatio = (result.bounds.top / pageBaseHPx).coerceIn(0.04f, 0.90f)
 
-                val newBox = CanvasTextBox(
-                    id = java.util.UUID.randomUUID().toString(),
-                    pageIndex = targetPageIdx,
-                    xRatio = xRatio,
-                    yRatio = yRatio,
-                    text = result.text,
-                    fontSizeSp = 16f,
-                    colorHex = textToolColorHex,
-                    fontFamily = textToolFontFamily,
-                    isAutoWidth = true
-                )
+                    val newBox = CanvasTextBox(
+                        id = java.util.UUID.randomUUID().toString(),
+                        pageIndex = targetPageIdx,
+                        xRatio = xRatio,
+                        yRatio = yRatio,
+                        text = result.text,
+                        fontSizeSp = 16f,
+                        colorHex = textToolColorHex,
+                        fontFamily = textToolFontFamily,
+                        isAutoWidth = true
+                    )
 
-                workspaceViewModel.deleteStrokes(selectedStrokeIndices)
-                selectedStrokeIndices = emptySet()
-                lassoBounds = null
+                    workspaceViewModel.deleteStrokes(selectedStrokeIndices)
+                    selectedStrokeIndices = emptySet()
+                    lassoBounds = null
 
-                val updated = localTextBoxes + newBox
-                saveTextBoxes(updated)
-                selectedTextBoxId = newBox.id
-                selectedStudioTool = StudioTool.TEXT
-                Toast.makeText(context, "Converted: \"${result.text.take(30)}\"", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(context, "Could not recognize text. Please write clearly and try again.", Toast.LENGTH_SHORT).show()
+                    val updated = localTextBoxes + newBox
+                    saveTextBoxes(updated)
+                    selectedTextBoxId = newBox.id
+                    editingTextBoxId = newBox.id
+                    selectedStudioTool = StudioTool.TEXT
+                    Toast.makeText(context, "Converted: \"${result.text.take(30)}\"", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Could not recognize text. Please write clearly and try again.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Recognition error: ${e.message}", Toast.LENGTH_SHORT).show()
+            } finally {
+                isConvertingHandwriting = false
             }
         }
     }
@@ -949,24 +960,33 @@ fun CanvasEditorScreen(
 
                             // Layer A2: Tap Detector for Text Tool (Spawns or finishes an interactive text box on touched page position)
                             if (selectedStudioTool == StudioTool.TEXT) {
+                                val currentSelectedId by rememberUpdatedState(selectedTextBoxId)
+                                val currentBoxes by rememberUpdatedState(localTextBoxes)
+
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .pointerInput(selectedStudioTool, pageIdx, selectedTextBoxId) {
+                                        .pointerInput(selectedStudioTool, pageIdx) {
                                             detectTapGestures { tapOffset ->
-                                                if (selectedTextBoxId != null) {
+                                                val selId = currentSelectedId
+                                                if (selId != null) {
+                                                    // If newly created within 400ms, ignore immediate tap release
+                                                    if (System.currentTimeMillis() - lastCreatedTextBoxTime < 400L) {
+                                                        return@detectTapGestures
+                                                    }
                                                     // Tapping outside deselects current text box
-                                                    val cur = localTextBoxes.find { it.id == selectedTextBoxId }
+                                                    val cur = currentBoxes.find { it.id == selId }
                                                     val cleaned = if (cur != null && cur.text.trim().isEmpty()) {
-                                                        localTextBoxes.filterNot { it.id == selectedTextBoxId }
+                                                        currentBoxes.filterNot { it.id == selId }
                                                     } else {
-                                                        localTextBoxes
+                                                        currentBoxes
                                                     }
                                                     selectedTextBoxId = null
+                                                    editingTextBoxId = null
                                                     saveTextBoxes(cleaned)
                                                 } else {
                                                     // Prune any previous empty boxes before creating a new one
-                                                    val cleaned = localTextBoxes.filterNot { it.text.trim().isEmpty() }
+                                                    val cleaned = currentBoxes.filterNot { it.text.trim().isEmpty() }
                                                     val pageBaseWPx = size.width.toFloat().coerceAtLeast(1f)
                                                     val pageBaseHPx = size.height.toFloat().coerceAtLeast(1f)
                                                     val xRatio = (tapOffset.x / pageBaseWPx).coerceIn(0.04f, 0.85f)
@@ -987,9 +1007,11 @@ fun CanvasEditorScreen(
                                                         textAlign = textToolAlignment,
                                                         isAutoWidth = true
                                                     )
+                                                    lastCreatedTextBoxTime = System.currentTimeMillis()
                                                     val updated = cleaned + newBox
                                                     saveTextBoxes(updated)
                                                     selectedTextBoxId = newBox.id
+                                                    editingTextBoxId = newBox.id
                                                 }
                                             }
                                         }
@@ -1610,33 +1632,59 @@ fun CanvasEditorScreen(
                                 Card(
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
-                                        .padding(top = (lassoBounds!!.top - 46f).coerceAtLeast(10f).dp),
-                                    shape = RoundedCornerShape(8.dp),
+                                        .padding(top = (lassoBounds!!.top - 52f).coerceAtLeast(10f).dp),
+                                    shape = RoundedCornerShape(12.dp),
                                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E22)),
                                     border = BorderStroke(1.dp, Color(0xFF00BCD4))
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
-                                        IconButton(onClick = {
-                                            convertHandwritingToText(pageIdx)
-                                        }, modifier = Modifier.size(30.dp)) {
-                                            Icon(Icons.Default.Spellcheck, contentDescription = "Convert to Text", tint = Color(0xFF00BCD4), modifier = Modifier.size(17.dp))
+                                        IconButton(
+                                            onClick = {
+                                                if (!isConvertingHandwriting) {
+                                                    convertHandwritingToText(pageIdx)
+                                                }
+                                            },
+                                            enabled = !isConvertingHandwriting,
+                                            modifier = Modifier.size(42.dp)
+                                        ) {
+                                            if (isConvertingHandwriting) {
+                                                CircularProgressIndicator(
+                                                    color = Color(0xFF00BCD4),
+                                                    modifier = Modifier.size(18.dp),
+                                                    strokeWidth = 2.dp
+                                                )
+                                            } else {
+                                                Icon(
+                                                    Icons.Default.Spellcheck,
+                                                    contentDescription = "Convert to Text",
+                                                    tint = Color(0xFF00BCD4),
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
                                         }
-                                        IconButton(onClick = {
-                                            workspaceViewModel.deleteStrokes(selectedStrokeIndices)
-                                            selectedStrokeIndices = emptySet()
-                                            lassoBounds = null
-                                            Toast.makeText(context, "Deleted selected strokes", Toast.LENGTH_SHORT).show()
-                                        }, modifier = Modifier.size(30.dp)) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
+                                        IconButton(
+                                            onClick = {
+                                                workspaceViewModel.deleteStrokes(selectedStrokeIndices)
+                                                selectedStrokeIndices = emptySet()
+                                                lassoBounds = null
+                                                Toast.makeText(context, "Deleted selected strokes", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.size(42.dp)
+                                        ) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252), modifier = Modifier.size(20.dp))
                                         }
-                                        IconButton(onClick = {
-                                            selectedStrokeIndices = emptySet()
-                                            lassoBounds = null
-                                        }, modifier = Modifier.size(30.dp)) {
-                                            Icon(Icons.Default.Close, contentDescription = "Deselect", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                                        IconButton(
+                                            onClick = {
+                                                selectedStrokeIndices = emptySet()
+                                                lassoBounds = null
+                                            },
+                                            modifier = Modifier.size(42.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Deselect", tint = Color.LightGray, modifier = Modifier.size(20.dp))
                                         }
                                     }
                                 }

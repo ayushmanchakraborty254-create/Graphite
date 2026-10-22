@@ -324,10 +324,10 @@ class FileImportManager(
                 mimeType = resolvedMimeType
             )
 
-            graphiteRepository.addBook(importedBook)
+            val savedBook = graphiteRepository.addBook(importedBook)
 
             return ImportResult.SuccessBook(
-                book = importedBook,
+                book = savedBook,
                 pageCount = pageCount,
                 message = "Imported PDF \"$disambiguatedTitle\" ($pageCount pages) to Bookshelf"
             )
