@@ -22,6 +22,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.resume
 import kotlin.math.max
+import kotlin.math.min
 
 data class HandwritingRecognitionResult(
     val text: String,
@@ -35,10 +36,19 @@ object HandwritingRecognizerHelper {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
+    // Active production Gemini multimodal vision models in order of speed and capability
+    private val geminiModels = listOf(
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-flash-latest"
+    )
+
     /**
      * Converts a collection of handwritten ink strokes into recognized text.
-     * 1. Primary: Google Gemini 1.5 Flash Multimodal Vision API (handles cursive, normal writing,
-     *    sketches, mathematical notation, and 100+ languages including Hindi, Bengali, Spanish, French, etc.)
+     * 1. Primary: Advanced Google Gemini Multimodal Vision API (specialized in decoding extremely messy,
+     *    rushed, connected cursive, doctor-like handwriting, and 100+ languages including Hindi, Bengali,
+     *    Spanish, French, German, Chinese, Japanese, Arabic, Russian, math, and punctuation).
      * 2. Secondary fallback: On-device ML Kit OCR for offline environments.
      */
     suspend fun recognizeStrokes(strokes: List<InkStroke>): HandwritingRecognitionResult? = withContext(Dispatchers.Default) {
@@ -65,16 +75,23 @@ object HandwritingRecognizerHelper {
 
         val bounds = RectF(minX, minY, maxX, maxY)
 
-        // Render ink strokes to a high-contrast bitmap with antialiased Bézier curves
-        val pad = 48f
-        val renderW = max(120, (rawWidth + pad * 2).toInt().coerceAtMost(2400))
-        val renderH = max(120, (rawHeight + pad * 2).toInt().coerceAtMost(2400))
+        // Scale strokes to optimal high-resolution AI vision canvas (target height ~600px, width up to 2200px)
+        // Scaling up ensures cursive loops ('e', 'l', 'a', 'o', 'd') remain open, distinct, and never clog into black blobs.
+        val targetHeight = 600f
+        val targetWidth = 1800f
+        val scaleX = targetWidth / rawWidth.coerceAtLeast(15f)
+        val scaleY = targetHeight / rawHeight.coerceAtLeast(15f)
+        val scale = min(scaleX, scaleY).coerceIn(1.2f, 5.5f)
+
+        val pad = 48f * scale
+        val renderW = ((rawWidth * scale) + pad * 2f).toInt().coerceIn(240, 2400)
+        val renderH = ((rawHeight * scale) + pad * 2f).toInt().coerceIn(200, 2400)
 
         val bitmap = Bitmap.createBitmap(renderW, renderH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         canvas.drawColor(android.graphics.Color.WHITE)
 
-        val paint = Paint().apply {
+        val strokePaint = Paint().apply {
             color = android.graphics.Color.BLACK
             isAntiAlias = true
             strokeCap = Paint.Cap.ROUND
@@ -82,20 +99,39 @@ object HandwritingRecognizerHelper {
             style = Paint.Style.STROKE
         }
 
+        val dotPaint = Paint().apply {
+            color = android.graphics.Color.BLACK
+            isAntiAlias = true
+            style = Paint.Style.FILL
+        }
+
         for (stroke in strokes) {
-            if (stroke.points.size < 2) continue
-            paint.strokeWidth = max(5f, stroke.baseWidth * 1.8f)
+            if (stroke.points.isEmpty()) continue
+
+            // Proportional stroke width relative to scaled canvas (prevents cursive loops from merging)
+            val strokeW = (stroke.baseWidth * scale * 1.15f).coerceIn(3.5f, 12f)
+            strokePaint.strokeWidth = strokeW
+
+            // Handle single-point strokes (dots on 'i'/'j', periods '.', commas, short accents)
+            if (stroke.points.size == 1) {
+                val pt = stroke.points[0]
+                val dotX = (pt.x - minX) * scale + pad
+                val dotY = (pt.y - minY) * scale + pad
+                canvas.drawCircle(dotX, dotY, strokeW * 0.9f, dotPaint)
+                continue
+            }
+
             val path = Path()
             val first = stroke.points[0]
-            var prevX = first.x - minX + pad
-            var prevY = first.y - minY + pad
+            var prevX = (first.x - minX) * scale + pad
+            var prevY = (first.y - minY) * scale + pad
             path.moveTo(prevX, prevY)
 
             for (i in 1 until stroke.points.size) {
                 val pt = stroke.points[i]
-                val curX = pt.x - minX + pad
-                val curY = pt.y - minY + pad
-                // Smooth quadratic Bézier interpolation between stroke points
+                val curX = (pt.x - minX) * scale + pad
+                val curY = (pt.y - minY) * scale + pad
+                // Smooth quadratic Bézier interpolation preserves natural cursive handwriting ligatures
                 val midX = (prevX + curX) / 2f
                 val midY = (prevY + curY) / 2f
                 path.quadTo(prevX, prevY, midX, midY)
@@ -103,21 +139,27 @@ object HandwritingRecognizerHelper {
                 prevY = curY
             }
             path.lineTo(prevX, prevY)
-            canvas.drawPath(path, paint)
+            canvas.drawPath(path, strokePaint)
         }
 
-        // 1. Try Gemini Vision API first (superior cursive, multilingual, and handwriting recognition)
+        // 1. Try Gemini Multimodal Vision API across model hierarchy
         val geminiKey = GraphiteConfig.geminiApiKey
         var recognizedText = ""
         if (geminiKey.isNotBlank()) {
-            try {
-                recognizedText = recognizeWithGeminiVision(bitmap, geminiKey).trim()
-            } catch (_: Exception) {
-                // Network or quota error: will fallback to on-device ML Kit
+            for (model in geminiModels) {
+                try {
+                    val candidate = recognizeWithGeminiVision(bitmap, geminiKey, model).trim()
+                    if (candidate.isNotBlank()) {
+                        recognizedText = candidate
+                        break
+                    }
+                } catch (_: Exception) {
+                    // Try next model candidate in case of temporary rate limit or 503 spike
+                }
             }
         }
 
-        // 2. Fallback to on-device ML Kit if Gemini is unavailable or failed
+        // 2. Secondary fallback: On-device ML Kit OCR if offline or all cloud attempts failed
         if (recognizedText.isBlank()) {
             val inputImage = InputImage.fromBitmap(bitmap, 0)
             recognizedText = suspendCancellableCoroutine { continuation ->
@@ -133,9 +175,21 @@ object HandwritingRecognizerHelper {
 
         bitmap.recycle()
 
-        if (recognizedText.isNotBlank()) {
+        // Clean up markdown fences or extraneous quotation marks if present
+        var cleaned = recognizedText.trim()
+        if (cleaned.startsWith("```") && cleaned.endsWith("```")) {
+            val lines = cleaned.lines()
+            if (lines.size >= 2) {
+                cleaned = lines.subList(1, lines.size - 1).joinToString("\n").trim()
+            }
+        }
+        if (cleaned.startsWith("\"") && cleaned.endsWith("\"") && cleaned.length > 2) {
+            cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+        }
+
+        if (cleaned.isNotBlank()) {
             HandwritingRecognitionResult(
-                text = recognizedText,
+                text = cleaned,
                 bounds = bounds,
                 strokeCount = strokes.size
             )
@@ -144,24 +198,24 @@ object HandwritingRecognizerHelper {
         }
     }
 
-    private fun recognizeWithGeminiVision(bitmap: Bitmap, apiKey: String): String {
+    private fun recognizeWithGeminiVision(bitmap: Bitmap, apiKey: String, modelName: String): String {
         val stream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)
         val jpegBytes = stream.toByteArray()
         val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
 
-        val isOAuthToken = apiKey.startsWith("AQ.") || apiKey.startsWith("ya29.")
+        val isOAuthToken = apiKey.startsWith("ya29.")
         val endpoint = if (isOAuthToken) {
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
         } else {
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
+            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
         }
 
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 20000
+            connectTimeout = 12000
+            readTimeout = 18000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             if (isOAuthToken) {
@@ -170,7 +224,17 @@ object HandwritingRecognizerHelper {
             setRequestProperty("x-goog-api-key", apiKey)
         }
 
-        val prompt = "Transcribe the handwritten text shown in this image with maximum accuracy. The handwriting may be cursive, print, normal, or shorthand, and may be in ANY language (such as English, Hindi, Bengali, Spanish, French, German, Chinese, Japanese, Arabic, Russian, etc.). Output strictly and ONLY the recognized text. Do not add any conversational text, explanations, or quotes."
+        val prompt = """
+        You are an elite, world-class handwriting recognition expert with superhuman capability to decipher the messiest, most rushed, illegible, cursive, and doctor-like handwriting with 100% precision.
+
+        CRITICAL TRANSCRIPTION INSTRUCTIONS:
+        1. Transcribe EVERY single word, letter, and character present in this handwritten image. Do NOT omit, skip, or truncate any words or letters.
+        2. Decipher rushed cursive ligatures, loops, slants, and connected strokes using language context, grammar, and vocabulary. If a cursive letter is ambiguous, deduce the exact intended word.
+        3. If there are multiple lines of handwriting, preserve the line breaks with newline (\n) characters.
+        4. Accurately transcribe punctuation (periods, commas, apostrophes, question marks, dashes), numbers, and mathematical symbols.
+        5. Support all languages and scripts (English, Hindi, Bengali, Spanish, French, German, Chinese, Japanese, Arabic, Russian, and all other languages).
+        6. Output STRICTLY AND ONLY the transcribed text. Do NOT add any preamble, conversational commentary, explanations, quotes, or markdown code fences.
+        """.trimIndent()
 
         val payload = JSONObject().apply {
             val contents = JSONArray().apply {
@@ -187,6 +251,10 @@ object HandwritingRecognizerHelper {
                 put(contentObj)
             }
             put("contents", contents)
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.1)
+                put("topP", 0.95)
+            })
         }
 
         OutputStreamWriter(conn.outputStream).use { writer ->

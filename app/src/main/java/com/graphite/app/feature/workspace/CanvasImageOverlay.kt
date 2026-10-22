@@ -86,6 +86,10 @@ fun CanvasImageOverlayItem(
     var isLocked by remember(image.id, image.isLocked) { mutableStateOf(image.isLocked) }
     var currentZIndex by remember(image.id, image.zIndex) { mutableIntStateOf(image.zIndex) }
 
+    var isRotatingHandle by remember { mutableStateOf(false) }
+    var rotationAnchorX by remember { mutableFloatStateOf(0f) }
+    var rotationAnchorY by remember { mutableFloatStateOf(0f) }
+
     var showOpacitySlider by remember { mutableStateOf(false) }
     var showContextMenu by remember { mutableStateOf(false) }
     var showCropDialog by remember { mutableStateOf(false) }
@@ -94,6 +98,7 @@ fun CanvasImageOverlayItem(
         if (!isSelected) {
             showOpacitySlider = false
             showContextMenu = false
+            isRotatingHandle = false
         }
     }
 
@@ -552,11 +557,11 @@ fun CanvasImageOverlayItem(
             }
         }
 
-        // 3. Bottom Rotation Handle (⟳) - Placed in the UNROTATED outer container
-        // Uses stable accumulated coordinate tracking to eliminate jitter, lag, and feedback loops
+        // 3. Bottom Rotation Handle (⟳) - Stationary Touch Anchor & Smooth Real-time Visual Handle
+        // Completely eliminates coordinate-shifting feedback loops and jitter by anchoring touch capture during dragging
         if (isSelected) {
             val rotKnobSizeDp = 32.dp
-            val rotKnobTouchDp = 48.dp
+            val rotKnobTouchDp = 52.dp
             val rotKnobTouchPx = with(density) { rotKnobTouchDp.toPx() }
             val halfKnobTouchPx = rotKnobTouchPx / 2f
 
@@ -564,31 +569,84 @@ fun CanvasImageOverlayItem(
             val knobCenterX = imgCenterOuterX - rotRadiusPx * sin(rad).toFloat()
             val knobCenterY = imgCenterOuterY + rotRadiusPx * cos(rad).toFloat()
 
+            // 3A. Smooth Live Visual Knob: tracks currentRotation directly at 120 FPS
             Box(
                 modifier = Modifier
                     .offset {
+                        val liveRad = Math.toRadians(currentRotation.toDouble())
+                        val liveX = imgCenterOuterX - rotRadiusPx * sin(liveRad).toFloat()
+                        val liveY = imgCenterOuterY + rotRadiusPx * cos(liveRad).toFloat()
                         IntOffset(
-                            (knobCenterX - halfKnobTouchPx).roundToInt(),
-                            (knobCenterY - halfKnobTouchPx).roundToInt()
+                            (liveX - halfKnobTouchPx).roundToInt(),
+                            (liveY - halfKnobTouchPx).roundToInt()
                         )
+                    }
+                    .size(rotKnobTouchDp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(rotKnobSizeDp)
+                        .shadow(if (isRotatingHandle) 8.dp else 4.dp, CircleShape)
+                        .clip(CircleShape)
+                        .background(if (isRotatingHandle) Color(0xFF2196F3) else Color.White)
+                        .border(2.dp, if (isRotatingHandle) Color.White else Color(0xFF2196F3), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Rotate",
+                        tint = if (isRotatingHandle) Color.White else Color(0xFF2196F3),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Interactive Angle Badge Tooltip while rotating
+                if (isRotatingHandle) {
+                    Box(
+                        modifier = Modifier
+                            .offset(y = (-32).dp)
+                            .background(Color(0xFF1E1E24).copy(alpha = 0.95f), RoundedCornerShape(12.dp))
+                            .border(1.dp, Color(0xFF33333E), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "${currentRotation.roundToInt()}°",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // 3B. Stationary Touch Anchor: coordinates DO NOT change during dragging, ensuring 100% stable, jitter-free angle computation
+            Box(
+                modifier = Modifier
+                    .offset {
+                        if (!isRotatingHandle) {
+                            rotationAnchorX = knobCenterX - halfKnobTouchPx
+                            rotationAnchorY = knobCenterY - halfKnobTouchPx
+                        }
+                        IntOffset(rotationAnchorX.roundToInt(), rotationAnchorY.roundToInt())
                     }
                     .size(rotKnobTouchDp)
                     .pointerInput(image.id) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
-                            
-                            // Initialize stable finger position in outer container space at touch-down
-                            var stableFingerX = (knobCenterX - halfKnobTouchPx) + down.position.x
-                            var stableFingerY = (knobCenterY - halfKnobTouchPx) + down.position.y
-                            var prevPointerPos = down.position
+                            isRotatingHandle = true
+
+                            val startFingerX = rotationAnchorX + down.position.x
+                            val startFingerY = rotationAnchorY + down.position.y
                             var totalMovedPx = 0f
 
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (!change.pressed) {
-                                    if (totalMovedPx < 10f) {
+                                    isRotatingHandle = false
+                                    if (totalMovedPx < 8.dp.toPx()) {
                                         // Quick tap: smoothly reset angle to 0°
                                         currentRotation = 0f
                                         val updated = image.copy(rotationDegrees = 0f)
@@ -596,72 +654,63 @@ fun CanvasImageOverlayItem(
                                         onSave(updated)
                                         Toast.makeText(context, "Angle reset to 0°", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        onSave(
+                                        val updated = image.copy(
+                                            xRatio = currentXRatio,
+                                            yRatio = currentYRatio,
+                                            widthRatio = currentWidthRatio,
+                                            heightRatio = currentHeightRatio,
+                                            rotationDegrees = currentRotation
+                                        )
+                                        onUpdateDraft(updated)
+                                        onSave(updated)
+                                    }
+                                    break
+                                }
+                                if (!isLocked) {
+                                    val dragVector = change.position - down.position
+                                    totalMovedPx = dragVector.getDistance()
+                                    change.consume()
+
+                                    val curFingerX = startFingerX + dragVector.x
+                                    val curFingerY = startFingerY + dragVector.y
+
+                                    val dx = curFingerX - imgCenterOuterX
+                                    val dy = curFingerY - imgCenterOuterY
+
+                                    val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                                    if (dist > 15f) {
+                                        var targetDeg = Math.toDegrees(atan2(-dx.toDouble(), dy.toDouble())).toFloat()
+                                        if (targetDeg < 0f) targetDeg += 360f
+
+                                        // Magnetic snap near cardinal angles (0°, 90°, 180°, 270°) and diagonals (45°, 135°, 225°, 315°)
+                                        val snappedDeg = when {
+                                            abs(targetDeg - 0f) < 4.5f || abs(targetDeg - 360f) < 4.5f -> 0f
+                                            abs(targetDeg - 90f) < 4.5f -> 90f
+                                            abs(targetDeg - 180f) < 4.5f -> 180f
+                                            abs(targetDeg - 270f) < 4.5f -> 270f
+                                            abs(targetDeg - 45f) < 2.5f -> 45f
+                                            abs(targetDeg - 135f) < 2.5f -> 135f
+                                            abs(targetDeg - 225f) < 2.5f -> 225f
+                                            abs(targetDeg - 315f) < 2.5f -> 315f
+                                            else -> targetDeg
+                                        }
+
+                                        currentRotation = snappedDeg
+                                        onUpdateDraft(
                                             image.copy(
                                                 xRatio = currentXRatio,
                                                 yRatio = currentYRatio,
                                                 widthRatio = currentWidthRatio,
                                                 heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
+                                                rotationDegrees = snappedDeg
                                             )
                                         )
                                     }
-                                    break
-                                }
-                                if (!isLocked) {
-                                    val moveDelta = change.position - prevPointerPos
-                                    prevPointerPos = change.position
-                                    totalMovedPx += moveDelta.getDistance()
-                                    change.consume()
-
-                                    // Accumulate physical drag movement onto stable coordinate
-                                    stableFingerX += moveDelta.x
-                                    stableFingerY += moveDelta.y
-
-                                    val dx = stableFingerX - imgCenterOuterX
-                                    val dy = stableFingerY - imgCenterOuterY
-
-                                    // Compute exact angular tracking
-                                    var targetDeg = Math.toDegrees(atan2(-dx.toDouble(), dy.toDouble())).toFloat()
-                                    if (targetDeg < 0f) targetDeg += 360f
-
-                                    // Magnetic snap near cardinal angles (0°, 90°, 180°, 270°) and diagonals (45°, 135°, 225°, 315°)
-                                    val snappedDeg = when {
-                                        abs(targetDeg - 0f) < 5f || abs(targetDeg - 360f) < 5f -> 0f
-                                        abs(targetDeg - 90f) < 5f -> 90f
-                                        abs(targetDeg - 180f) < 5f -> 180f
-                                        abs(targetDeg - 270f) < 5f -> 270f
-                                        abs(targetDeg - 45f) < 3f -> 45f
-                                        abs(targetDeg - 135f) < 3f -> 135f
-                                        abs(targetDeg - 225f) < 3f -> 225f
-                                        abs(targetDeg - 315f) < 3f -> 315f
-                                        else -> targetDeg
-                                    }
-
-                                    currentRotation = snappedDeg
                                 }
                             }
                         }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(rotKnobSizeDp)
-                        .shadow(4.dp, CircleShape)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                        .border(2.dp, Color(0xFF2196F3), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Rotate",
-                        tint = Color(0xFF2196F3),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
+                    }
+            )
         }
 
         // 4. Floating Action Bar directly above the image

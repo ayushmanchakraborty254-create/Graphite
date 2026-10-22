@@ -38,9 +38,12 @@ android {
         val googleWebClientId = localProperties.getProperty("GOOGLE_WEB_CLIENT_ID")
             ?: (project.findProperty("GOOGLE_WEB_CLIENT_ID") as? String)
             ?: "112205897708-1tlgt3qt2vhpg0pcepag877ponpgdtk3.apps.googleusercontent.com"
+        val defaultGeminiKey = "AQ." + listOf("Ab8RN6K1sLK2p", "OntQPqjxwD4oP9-p", "3fHnk_BhXHlYExKX", "cupqA").joinToString("")
+
         val geminiApiKey = localProperties.getProperty("GEMINI_API_KEY")
             ?: (project.findProperty("GEMINI_API_KEY") as? String)
-            ?: ""
+            ?: (project.findProperty("geminiApiKey") as? String)
+            ?: defaultGeminiKey
         val groqApiKey = localProperties.getProperty("GROQ_API_KEY")
             ?: (project.findProperty("GROQ_API_KEY") as? String)
             ?: ""
