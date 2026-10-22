@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.view.MotionEvent
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
@@ -24,7 +25,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -75,17 +78,19 @@ fun CanvasImageOverlayItem(
     }
 
     // Local transient states synchronized with image model for 120 FPS continuous feedback
-    var currentXRatio by remember(image.id, image.xRatio) { mutableFloatStateOf(image.xRatio) }
-    var currentYRatio by remember(image.id, image.yRatio) { mutableFloatStateOf(image.yRatio) }
-    var currentWidthRatio by remember(image.id, image.widthRatio) { mutableFloatStateOf(image.widthRatio) }
-    var currentHeightRatio by remember(image.id, image.heightRatio) { mutableFloatStateOf(image.heightRatio) }
-    var currentRotation by remember(image.id, image.rotationDegrees) { mutableFloatStateOf(image.rotationDegrees) }
-    var currentOpacity by remember(image.id, image.opacity) { mutableFloatStateOf(image.opacity) }
-    var isCircleMask by remember(image.id, image.isCircleCrop) { mutableStateOf(image.isCircleCrop) }
-    var isAspectLocked by remember(image.id, image.keepAspectRatio) { mutableStateOf(image.keepAspectRatio) }
-    var isLocked by remember(image.id, image.isLocked) { mutableStateOf(image.isLocked) }
-    var currentZIndex by remember(image.id, image.zIndex) { mutableIntStateOf(image.zIndex) }
+    var currentXRatio by remember(image.id) { mutableFloatStateOf(image.xRatio) }
+    var currentYRatio by remember(image.id) { mutableFloatStateOf(image.yRatio) }
+    var currentWidthRatio by remember(image.id) { mutableFloatStateOf(image.widthRatio) }
+    var currentHeightRatio by remember(image.id) { mutableFloatStateOf(image.heightRatio) }
+    var currentRotation by remember(image.id) { mutableFloatStateOf(image.rotationDegrees) }
+    var currentOpacity by remember(image.id) { mutableFloatStateOf(image.opacity) }
+    var isCircleMask by remember(image.id) { mutableStateOf(image.isCircleCrop) }
+    var isAspectLocked by remember(image.id) { mutableStateOf(image.keepAspectRatio) }
+    var isLocked by remember(image.id) { mutableStateOf(image.isLocked) }
+    var currentZIndex by remember(image.id) { mutableIntStateOf(image.zIndex) }
 
+    var isDraggingImage by remember { mutableStateOf(false) }
+    var isResizing by remember { mutableStateOf(false) }
     var isRotatingHandle by remember { mutableStateOf(false) }
     var rotationAnchorX by remember { mutableFloatStateOf(0f) }
     var rotationAnchorY by remember { mutableFloatStateOf(0f) }
@@ -93,6 +98,22 @@ fun CanvasImageOverlayItem(
     var showOpacitySlider by remember { mutableStateOf(false) }
     var showContextMenu by remember { mutableStateOf(false) }
     var showCropDialog by remember { mutableStateOf(false) }
+
+    // Synchronize props only when user is NOT currently interacting with the image
+    LaunchedEffect(image.id, image.xRatio, image.yRatio, image.widthRatio, image.heightRatio, image.rotationDegrees, image.opacity, image.isCircleCrop, image.keepAspectRatio, image.isLocked, image.zIndex) {
+        if (!isDraggingImage && !isResizing && !isRotatingHandle) {
+            currentXRatio = image.xRatio
+            currentYRatio = image.yRatio
+            currentWidthRatio = image.widthRatio
+            currentHeightRatio = image.heightRatio
+            currentRotation = image.rotationDegrees
+            currentOpacity = image.opacity
+            isCircleMask = image.isCircleCrop
+            isAspectLocked = image.keepAspectRatio
+            isLocked = image.isLocked
+            currentZIndex = image.zIndex
+        }
+    }
 
     LaunchedEffect(isSelected) {
         if (!isSelected) {
@@ -207,18 +228,19 @@ fun CanvasImageOverlayItem(
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (!change.pressed) {
+                                    isDraggingImage = false
                                     if (!isDrag) {
                                         onSelect()
                                     } else {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
+                                        val finalSaved = image.copy(
+                                            xRatio = currentXRatio,
+                                            yRatio = currentYRatio,
+                                            widthRatio = currentWidthRatio,
+                                            heightRatio = currentHeightRatio,
+                                            rotationDegrees = currentRotation
                                         )
+                                        onUpdateDraft(finalSaved)
+                                        onSave(finalSaved)
                                     }
                                     break
                                 }
@@ -226,6 +248,7 @@ fun CanvasImageOverlayItem(
                                 prevPos = change.position
                                 if (!isDrag && dragDelta.getDistance() > 4f) {
                                     isDrag = true
+                                    isDraggingImage = true
                                     onSelect()
                                 }
                                 if (isDrag && !isLocked) {
@@ -276,6 +299,119 @@ fun CanvasImageOverlayItem(
                 val handleTouchPx = with(density) { handleTouchDp.toPx() }
                 val halfTouchPx = handleTouchPx / 2f
 
+                var resizeStartRawX by remember { mutableFloatStateOf(0f) }
+                var resizeStartRawY by remember { mutableFloatStateOf(0f) }
+                var resizeInitW by remember { mutableFloatStateOf(0f) }
+                var resizeInitH by remember { mutableFloatStateOf(0f) }
+                var resizeInitX by remember { mutableFloatStateOf(0f) }
+                var resizeInitY by remember { mutableFloatStateOf(0f) }
+
+                fun applyResize(
+                    rawX: Float,
+                    rawY: Float,
+                    isRight: Boolean,
+                    isBottom: Boolean
+                ) {
+                    if (isLocked) return
+                    val totalRawDx = rawX - resizeStartRawX
+                    val totalRawDy = rawY - resizeStartRawY
+                    val rad = Math.toRadians(currentRotation.toDouble())
+                    val cosA = cos(rad).toFloat()
+                    val sinA = sin(rad).toFloat()
+                    val localDx = totalRawDx * cosA + totalRawDy * sinA
+                    val localDy = -totalRawDx * sinA + totalRawDy * cosA
+
+                    val signW = if (isRight) 1f else -1f
+                    val signH = if (isBottom) 1f else -1f
+
+                    val rawDw = signW * localDx
+                    val rawDh = signH * localDy
+
+                    val minW = basePageWidthPx * 0.08f
+                    val minH = basePageHeightPx * 0.08f
+                    val maxW = basePageWidthPx * 0.95f
+                    val maxH = basePageHeightPx * 0.95f
+
+                    val newW: Float
+                    val newH: Float
+
+                    if (isAspectLocked) {
+                        val deltaWFromH = if (bmpAspect > 0.01f) rawDh / bmpAspect else rawDw
+                        val chosenDw = if (abs(rawDw) > abs(deltaWFromH)) rawDw else deltaWFromH
+                        newW = (resizeInitW + chosenDw).coerceIn(minW, maxW)
+                        newH = (newW * bmpAspect).coerceIn(minH, maxH)
+                    } else {
+                        newW = (resizeInitW + rawDw).coerceIn(minW, maxW)
+                        newH = (resizeInitH + rawDh).coerceIn(minH, maxH)
+                    }
+
+                    val dW = newW - resizeInitW
+                    val dH = newH - resizeInitH
+
+                    val dLocalCx = signW * (dW / 2f)
+                    val dLocalCy = signH * (dH / 2f)
+
+                    val dPageCx = cosA * dLocalCx - sinA * dLocalCy
+                    val dPageCy = sinA * dLocalCx + cosA * dLocalCy
+
+                    val newX = (resizeInitX + dPageCx - dW / 2f).coerceIn(-basePageWidthPx * 0.2f, basePageWidthPx * 0.95f)
+                    val newY = (resizeInitY + dPageCy - dH / 2f).coerceIn(-basePageHeightPx * 0.2f, basePageHeightPx * 0.95f)
+
+                    currentWidthRatio = newW / basePageWidthPx
+                    currentHeightRatio = newH / basePageHeightPx
+                    currentXRatio = newX / basePageWidthPx
+                    currentYRatio = newY / basePageHeightPx
+
+                    val draft = image.copy(
+                        xRatio = currentXRatio,
+                        yRatio = currentYRatio,
+                        widthRatio = currentWidthRatio,
+                        heightRatio = currentHeightRatio,
+                        rotationDegrees = currentRotation
+                    )
+                    onUpdateDraft(draft)
+                }
+
+                fun commitResize() {
+                    isResizing = false
+                    val finalSaved = image.copy(
+                        xRatio = currentXRatio,
+                        yRatio = currentYRatio,
+                        widthRatio = currentWidthRatio,
+                        heightRatio = currentHeightRatio,
+                        rotationDegrees = currentRotation
+                    )
+                    onUpdateDraft(finalSaved)
+                    onSave(finalSaved)
+                }
+
+                @OptIn(ExperimentalComposeUiApi::class)
+                fun resizeModifier(isRight: Boolean, isBottom: Boolean): Modifier {
+                    return Modifier.pointerInteropFilter { motionEvent ->
+                        when (motionEvent.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                resizeStartRawX = motionEvent.rawX
+                                resizeStartRawY = motionEvent.rawY
+                                resizeInitW = currentWidthRatio * basePageWidthPx
+                                resizeInitH = currentHeightRatio * basePageHeightPx
+                                resizeInitX = currentXRatio * basePageWidthPx
+                                resizeInitY = currentYRatio * basePageHeightPx
+                                isResizing = true
+                                true
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                applyResize(motionEvent.rawX, motionEvent.rawY, isRight, isBottom)
+                                true
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                commitResize()
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                }
+
                 // 1. Top-Left Resize Handle
                 Box(
                     modifier = Modifier
@@ -286,55 +422,7 @@ fun CanvasImageOverlayItem(
                             )
                         }
                         .size(handleTouchDp)
-                        .pointerInput(image.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var prevPos = down.position
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
-                                        )
-                                        break
-                                    }
-                                    val dragDelta = change.position - prevPos
-                                    prevPos = change.position
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val dw = -dragDelta.x / basePageWidthPx
-                                        val newW = (currentWidthRatio + dw).coerceIn(0.08f, 0.95f)
-                                        val newH = if (isAspectLocked) {
-                                            newW * bmpAspect * pageAspectFactor
-                                        } else {
-                                            (currentHeightRatio - dragDelta.y / basePageHeightPx).coerceIn(0.08f, 0.95f)
-                                        }
-                                        val dX = currentWidthRatio - newW
-                                        val dY = currentHeightRatio - newH
-                                        currentXRatio = (currentXRatio + dX).coerceIn(-0.2f, 0.95f)
-                                        currentYRatio = (currentYRatio + dY).coerceIn(-0.2f, 0.95f)
-                                        currentWidthRatio = newW
-                                        currentHeightRatio = newH
-                                        onUpdateDraft(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        },
+                        .then(resizeModifier(isRight = false, isBottom = false)),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -356,53 +444,7 @@ fun CanvasImageOverlayItem(
                             )
                         }
                         .size(handleTouchDp)
-                        .pointerInput(image.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var prevPos = down.position
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
-                                        )
-                                        break
-                                    }
-                                    val dragDelta = change.position - prevPos
-                                    prevPos = change.position
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val dw = dragDelta.x / basePageWidthPx
-                                        val newW = (currentWidthRatio + dw).coerceIn(0.08f, 0.95f)
-                                        val newH = if (isAspectLocked) {
-                                            newW * bmpAspect * pageAspectFactor
-                                        } else {
-                                            (currentHeightRatio - dragDelta.y / basePageHeightPx).coerceIn(0.08f, 0.95f)
-                                        }
-                                        val dY = currentHeightRatio - newH
-                                        currentYRatio = (currentYRatio + dY).coerceIn(-0.2f, 0.95f)
-                                        currentWidthRatio = newW
-                                        currentHeightRatio = newH
-                                        onUpdateDraft(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        },
+                        .then(resizeModifier(isRight = true, isBottom = false)),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -424,52 +466,7 @@ fun CanvasImageOverlayItem(
                             )
                         }
                         .size(handleTouchDp)
-                        .pointerInput(image.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var prevPos = down.position
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
-                                        )
-                                        break
-                                    }
-                                    val dragDelta = change.position - prevPos
-                                    prevPos = change.position
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val dw = -dragDelta.x / basePageWidthPx
-                                        val newW = (currentWidthRatio + dw).coerceIn(0.08f, 0.95f)
-                                        val newH = if (isAspectLocked) {
-                                            newW * bmpAspect * pageAspectFactor
-                                        } else {
-                                            (currentHeightRatio + dragDelta.y / basePageHeightPx).coerceIn(0.08f, 0.95f)
-                                        }
-                                        val dX = currentWidthRatio - newW
-                                        currentXRatio = (currentXRatio + dX).coerceIn(-0.2f, 0.95f)
-                                        currentWidthRatio = newW
-                                        currentHeightRatio = newH
-                                        onUpdateDraft(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        },
+                        .then(resizeModifier(isRight = false, isBottom = true)),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -491,49 +488,7 @@ fun CanvasImageOverlayItem(
                             )
                         }
                         .size(handleTouchDp)
-                        .pointerInput(image.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                down.consume()
-                                var prevPos = down.position
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        onSave(
-                                            image.copy(
-                                                xRatio = currentXRatio,
-                                                yRatio = currentYRatio,
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio,
-                                                rotationDegrees = currentRotation
-                                            )
-                                        )
-                                        break
-                                    }
-                                    val dragDelta = change.position - prevPos
-                                    prevPos = change.position
-                                    if (!isLocked) {
-                                        change.consume()
-                                        val dw = dragDelta.x / basePageWidthPx
-                                        val newW = (currentWidthRatio + dw).coerceIn(0.08f, 0.95f)
-                                        val newH = if (isAspectLocked) {
-                                            newW * bmpAspect * pageAspectFactor
-                                        } else {
-                                            (currentHeightRatio + dragDelta.y / basePageHeightPx).coerceIn(0.08f, 0.95f)
-                                        }
-                                        currentWidthRatio = newW
-                                        currentHeightRatio = newH
-                                        onUpdateDraft(
-                                            image.copy(
-                                                widthRatio = currentWidthRatio,
-                                                heightRatio = currentHeightRatio
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        },
+                        .then(resizeModifier(isRight = true, isBottom = true)),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(

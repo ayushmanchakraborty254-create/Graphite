@@ -1199,8 +1199,7 @@ private fun BookshelfItemRow(
 
         // Book Cover
         BookCover(
-            coverType = book.coverType,
-            title = book.title,
+            book = book,
             modifier = Modifier
                 .width(68.dp)
                 .height(96.dp)
@@ -1343,8 +1342,7 @@ private fun BookshelfItemGridCard(
     ) {
         Box {
             BookCover(
-                coverType = book.coverType,
-                title = book.title,
+                book = book,
                 modifier = Modifier
                     .width(110.dp)
                     .height(150.dp)

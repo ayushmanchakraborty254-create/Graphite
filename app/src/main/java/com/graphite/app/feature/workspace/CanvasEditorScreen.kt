@@ -813,14 +813,14 @@ fun CanvasEditorScreen(
                                 if (lastCenter != null) {
                                     val dy = curPos.y - lastCenter.y
                                     totalDragY += kotlin.math.abs(dy)
-                                    if (totalDragY > 8f) {
+                                    if (totalDragY > 4f) {
                                         isDragging1Finger = true
                                     }
-                                    if (isDragging1Finger && kotlin.math.abs(dy) > 0.1f) {
+                                    if (isDragging1Finger && kotlin.math.abs(dy) > 0.05f) {
                                         listState.dispatchRawDelta(-dy)
                                         val dt = (now - lastTime).coerceAtLeast(1)
                                         val instantV = (-dy / dt) * 1000f
-                                        scrollVelocityY = scrollVelocityY * 0.4f + instantV * 0.6f
+                                        scrollVelocityY = scrollVelocityY * 0.5f + instantV * 0.5f
                                     }
                                 }
 
@@ -833,25 +833,27 @@ fun CanvasEditorScreen(
                                     pressed[0].consume()
                                 }
                             } else {
-                                // Fingers lifted: fling momentum if swiped with velocity
+                                // Fingers lifted: natural physics-based fling momentum
                                 val shouldFling = (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
                                         (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
-                                if (shouldFling && kotlin.math.abs(scrollVelocityY) > 180f) {
-                                    val flingAmount = (scrollVelocityY * 0.22f).coerceIn(-2000f, 2000f)
+                                if (shouldFling && kotlin.math.abs(scrollVelocityY) > 80f) {
+                                    val initialVel = scrollVelocityY.coerceIn(-5000f, 5000f)
                                     scope.launch {
                                         var consumed = 0f
-                                        androidx.compose.animation.core.animate(
-                                            initialValue = 0f,
-                                            targetValue = flingAmount,
-                                            animationSpec = androidx.compose.animation.core.tween(
-                                                durationMillis = 350,
-                                                easing = androidx.compose.animation.core.FastOutSlowInEasing
-                                            )
-                                        ) { value, _ ->
-                                            val step = value - consumed
-                                            listState.dispatchRawDelta(step)
-                                            consumed = value
-                                        }
+                                        val anim = androidx.compose.animation.core.Animatable(0f)
+                                        try {
+                                            anim.animateDecay(
+                                                initialVelocity = initialVel,
+                                                animationSpec = androidx.compose.animation.core.exponentialDecay(
+                                                    frictionMultiplier = 1.15f,
+                                                    absVelocityThreshold = 15f
+                                                )
+                                            ) {
+                                                val step = value - consumed
+                                                listState.dispatchRawDelta(step)
+                                                consumed = value
+                                            }
+                                        } catch (_: Exception) {}
                                     }
                                 }
                                 scrollVelocityY = 0f

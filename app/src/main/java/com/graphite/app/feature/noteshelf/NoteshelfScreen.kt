@@ -10,6 +10,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.graphite.app.data.model.NotebookCover
+import com.graphite.app.core.importer.PdfPageThumbnail
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -167,7 +168,7 @@ fun NoteshelfScreen(
     var dragTouchPositionInRoot by remember { mutableStateOf(Offset.Zero) }
     var totalDragDistance by remember { mutableFloatStateOf(0f) }
     var hoveredFolderId by remember { mutableStateOf<String?>(null) }
-    val folderBoundsMap = remember { mutableStateMapOf<String, Rect>() }
+    val folderBoundsMap = remember { mutableMapOf<String, Rect>() }
 
     // Folder upload state
     var uploadingFolderInfo by remember { mutableStateOf<Pair<FolderItem, Triple<Int, Int, String>?>?>(null) }
@@ -293,18 +294,20 @@ fun NoteshelfScreen(
         categoryFiltered.filter { it.title.contains(searchQuery, ignoreCase = true) }
     }
 
-    val sortedNotebooks = when (currentSortOption) {
-        "Custom" -> {
-            searchFiltered.sortedBy { nb ->
-                val idx = customOrderIds.indexOf(nb.id)
-                if (idx >= 0) idx else Int.MAX_VALUE
+    val sortedNotebooks = remember(searchFiltered, currentSortOption, customOrderIds) {
+        when (currentSortOption) {
+            "Custom" -> {
+                searchFiltered.sortedBy { nb ->
+                    val idx = customOrderIds.indexOf(nb.id)
+                    if (idx >= 0) idx else Int.MAX_VALUE
+                }
             }
+            "Date Modified (Newest)" -> searchFiltered.sortedByDescending { it.updatedAtMillis }
+            "Date Modified (Oldest)" -> searchFiltered.sortedBy { it.updatedAtMillis }
+            "Title (A-Z)" -> searchFiltered.sortedBy { it.title.lowercase() }
+            "Title (Z-A)" -> searchFiltered.sortedByDescending { it.title.lowercase() }
+            else -> searchFiltered
         }
-        "Date Modified (Newest)" -> searchFiltered.sortedByDescending { it.updatedAtMillis }
-        "Date Modified (Oldest)" -> searchFiltered.sortedBy { it.updatedAtMillis }
-        "Title (A-Z)" -> searchFiltered.sortedBy { it.title.lowercase() }
-        "Title (Z-A)" -> searchFiltered.sortedByDescending { it.title.lowercase() }
-        else -> searchFiltered
     }
 
     val moveNoteInCustomOrder: (String, Int) -> Unit = { noteId, delta ->
@@ -2076,47 +2079,12 @@ private fun QuickActionCard(
 
 @Composable
 private fun PdfThumbnailImage(filePath: String, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    var bitmap by remember(filePath) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(filePath) {
-        withContext(Dispatchers.IO) {
-            try {
-                val pfd: ParcelFileDescriptor? = if (filePath.startsWith("content://")) {
-                    context.contentResolver.openFileDescriptor(android.net.Uri.parse(filePath), "r")
-                } else {
-                    val file = File(filePath)
-                    if (file.exists()) ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) else null
-                }
-                if (pfd != null) {
-                    val renderer = PdfRenderer(pfd)
-                    if (renderer.pageCount > 0) {
-                        val page = renderer.openPage(0)
-                        val w = 260
-                        val h = (260 * (page.height.toFloat() / page.width.toFloat())).toInt().coerceIn(100, 400)
-                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                        val canvas = android.graphics.Canvas(bmp)
-                        canvas.drawColor(android.graphics.Color.WHITE)
-                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                        page.close()
-                        renderer.close()
-                        pfd.close()
-                        bitmap = bmp
-                    } else {
-                        renderer.close()
-                        pfd.close()
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-    }
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = "PDF Cover",
-            contentScale = ContentScale.Crop,
-            modifier = modifier.fillMaxSize()
-        )
-    }
+    PdfPageThumbnail(
+        filePath = filePath,
+        modifier = modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+        targetWidth = 280
+    )
 }
 
 private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
@@ -2501,7 +2469,7 @@ private fun NotebookThumbnailCard(
     onDragCancel: (() -> Unit)? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    var cardBoundsInRoot by remember { mutableStateOf(Rect.Zero) }
+    val cardPosRef = remember { object { var x = 0f; var y = 0f } }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
     val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
@@ -2521,12 +2489,14 @@ private fun NotebookThumbnailCard(
                 else Modifier
             )
             .onGloballyPositioned { coords ->
-                cardBoundsInRoot = coords.boundsInRoot()
+                val tl = coords.boundsInRoot().topLeft
+                cardPosRef.x = tl.x
+                cardPosRef.y = tl.y
             }
             .pointerInput(notebook.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { localOffset ->
-                        onDragStart?.invoke(cardBoundsInRoot.topLeft + localOffset)
+                        onDragStart?.invoke(Offset(cardPosRef.x + localOffset.x, cardPosRef.y + localOffset.y))
                     },
                     onDrag = { change, dragAmount ->
                         change.consume()
