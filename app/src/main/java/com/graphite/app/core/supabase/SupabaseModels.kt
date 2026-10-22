@@ -64,7 +64,7 @@ data class SupabaseNotebookDto(
     val userId: String,
     val title: String,
     @SerialName("folder_id")
-    val folderId: String = "my_notes",
+    val folderId: String = "unfiled",
     @SerialName("paper_style")
     val paperStyle: String = "RULED",
     @SerialName("preview_lines")

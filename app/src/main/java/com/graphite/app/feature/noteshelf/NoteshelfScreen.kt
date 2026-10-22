@@ -179,14 +179,12 @@ fun NoteshelfScreen(
     var notesToDelete by remember { mutableStateOf<List<NotebookItem>?>(null) }
     var isDeletingNotesCloud by remember { mutableStateOf(false) }
 
-    LaunchedEffect(hasActiveSession) {
-        if (!hasActiveSession) {
-            selectedCategory = "All Notes"
-            selectedNotebookIds = emptySet()
-            isDraggingNote = false
-            draggedNotebook = null
-            hoveredFolderId = null
-        }
+    LaunchedEffect(googleUser?.email, isGuestMode) {
+        selectedCategory = "All Notes"
+        selectedNotebookIds = emptySet()
+        isDraggingNote = false
+        draggedNotebook = null
+        hoveredFolderId = null
     }
 
     val fileImportLauncher = rememberLauncherForActivityResult(

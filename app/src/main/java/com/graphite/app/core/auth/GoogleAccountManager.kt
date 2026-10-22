@@ -144,6 +144,7 @@ class GoogleAccountManager(
     fun launchSwitchAccount(context: Context, launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
         val client = GoogleSignIn.getClient(context, getGoogleSignInOptions())
         client.signOut().addOnCompleteListener {
+            clearLocalSession()
             val intent = client.signInIntent
             launcher.launch(intent)
         }

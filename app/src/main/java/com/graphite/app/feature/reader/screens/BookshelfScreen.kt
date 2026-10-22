@@ -107,6 +107,11 @@ fun BookshelfScreen(
         GraphiteRepository.cleanBookDuplicatesAndGhosts()
     }
 
+    LaunchedEffect(googleUser?.email, isGuestMode) {
+        selectedCategory = "All Books"
+        selectedBookIds = emptySet()
+    }
+
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->

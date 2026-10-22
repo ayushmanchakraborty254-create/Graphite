@@ -113,6 +113,11 @@ object GraphiteRepository {
                 defaultNotes.removeAll(toMigrate)
             }
         }
+        for (i in userNotes.indices) {
+            if (userNotes[i].folderId == "my_notes") {
+                userNotes[i] = userNotes[i].copy(folderId = "unfiled")
+            }
+        }
         _notebooks.value = userNotes.filter { !it.isDeleted }
 
         // 2. Partitioned Books: Load user or guest books
@@ -129,23 +134,10 @@ object GraphiteRepository {
         _books.value = userBooks.toList()
         cleanBookDuplicatesAndGhosts()
 
-        // 3. Partitioned Folders: Load user folders or seed initial defaults
-        val userFolders = userFoldersMap.getOrPut(currentUid) {
-            mutableListOf(
-                FolderItem("my_notes", "My Notes", 0, colorHex = 0xFF42A5F5, userId = currentUid),
-                FolderItem("lectures", "Lectures", 0, colorHex = 0xFF64B5F6, userId = currentUid),
-                FolderItem("projects", "Projects", 0, colorHex = 0xFF81C784, userId = currentUid)
-            )
-        }
-        val defaultFolders = userFoldersMap["default"]
-        if (!defaultFolders.isNullOrEmpty() && currentUid != "default") {
-            val existingFolderIds = userFolders.map { it.id }.toSet()
-            val toMigrateFolders = defaultFolders.filter { it.id !in existingFolderIds }
-            if (toMigrateFolders.isNotEmpty()) {
-                userFolders.addAll(toMigrateFolders.map { it.copy(userId = currentUid) })
-                defaultFolders.removeAll(toMigrateFolders)
-            }
-        }
+        // 3. Partitioned Folders: Strictly isolate folders per account (no mock folders bleeding across accounts)
+        val userFolders = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        userFolders.removeAll { it.id == "my_notes" || it.id == "lectures" || it.id == "projects" }
+        userFoldersMap["default"]?.removeAll { it.id == "my_notes" || it.id == "lectures" || it.id == "projects" }
         _folders.value = userFolders.toList()
 
         _stats.update {
@@ -377,7 +369,7 @@ object GraphiteRepository {
     fun createNotebook(
         title: String,
         paperStyle: PaperStyle = PaperStyle.RULED,
-        folderId: String = "my_notes",
+        folderId: String = "unfiled",
         customId: String = UUID.randomUUID().toString(),
         mimeType: String? = null,
         initialPreviewLines: List<String>? = null,
@@ -922,9 +914,11 @@ object GraphiteRepository {
                             val list = mutableListOf<FolderItem>()
                             for (i in 0 until arr.length()) {
                                 val obj = arr.getJSONObject(i)
+                                val fid = obj.getString("id")
+                                if (fid == "my_notes" || fid == "lectures" || fid == "projects") continue
                                 list.add(
                                     FolderItem(
-                                        id = obj.getString("id"),
+                                        id = fid,
                                         name = obj.getString("name"),
                                         noteCount = obj.optInt("noteCount", 0),
                                         parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
@@ -940,9 +934,11 @@ object GraphiteRepository {
                         val loaded = mutableListOf<FolderItem>()
                         for (i in 0 until arr.length()) {
                             val obj = arr.getJSONObject(i)
+                            val fid = obj.getString("id")
+                            if (fid == "my_notes" || fid == "lectures" || fid == "projects") continue
                             loaded.add(
                                 FolderItem(
-                                    id = obj.getString("id"),
+                                    id = fid,
                                     name = obj.getString("name"),
                                     noteCount = obj.optInt("noteCount", 0),
                                     parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
@@ -1137,7 +1133,7 @@ object GraphiteRepository {
         return NotebookItem(
             id = json.optString("id", UUID.randomUUID().toString()),
             title = json.optString("title", "Untitled Note"),
-            folderId = json.optString("folderId", "my_notes"),
+            folderId = json.optString("folderId", "unfiled").let { if (it == "my_notes") "unfiled" else it },
             pageCount = json.optInt("pageCount", 1),
             createdAtMillis = json.optLong("createdAtMillis", System.currentTimeMillis()),
             updatedAtMillis = json.optLong("updatedAtMillis", System.currentTimeMillis()),

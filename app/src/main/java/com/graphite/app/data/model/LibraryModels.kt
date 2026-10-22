@@ -41,7 +41,7 @@ data class NotebookCover(
 data class NotebookItem(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
-    val folderId: String = "my_notes",
+    val folderId: String = "unfiled",
     val pageCount: Int = 1,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis(),
