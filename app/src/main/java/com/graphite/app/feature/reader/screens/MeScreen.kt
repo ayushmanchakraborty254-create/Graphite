@@ -493,7 +493,7 @@ fun MeScreen(
                     title = "Check for Updates",
                     onClick = {
                         android.widget.Toast.makeText(context, "Checking for updates...", android.widget.Toast.LENGTH_SHORT).show()
-                        GraphiteApplication.instance.appUpdateManager.checkForUpdates(context) { hasUpdate ->
+                        GraphiteApplication.instance.appUpdateManager.checkForUpdates(context, isManualCheck = true) { hasUpdate ->
                             if (!hasUpdate) {
                                 android.widget.Toast.makeText(context, "Graphite is up to date!", android.widget.Toast.LENGTH_SHORT).show()
                             }

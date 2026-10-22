@@ -1,9 +1,11 @@
 package com.graphite.app.core.updater
 
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -30,6 +32,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -83,18 +87,25 @@ class AppUpdateManager(
     private val githubRepo = "ayushmanchakraborty254-create/Graphite"
     private val apiUrl = "https://api.github.com/repos/$githubRepo/releases"
 
+    private var downloadJob: kotlinx.coroutines.Job? = null
+    private var activeDownloadId: Long? = null
+
     /**
      * Checks GitHub for newly published APK builds.
      * Compares release commit SHA with the running build's GIT_COMMIT_SHA.
      */
-    fun checkForUpdates(context: Context? = null, onComplete: (Boolean) -> Unit = {}) {
+    fun checkForUpdates(
+        context: Context? = null,
+        isManualCheck: Boolean = false,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
         _updateState.value = UpdateState.Checking
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val request = Request.Builder()
                     .url(apiUrl)
                     .addHeader("Accept", "application/vnd.github.v3+json")
-                    .addHeader("User-Agent", "Graphite-Android-App")
+                    .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
                     .build()
 
                 val response = httpClient.newCall(request).execute()
@@ -142,11 +153,11 @@ class AppUpdateManager(
                     ?: shaRegex.find(body)?.groupValues?.get(1)
                     ?: tagName
 
-                val localSha = BuildConfig.GIT_COMMIT_SHA
+                val localSha = BuildConfig.GIT_COMMIT_SHA.trim()
                 val localBuildTime = BuildConfig.BUILD_TIME_MILLIS
 
-                // Check snooze duration in SharedPreferences (user clicked Later)
-                if (context != null) {
+                // Check snooze duration only on automatic background checks, NEVER on manual checks
+                if (!isManualCheck && context != null) {
                     val prefs = context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
                     val snoozedUntil = prefs.getLong("snoozed_until_${releaseSha}", 0L)
                     if (System.currentTimeMillis() < snoozedUntil) {
@@ -158,14 +169,16 @@ class AppUpdateManager(
 
                 // Check if the update is genuinely newer
                 var isNewer = false
-                if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
-                    if (localSha.isNotBlank() && !localSha.equals("dev", ignoreCase = true)) {
-                        // Exact commit SHA comparison: newer if remote SHA does NOT match installed SHA
-                        isNewer = !releaseSha.equals(localSha, ignoreCase = true)
-                    } else {
-                        // Local build has no commit sha or is dev, so a published release is newer
-                        isNewer = true
-                    }
+                val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
+
+                if (isDevBuild) {
+                    isNewer = true
+                } else if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
+                    // Normalize and compare commit SHAs (accounting for 7-char vs 8+ char short SHAs)
+                    val isSameCommit = releaseSha.equals(localSha, ignoreCase = true) ||
+                        (releaseSha.length >= 7 && localSha.length >= 7 &&
+                            (releaseSha.startsWith(localSha, ignoreCase = true) || localSha.startsWith(releaseSha, ignoreCase = true)))
+                    isNewer = !isSameCommit
                 } else if (assetTimestamp.isNotBlank()) {
                     try {
                         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
@@ -199,91 +212,192 @@ class AppUpdateManager(
         }
     }
 
-    private var downloadJob: kotlinx.coroutines.Job? = null
-
     /**
-     * Downloads the latest APK and launches the system installer.
+     * Downloads the latest APK using Android's native system DownloadManager for maximum
+     * line speed and background reliability. Falls back to direct streaming if DownloadManager
+     * is unavailable.
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
         lastDownloadUrl = downloadUrl
         _updateState.value = UpdateState.Downloading(0, 0L, 0L, 0L)
-        downloadJob?.cancel()
+        cancelDownload(context)
+
         downloadJob = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val request = Request.Builder()
-                    .url(downloadUrl)
-                    .addHeader("User-Agent", "Graphite-Android-App")
-                    .build()
+            val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+            var useFallback = false
 
-                val response = httpClient.newCall(request).execute()
-                if (!response.isSuccessful) {
-                    _updateState.value = UpdateState.Error("Failed to download update: HTTP ${response.code}")
-                    return@launch
-                }
+            if (downloadManager != null) {
+                try {
+                    val destDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    val updateFile = File(destDir, "Graphite-update.apk")
+                    if (updateFile.exists()) updateFile.delete()
 
-                val body = response.body ?: throw IllegalStateException("Empty response body")
-                val contentLength = body.contentLength()
+                    val uri = Uri.parse(downloadUrl)
+                    val request = DownloadManager.Request(uri)
+                        .setTitle("Graphite Update")
+                        .setDescription("Downloading latest build from GitHub...")
+                        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "Graphite-update.apk")
+                        .setMimeType("application/vnd.android.package-archive")
+                        .addRequestHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                        .addRequestHeader("Accept", "*/*")
+                        .setAllowedOverMetered(true)
+                        .setAllowedOverRoaming(true)
 
-                val apkFile = File(context.cacheDir, "Graphite-update.apk")
-                if (apkFile.exists()) apkFile.delete()
+                    val downloadId = downloadManager.enqueue(request)
+                    activeDownloadId = downloadId
 
-                val inputStream = java.io.BufferedInputStream(body.byteStream(), 262144)
-                val outputStream = java.io.BufferedOutputStream(FileOutputStream(apkFile), 262144)
+                    var lastUpdateTime = System.currentTimeMillis()
+                    var lastBytes = 0L
 
-                val buffer = ByteArray(131072) // 128 KB buffer for high socket throughput
-                var bytesRead: Int
-                var totalBytesRead = 0L
-                var lastUpdateTime = System.currentTimeMillis()
-                var bytesSinceLastUpdate = 0L
-                var currentSpeed = 0L
+                    while (isActive) {
+                        delay(200L)
+                        val query = DownloadManager.Query().setFilterById(downloadId)
+                        val cursor = downloadManager.query(query)
+                        if (cursor != null && cursor.moveToFirst()) {
+                            val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                            val bytesIdx = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                            val totalIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
 
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-                    bytesSinceLastUpdate += bytesRead
+                            val status = if (statusIdx != -1) cursor.getInt(statusIdx) else -1
+                            val bytesDownloaded = if (bytesIdx != -1) cursor.getLong(bytesIdx) else 0L
+                            val totalBytes = if (totalIdx != -1) cursor.getLong(totalIdx) else 0L
+                            cursor.close()
 
-                    val now = System.currentTimeMillis()
-                    val elapsed = now - lastUpdateTime
-                    if (elapsed >= 120L) { // Update every 120ms so user sees smooth progress
-                        currentSpeed = if (elapsed > 0) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
-                        lastUpdateTime = now
-                        bytesSinceLastUpdate = 0L
+                            val now = System.currentTimeMillis()
+                            val elapsed = now - lastUpdateTime
+                            val speed = if (elapsed > 0 && bytesDownloaded >= lastBytes) {
+                                ((bytesDownloaded - lastBytes) * 1000L) / (elapsed * 1024L)
+                            } else 0L
+                            lastUpdateTime = now
+                            lastBytes = bytesDownloaded
 
-                        val progress = if (contentLength > 0) {
-                            ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
-                        } else 0
-
-                        _updateState.value = UpdateState.Downloading(
-                            progressPercent = progress,
-                            bytesDownloaded = totalBytesRead,
-                            totalBytes = contentLength,
-                            speedKbps = currentSpeed
-                        )
+                            when (status) {
+                                DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PENDING -> {
+                                    val progress = if (totalBytes > 0) {
+                                        ((bytesDownloaded * 100) / totalBytes).toInt().coerceIn(0, 100)
+                                    } else 0
+                                    _updateState.value = UpdateState.Downloading(
+                                        progressPercent = progress,
+                                        bytesDownloaded = bytesDownloaded,
+                                        totalBytes = totalBytes,
+                                        speedKbps = speed
+                                    )
+                                }
+                                DownloadManager.STATUS_SUCCESSFUL -> {
+                                    val finalApk = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Graphite-update.apk")
+                                    activeDownloadId = null
+                                    _updateState.value = UpdateState.ReadyToInstall(finalApk)
+                                    withContext(Dispatchers.Main) {
+                                        installApk(context, finalApk)
+                                    }
+                                    return@launch
+                                }
+                                DownloadManager.STATUS_FAILED -> {
+                                    activeDownloadId = null
+                                    useFallback = true
+                                    break
+                                }
+                            }
+                        } else {
+                            cursor?.close()
+                        }
                     }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    useFallback = true
                 }
+            } else {
+                useFallback = true
+            }
 
-                outputStream.flush()
-                outputStream.close()
-                inputStream.close()
+            if (useFallback) {
+                // High-speed OkHttp direct streaming fallback
+                try {
+                    val request = Request.Builder()
+                        .url(downloadUrl)
+                        .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                        .addHeader("Accept", "*/*")
+                        .build()
 
-                _updateState.value = UpdateState.ReadyToInstall(apkFile)
-                withContext(Dispatchers.Main) {
-                    installApk(context, apkFile)
-                }
-            } catch (e: Exception) {
-                if (e !is kotlinx.coroutines.CancellationException) {
-                    _updateState.value = UpdateState.Error("Download failed: ${e.message}")
+                    val response = httpClient.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        _updateState.value = UpdateState.Error("Failed to download update: HTTP ${response.code}")
+                        return@launch
+                    }
+
+                    val body = response.body ?: throw IllegalStateException("Empty response body")
+                    val contentLength = body.contentLength()
+
+                    val apkFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir, "Graphite-update.apk")
+                    if (apkFile.exists()) apkFile.delete()
+
+                    val inputStream = java.io.BufferedInputStream(body.byteStream(), 262144)
+                    val outputStream = java.io.BufferedOutputStream(FileOutputStream(apkFile), 262144)
+
+                    val buffer = ByteArray(131072)
+                    var bytesRead: Int
+                    var totalBytesRead = 0L
+                    var lastUpdateTime = System.currentTimeMillis()
+                    var bytesSinceLastUpdate = 0L
+                    var currentSpeed = 0L
+
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalBytesRead += bytesRead
+                        bytesSinceLastUpdate += bytesRead
+
+                        val now = System.currentTimeMillis()
+                        val elapsed = now - lastUpdateTime
+                        if (elapsed >= 150L) {
+                            currentSpeed = if (elapsed > 0) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
+                            lastUpdateTime = now
+                            bytesSinceLastUpdate = 0L
+
+                            val progress = if (contentLength > 0) {
+                                ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
+                            } else 0
+
+                            _updateState.value = UpdateState.Downloading(
+                                progressPercent = progress,
+                                bytesDownloaded = totalBytesRead,
+                                totalBytes = contentLength,
+                                speedKbps = currentSpeed
+                            )
+                        }
+                    }
+
+                    outputStream.flush()
+                    outputStream.close()
+                    inputStream.close()
+
+                    _updateState.value = UpdateState.ReadyToInstall(apkFile)
+                    withContext(Dispatchers.Main) {
+                        installApk(context, apkFile)
+                    }
+                } catch (e: Exception) {
+                    if (e !is kotlinx.coroutines.CancellationException) {
+                        _updateState.value = UpdateState.Error("Download failed: ${e.message}")
+                    }
                 }
             }
         }
     }
 
     fun cancelDownload(context: Context? = null, sha: String? = null) {
+        val downloadId = activeDownloadId
+        if (context != null && downloadId != null) {
+            try {
+                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+                dm?.remove(downloadId)
+            } catch (_: Exception) {}
+            activeDownloadId = null
+        }
         downloadJob?.cancel()
         downloadJob = null
         if (context != null) {
             try {
-                val apkFile = File(context.cacheDir, "Graphite-update.apk")
+                val apkFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir, "Graphite-update.apk")
                 if (apkFile.exists()) apkFile.delete()
             } catch (_: Exception) {}
         }
@@ -304,6 +418,11 @@ class AppUpdateManager(
 
     fun installApk(context: Context, apkFile: File) {
         try {
+            if (!apkFile.exists() || apkFile.length() == 0L) {
+                _updateState.value = UpdateState.Error("APK file not found or empty.")
+                return
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (!context.packageManager.canRequestPackageInstalls()) {
                     Toast.makeText(
@@ -330,6 +449,16 @@ class AppUpdateManager(
                 setDataAndType(contentUri, "application/vnd.android.package-archive")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
             }
+
+            val resolved = context.packageManager.queryIntentActivities(installIntent, 0)
+            for (resolveInfo in resolved) {
+                context.grantUriPermission(
+                    resolveInfo.activityInfo.packageName,
+                    contentUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+
             context.startActivity(installIntent)
         } catch (e: Exception) {
             _updateState.value = UpdateState.Error("Could not launch package installer: ${e.message}")
@@ -417,8 +546,21 @@ fun AppUpdateModalDialog(
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { updateManager.dismissUpdate(context, state.info.commitSha) }) {
-                        Text("Later", color = Color.Gray)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.info.downloadUrl)).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                                updateManager.dismissUpdate(context, state.info.commitSha)
+                            }
+                        ) {
+                            Text("Open in Browser", color = Color(0xFF64B5F6))
+                        }
+                        TextButton(onClick = { updateManager.dismissUpdate(context, state.info.commitSha) }) {
+                            Text("Later", color = Color.Gray)
+                        }
                     }
                 },
                 containerColor = GraphiteSurfaceVariant,

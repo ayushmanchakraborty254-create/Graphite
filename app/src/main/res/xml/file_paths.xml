@@ -4,4 +4,6 @@
     <files-path name="imported_notes" path="imported_notes/" />
     <files-path name="imported_documents" path="imported_documents/" />
     <cache-path name="cache" path="." />
+    <external-files-path name="external_files" path="." />
+    <external-path name="external_storage" path="." />
 </paths>
