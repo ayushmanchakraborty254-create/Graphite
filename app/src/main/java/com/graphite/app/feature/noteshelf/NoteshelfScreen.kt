@@ -2527,15 +2527,16 @@ private fun Modifier.notebookTapDragModifier(
     getRootPosition: () -> Offset = { Offset.Zero }
 ): Modifier = this.pointerInput(key) {
     awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = true)
+        val down = awaitFirstDown(requireUnconsumed = false)
         val downTime = System.currentTimeMillis()
         val startPos = down.position
         val touchSlop = viewConfiguration.touchSlop
         var isDragging = false
-        var isLongClickTriggered = false
+        var isLongPressActive = false
         var isPointerReleased = false
+        var isCanceledForScroll = false
 
-        while (!isPointerReleased) {
+        while (!isPointerReleased && !isCanceledForScroll) {
             val event = awaitPointerEvent()
             val current = event.changes.firstOrNull { it.id == down.id } ?: break
 
@@ -2543,9 +2544,12 @@ private fun Modifier.notebookTapDragModifier(
                 isPointerReleased = true
                 if (isDragging) {
                     onDragEnd?.invoke()
-                } else if (!isLongClickTriggered) {
+                } else if (isLongPressActive) {
+                    onLongClick()
+                } else {
                     val duration = System.currentTimeMillis() - downTime
-                    if (duration < 350 && !current.isConsumed && !down.isConsumed) {
+                    val distance = (current.position - startPos).getDistance()
+                    if (duration < 350 && distance <= touchSlop) {
                         current.consume()
                         onClick()
                     }
@@ -2556,23 +2560,29 @@ private fun Modifier.notebookTapDragModifier(
             val elapsed = System.currentTimeMillis() - downTime
             val distance = (current.position - startPos).getDistance()
 
-            if (!isDragging && !isLongClickTriggered) {
-                // If user moves past touchSlop after smaller hold time than long press, start Drag immediately
-                if (distance > touchSlop && onDragStart != null) {
-                    isDragging = true
+            if (!isLongPressActive) {
+                if (distance > touchSlop) {
+                    // Finger moved before holding for >= 500ms: this is a scroll gesture!
+                    // Do NOT consume pointer, do NOT start dragging. Yield immediately to parent scroll container.
+                    isCanceledForScroll = true
+                    break
+                } else if (elapsed >= 500) {
+                    // User held stationary on note for >= 500ms: activate long-press / drag readiness
+                    isLongPressActive = true
                     current.consume()
+                }
+            } else {
+                // Long-press hold has already completed: dragging is now unlocked
+                current.consume()
+                if (!isDragging && onDragStart != null && distance > touchSlop) {
+                    isDragging = true
                     val rootStart = getRootPosition() + current.position
                     onDragStart.invoke(rootStart)
-                } else if (elapsed >= 380) {
-                    // If user holds stationary for >= 380ms, trigger Long Tap Select
-                    isLongClickTriggered = true
-                    current.consume()
-                    onLongClick()
                 }
-            } else if (isDragging) {
-                current.consume()
-                val dragAmount = current.position - current.previousPosition
-                onDrag?.invoke(dragAmount)
+                if (isDragging) {
+                    val dragAmount = current.position - current.previousPosition
+                    onDrag?.invoke(dragAmount)
+                }
             }
         }
     }

@@ -23,7 +23,8 @@ data class SerializedInkStroke(
     val baseWidth: Float,
     val colorArgb: Long,
     val toolType: String,
-    val pageIndex: Int = 0
+    val pageIndex: Int = 0,
+    val isCanonical: Boolean = false
 )
 
 object InkSerialization {
@@ -39,7 +40,8 @@ object InkSerialization {
                 baseWidth = s.baseWidth,
                 colorArgb = s.color.value.toLong(),
                 toolType = s.toolType.name,
-                pageIndex = s.pageIndex
+                pageIndex = s.pageIndex,
+                isCanonical = s.isCanonical
             )
         }
         return json.encodeToString(serialized)
@@ -62,7 +64,8 @@ object InkSerialization {
                     } catch (_: Exception) {
                         InkToolType.PEN
                     },
-                    pageIndex = s.pageIndex
+                    pageIndex = s.pageIndex,
+                    isCanonical = s.isCanonical
                 )
             }
         } catch (_: Exception) {
