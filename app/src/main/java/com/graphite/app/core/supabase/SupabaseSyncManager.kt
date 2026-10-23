@@ -79,7 +79,32 @@ class SupabaseSyncManager(
             }
 
             val remoteNotes = remoteNotesResult.getOrThrow()
-            val remoteMap = remoteNotes.associateBy { it.id }
+
+            // Detect and purge any cloud duplicate ghost notes with identical titles
+            val duplicateRemoteIdsToPurge = mutableListOf<String>()
+            val remoteGrouped = remoteNotes.filter { !it.isDeleted }.groupBy { it.title.trim().lowercase() }
+            for ((_, group) in remoteGrouped) {
+                if (group.size > 1) {
+                    val best = group.maxWithOrNull(
+                        compareBy<NotebookItem> { !it.filePath.isNullOrBlank() }
+                            .thenBy { it.initialStrokes.isNotEmpty() }
+                            .thenBy { it.updatedAtMillis }
+                    ) ?: group.first()
+                    for (dup in group) {
+                        if (dup.id != best.id) {
+                            duplicateRemoteIdsToPurge.add(dup.id)
+                        }
+                    }
+                }
+            }
+            for (dupId in duplicateRemoteIdsToPurge) {
+                try {
+                    notesRepository.deleteNote(dupId)
+                } catch (_: Exception) {}
+            }
+
+            val cleanRemoteNotes = remoteNotes.filter { it.id !in duplicateRemoteIdsToPurge }
+            val remoteMap = cleanRemoteNotes.associateBy { it.id }
 
             // 2. Identify local notes that are genuinely newer than remote or local-only (prevent resurrecting cloud tombstones)
             val localNotes = graphiteRepository.getAllNotesForActiveUser()
@@ -101,7 +126,7 @@ class SupabaseSyncManager(
             }
 
             // 4. Reconcile remote changes into local workspace (Last-Write-Wins and Tombstones)
-            graphiteRepository.reconcileRemoteNotes(remoteNotes)
+            graphiteRepository.reconcileRemoteNotes(cleanRemoteNotes)
 
             val activeNotesCount = graphiteRepository.getAllNotesForActiveUser().count { !it.isDeleted }
             _syncStatus.value = SupabaseSyncStatus.Success(activeNotesCount)

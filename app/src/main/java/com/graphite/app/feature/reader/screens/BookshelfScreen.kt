@@ -801,11 +801,11 @@ fun BookshelfScreen(
                 matchesCategory && matchesSearch
             }.let { list ->
                 when (currentSortOption) {
-                    "Title (A-Z)" -> list.sortedBy { it.title.lowercase() }
-                    "Title (Z-A)" -> list.sortedByDescending { it.title.lowercase() }
+                    "Title (A-Z)" -> list.sortedWith { a, b -> com.graphite.app.core.util.NaturalOrderComparator.compare(a.title, b.title) }
+                    "Title (Z-A)" -> list.sortedWith { a, b -> com.graphite.app.core.util.NaturalOrderComparator.compare(b.title, a.title) }
                     "Most Recent" -> list.sortedByDescending { it.lastReadTimeMillis }
                     "Reading Progress" -> list.sortedByDescending { it.progressPercent }
-                    "Author" -> list.sortedBy { it.author.lowercase() }
+                    "Author" -> list.sortedWith { a, b -> com.graphite.app.core.util.NaturalOrderComparator.compare(a.author, b.author) }
                     else -> list
                 }
             }

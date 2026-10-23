@@ -117,6 +117,7 @@ fun NoteshelfScreen(
     }
 
     LaunchedEffect(Unit) {
+        GraphiteRepository.cleanNotebookDuplicatesAndGhosts()
         syncManager.triggerAutoSync(debounceMs = 0L)
     }
 
@@ -303,8 +304,8 @@ fun NoteshelfScreen(
             }
             "Date Modified (Newest)" -> searchFiltered.sortedByDescending { it.updatedAtMillis }
             "Date Modified (Oldest)" -> searchFiltered.sortedBy { it.updatedAtMillis }
-            "Title (A-Z)" -> searchFiltered.sortedBy { it.title.lowercase() }
-            "Title (Z-A)" -> searchFiltered.sortedByDescending { it.title.lowercase() }
+            "Title (A-Z)" -> searchFiltered.sortedWith { a, b -> com.graphite.app.core.util.NaturalOrderComparator.compare(a.title, b.title) }
+            "Title (Z-A)" -> searchFiltered.sortedWith { a, b -> com.graphite.app.core.util.NaturalOrderComparator.compare(b.title, a.title) }
             else -> searchFiltered
         }
     }

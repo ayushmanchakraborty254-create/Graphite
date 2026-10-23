@@ -112,6 +112,7 @@ object GraphiteRepository {
                 userNotes[i] = userNotes[i].copy(folderId = "unfiled")
             }
         }
+        cleanNotebookDuplicatesAndGhosts(currentUid)
         _notebooks.value = userNotes.filter { !it.isDeleted }
 
         // 2. Partitioned Books: Load books strictly for currentUid (NEVER migrate books across accounts)
@@ -651,9 +652,23 @@ object GraphiteRepository {
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
         val localMap = userList.associateBy { it.id }.toMutableMap()
 
+        val currentSupabaseId = try {
+            com.graphite.app.GraphiteApplication.instance.supabaseAuthManager.currentUserId
+        } catch (_: Throwable) { null }
+        val deterministicId = try {
+            java.util.UUID.nameUUIDFromBytes(currentUid.toByteArray()).toString()
+        } catch (_: Throwable) { null }
+
         for (remote in remoteNotes) {
-            // Strict account isolation: NEVER import/adopt a note belonging to a different user
-            if (remote.userId != null && remote.userId != currentUid && remote.userId != "default" && remote.userId != "guest") {
+            // Strict account isolation: Verify note belongs to current user
+            val belongsToUser = remote.userId == null ||
+                remote.userId == currentUid ||
+                (currentSupabaseId != null && remote.userId == currentSupabaseId) ||
+                (deterministicId != null && remote.userId == deterministicId) ||
+                remote.userId == "default" ||
+                remote.userId == "guest"
+
+            if (!belongsToUser) {
                 continue
             }
 
@@ -703,6 +718,7 @@ object GraphiteRepository {
 
         userList.clear()
         userList.addAll(localMap.values.sortedByDescending { it.updatedAtMillis })
+        cleanNotebookDuplicatesAndGhosts(currentUid)
         _notebooks.value = userList.filter { !it.isDeleted }
         _stats.update { it.copy(notesCount = _notebooks.value.size) }
         saveToDisk()
@@ -840,6 +856,38 @@ object GraphiteRepository {
         }
         _stats.update { it.copy(totalBooks = _books.value.size) }
         saveToDisk()
+    }
+
+    fun cleanNotebookDuplicatesAndGhosts(targetUid: String? = null) {
+        val currentUid = targetUid ?: activeUserId ?: return
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val activeNotes = userList.filter { !it.isDeleted }
+        val titleGroups = activeNotes.groupBy { it.title.trim().lowercase() }
+        val toRemove = mutableSetOf<String>()
+
+        for ((_, group) in titleGroups) {
+            if (group.size > 1) {
+                // Keep the best version: prefer files/strokes, then latest updatedAtMillis
+                val best = group.maxWithOrNull(
+                    compareBy<NotebookItem> { !it.filePath.isNullOrBlank() }
+                        .thenBy { it.initialStrokes.isNotEmpty() }
+                        .thenBy { it.updatedAtMillis }
+                ) ?: group.first()
+
+                for (dup in group) {
+                    if (dup.id != best.id) {
+                        toRemove.add(dup.id)
+                    }
+                }
+            }
+        }
+
+        if (toRemove.isNotEmpty()) {
+            userList.removeAll { it.id in toRemove }
+            _notebooks.value = userList.filter { !it.isDeleted }
+            _stats.update { it.copy(notesCount = _notebooks.value.size) }
+            saveToDisk()
+        }
     }
 
     private var appContext: Context? = null
