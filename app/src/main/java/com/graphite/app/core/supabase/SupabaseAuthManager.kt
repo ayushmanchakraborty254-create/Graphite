@@ -23,7 +23,12 @@ import java.io.IOException
 
 class SupabaseAuthManager(
     private val secureStorage: SecureStorage,
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val baseUrl: String = GraphiteConfig.supabaseUrl,
     private val publishableKey: String = GraphiteConfig.supabasePublishableKey

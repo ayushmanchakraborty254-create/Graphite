@@ -19,7 +19,12 @@ import java.io.IOException
 
 class SupabaseNotesRepository(
     private val authManager: SupabaseAuthManager,
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val baseUrl: String = GraphiteConfig.supabaseUrl,
     private val publishableKey: String = GraphiteConfig.supabasePublishableKey
@@ -55,25 +60,48 @@ class SupabaseNotesRepository(
     }
 
     /**
-     * Executes an authenticated HTTP request, retrying once automatically with a refreshed token
-     * if Supabase/PostgREST responds with HTTP 401 (e.g. PGRST301 JWT expired).
+     * Executes an authenticated HTTP request with automatic retries on transient network failures,
+     * gateway/cold-start delays (HTTP 502-504), or token expiration (HTTP 401).
      */
     private suspend fun executeWithRetry(
+        maxAttempts: Int = 3,
         buildRequest: (token: String) -> Request
     ): okhttp3.Response {
-        val session = getAuthenticatedSession()
-        val initialResponse = httpClient.newCall(buildRequest(session.accessToken)).execute()
-        if (initialResponse.code != 401) {
-            return initialResponse
+        var currentToken = getAuthenticatedSession().accessToken
+        var lastException: IOException? = null
+
+        for (attempt in 1..maxAttempts) {
+            try {
+                val response = httpClient.newCall(buildRequest(currentToken)).execute()
+                if (response.code == 401) {
+                    response.close()
+                    val refreshResult = authManager.refreshSession(force = true)
+                    val refreshedSession = refreshResult.getOrNull()
+                    if (refreshedSession != null) {
+                        currentToken = refreshedSession.accessToken
+                        continue
+                    } else {
+                        throw IOException("Session expired (HTTP 401) and token refresh failed: ${refreshResult.exceptionOrNull()?.message ?: "Unknown error"}")
+                    }
+                }
+
+                // If transient server error (502, 503, 504), retry after short backoff
+                if (response.code in 502..504 && attempt < maxAttempts) {
+                    response.close()
+                    kotlinx.coroutines.delay(attempt * 600L)
+                    continue
+                }
+
+                return response
+            } catch (e: IOException) {
+                lastException = e
+                if (attempt < maxAttempts) {
+                    kotlinx.coroutines.delay(attempt * 500L)
+                }
+            }
         }
 
-        // HTTP 401 received: Attempt forced token refresh and single retry
-        initialResponse.close()
-        val refreshResult = authManager.refreshSession(force = true)
-        val refreshedSession = refreshResult.getOrNull()
-            ?: throw IOException("Session expired (HTTP 401) and token refresh failed: ${refreshResult.exceptionOrNull()?.message ?: "Unknown error"}")
-
-        return httpClient.newCall(buildRequest(refreshedSession.accessToken)).execute()
+        throw lastException ?: IOException("Failed after $maxAttempts attempts")
     }
 
     suspend fun fetchNotes(): Result<List<NotebookItem>> = withContext(ioDispatcher) {
@@ -364,26 +392,28 @@ class SupabaseNotesRepository(
                 )
             }
 
-            val payload = json.encodeToString(dtoList)
-
-            executeWithRetry { token ->
-                Request.Builder()
-                    .url("$baseUrl/rest/v1/notebooks")
-                    .header("apikey", publishableKey)
-                    .header("Authorization", "Bearer $token")
-                    .header("Content-Type", "application/json")
-                    .header("Prefer", "resolution=merge-duplicates,return=representation")
-                    .post(payload.toRequestBody("application/json".toMediaType()))
-                    .build()
-            }.use { response ->
-                val body = response.body?.string() ?: ""
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(
-                        IOException("HTTP ${response.code} upserting notes: $body")
-                    )
+            val chunks = dtoList.chunked(4)
+            for (chunk in chunks) {
+                val payload = json.encodeToString(chunk)
+                executeWithRetry { token ->
+                    Request.Builder()
+                        .url("$baseUrl/rest/v1/notebooks")
+                        .header("apikey", publishableKey)
+                        .header("Authorization", "Bearer $token")
+                        .header("Content-Type", "application/json")
+                        .header("Prefer", "resolution=merge-duplicates,return=representation")
+                        .post(payload.toRequestBody("application/json".toMediaType()))
+                        .build()
+                }.use { response ->
+                    val body = response.body?.string() ?: ""
+                    if (!response.isSuccessful) {
+                        return@withContext Result.failure(
+                            IOException("HTTP ${response.code} upserting notes: $body")
+                        )
+                    }
                 }
-                Result.success(notebooks)
             }
+            Result.success(notebooks)
         } catch (e: Exception) {
             Result.failure(e)
         }
