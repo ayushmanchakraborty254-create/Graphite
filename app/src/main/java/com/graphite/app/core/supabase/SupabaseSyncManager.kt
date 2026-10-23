@@ -117,6 +117,11 @@ class SupabaseSyncManager(
         notesRepository.deleteNote(notebookId)
     }
 
+    fun cancelSync() {
+        autoSyncJob?.cancel()
+        _syncStatus.value = SupabaseSyncStatus.Idle
+    }
+
     fun resetStatus() {
         _syncStatus.value = SupabaseSyncStatus.Idle
     }

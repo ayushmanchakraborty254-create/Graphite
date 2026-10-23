@@ -102,17 +102,8 @@ object GraphiteRepository {
 
         val currentUid = userId
 
-        // 1. Partitioned Notes: Load user or guest notes
+        // 1. Partitioned Notes: Load notes strictly for currentUid (NEVER migrate notes across accounts)
         val userNotes = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
-        val defaultNotes = userNotebooksMap["default"]
-        if (!defaultNotes.isNullOrEmpty() && currentUid != "default") {
-            val existingIds = userNotes.map { it.id }.toSet()
-            val toMigrate = defaultNotes.filter { it.id !in existingIds && !it.id.startsWith("note_") }
-            if (toMigrate.isNotEmpty()) {
-                userNotes.addAll(toMigrate.map { it.copy(userId = currentUid) })
-                defaultNotes.removeAll(toMigrate)
-            }
-        }
         for (i in userNotes.indices) {
             if (userNotes[i].folderId == "my_notes") {
                 userNotes[i] = userNotes[i].copy(folderId = "unfiled")
@@ -120,17 +111,8 @@ object GraphiteRepository {
         }
         _notebooks.value = userNotes.filter { !it.isDeleted }
 
-        // 2. Partitioned Books: Load user or guest books
+        // 2. Partitioned Books: Load books strictly for currentUid (NEVER migrate books across accounts)
         val userBooks = userBooksMap.getOrPut(currentUid) { mutableListOf() }
-        val defaultBooks = userBooksMap["default"]
-        if (!defaultBooks.isNullOrEmpty() && currentUid != "default") {
-            val existingBookIds = userBooks.map { it.id }.toSet()
-            val toMigrateBooks = defaultBooks.filter { it.id !in existingBookIds }
-            if (toMigrateBooks.isNotEmpty()) {
-                userBooks.addAll(toMigrateBooks.map { it.copy(userId = currentUid) })
-                defaultBooks.removeAll(toMigrateBooks)
-            }
-        }
         _books.value = userBooks.toList()
         cleanBookDuplicatesAndGhosts()
 
@@ -635,12 +617,17 @@ object GraphiteRepository {
      * Deterministic reconciliation of remote notes with local notes (Last-Write-Wins based on updatedAtMillis).
      * Handles new notes, edits, and tombstone deletions across devices.
      */
-    fun reconcileRemoteNotes(remoteNotes: List<NotebookItem>) {
-        val currentUid = activeUserId ?: "default"
+    fun reconcileRemoteNotes(remoteNotes: List<NotebookItem>, targetUserId: String? = null) {
+        val currentUid = targetUserId ?: activeUserId ?: return
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
         val localMap = userList.associateBy { it.id }.toMutableMap()
 
         for (remote in remoteNotes) {
+            // Strict account isolation: NEVER import/adopt a note belonging to a different user
+            if (remote.userId != null && remote.userId != currentUid && remote.userId != "default" && remote.userId != "guest") {
+                continue
+            }
+
             val local = localMap[remote.id]
             if (remote.isDeleted) {
                 // If remote note is marked deleted, remove local note and clean up any physical file
@@ -1014,26 +1001,32 @@ object GraphiteRepository {
         }
     }
 
+    fun getNotesForUser(userId: String): List<NotebookItem> {
+        return userNotebooksMap[userId]?.filter { !it.isDeleted } ?: emptyList()
+    }
+
     fun exportNotesAsJson(userId: String? = null): String {
-        val uid = userId ?: activeUserId ?: "default"
+        val uid = userId ?: activeUserId ?: return "[]"
         val userNotes = userNotebooksMap[uid] ?: emptyList()
-        val defaultNotes = if (uid != "default") (userNotebooksMap["default"]?.filter { !it.id.startsWith("note_") } ?: emptyList()) else emptyList()
-        val combinedNotes = (userNotes + defaultNotes).distinctBy { it.id }
         val arr = JSONArray()
-        for (item in combinedNotes) {
+        for (item in userNotes) {
             arr.put(notebookToJson(item))
         }
-        return arr.toString(2)
+        return try {
+            arr.toString(2) ?: arr.toString() ?: "[]"
+        } catch (_: Throwable) {
+            "[]"
+        }
     }
 
     fun importNotesFromJson(jsonString: String, userId: String? = null): Int {
-        val uid = userId ?: activeUserId ?: "default"
+        val uid = userId ?: activeUserId ?: return 0
         val arr = JSONArray(jsonString)
         val importedList = mutableListOf<NotebookItem>()
         for (i in 0 until arr.length()) {
             importedList.add(notebookFromJson(arr.getJSONObject(i)))
         }
-        reconcileRemoteNotes(importedList)
+        reconcileRemoteNotes(importedList, targetUserId = uid)
         saveToDisk()
         return importedList.size
     }

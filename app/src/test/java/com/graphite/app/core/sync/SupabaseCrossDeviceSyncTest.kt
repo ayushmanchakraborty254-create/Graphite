@@ -306,4 +306,60 @@ class SupabaseCrossDeviceSyncTest {
         val bobNotes = GraphiteRepository.notebooks.value
         assertEquals("Bob cannot see Alice's notes", 0, bobNotes.size)
     }
+
+    @Test
+    fun testSwitchAccountStrictDataIsolation() = runBlocking {
+        val aliceId = "alice@example.com"
+        val bobId = "bob@example.com"
+
+        // 1. Alice is active, creates a note
+        GraphiteRepository.setActiveUser(aliceId)
+        val aliceNote = GraphiteRepository.createNotebook("Alice Private Journal")
+        val syncManagerAlice = createSyncManagerForUser(aliceId)
+        syncManagerAlice.syncNotes()
+
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+        assertEquals("Alice Private Journal", GraphiteRepository.notebooks.value[0].title)
+
+        // 2. Simulate account switch to unauthenticated then to Bob
+        GraphiteRepository.setActiveUser(null)
+        assertEquals(0, GraphiteRepository.notebooks.value.size)
+
+        GraphiteRepository.setActiveUser(bobId)
+        assertEquals("Bob must start with 0 notes on clean switch", 0, GraphiteRepository.notebooks.value.size)
+
+        // Bob syncs with Supabase
+        val syncManagerBob = createSyncManagerForUser(bobId)
+        syncManagerBob.syncNotes()
+
+        // Bob must STILL have 0 notes (Alice's notes must never bleed into Bob)
+        assertEquals("Bob's workspace must not contain Alice's notes", 0, GraphiteRepository.notebooks.value.size)
+
+        // 3. Bob creates his own note and syncs
+        val bobNote = GraphiteRepository.createNotebook("Bob Work Notes")
+        syncManagerBob.syncNotes()
+
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+        assertEquals("Bob Work Notes", GraphiteRepository.notebooks.value[0].title)
+
+        // 4. Verify cloud table contains both distinct notes under separate user IDs
+        assertTrue(cloudTable.containsKey(aliceNote.id))
+        assertTrue(cloudTable.containsKey(bobNote.id))
+        assertEquals(aliceId, cloudTable[aliceNote.id]!!.userId)
+        assertEquals(bobId, cloudTable[bobNote.id]!!.userId)
+
+        // 5. Verify local partitions are strictly isolated
+        val aliceNotes = GraphiteRepository.getNotesForUser(aliceId)
+        assertEquals(1, aliceNotes.size)
+        assertEquals("Alice Private Journal", aliceNotes[0].title)
+
+        val bobNotes = GraphiteRepository.getNotesForUser(bobId)
+        assertEquals(1, bobNotes.size)
+        assertEquals("Bob Work Notes", bobNotes[0].title)
+
+        // 6. Switch back to Alice: Bob's note must not appear in Alice's workspace
+        GraphiteRepository.setActiveUser(aliceId)
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+        assertEquals("Alice Private Journal", GraphiteRepository.notebooks.value[0].title)
+    }
 }

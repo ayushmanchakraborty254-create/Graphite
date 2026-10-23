@@ -78,9 +78,15 @@ class SupabaseNotesRepository(
 
     suspend fun fetchNotes(): Result<List<NotebookItem>> = withContext(ioDispatcher) {
         try {
+            val session = getAuthenticatedSession()
+            val userId = authManager.currentUserId ?: session.user.id
+            if (userId.isBlank()) {
+                return@withContext Result.success(emptyList())
+            }
+
             executeWithRetry { token ->
                 Request.Builder()
-                    .url("$baseUrl/rest/v1/notebooks?select=*")
+                    .url("$baseUrl/rest/v1/notebooks?select=*&user_id=eq.$userId")
                     .header("apikey", publishableKey)
                     .header("Authorization", "Bearer $token")
                     .header("Accept", "application/json")
@@ -97,7 +103,10 @@ class SupabaseNotesRepository(
                 val dtoList = json.decodeFromString<List<SupabaseNotebookDto>>(body)
                 val context = try { com.graphite.app.GraphiteApplication.instance } catch (_: Throwable) { null }
 
-                val notebooks = dtoList.map { dto ->
+                // Strictly filter to ensure only notes belonging to the current authenticated user are processed
+                val userOnlyDtoList = dtoList.filter { it.userId == userId }
+
+                val notebooks = userOnlyDtoList.map { dto ->
                     var resolvedMimeType: String? = null
                     var resolvedFileName: String? = null
                     var resolvedPageCount = 1
@@ -385,6 +394,8 @@ class SupabaseNotesRepository(
 
     suspend fun deleteNote(notebookId: String): Result<Unit> = withContext(ioDispatcher) {
         try {
+            val session = getAuthenticatedSession()
+            val userId = authManager.currentUserId ?: session.user.id
             val now = System.currentTimeMillis()
             val patchBody = buildJsonObject {
                 put("is_deleted", true)
@@ -394,7 +405,7 @@ class SupabaseNotesRepository(
 
             executeWithRetry { token ->
                 Request.Builder()
-                    .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
+                    .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId&user_id=eq.$userId")
                     .header("apikey", publishableKey)
                     .header("Authorization", "Bearer $token")
                     .header("Content-Type", "application/json")

@@ -142,6 +142,7 @@ class GoogleAccountManager(
     }
 
     fun launchSwitchAccount(context: Context, launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
+        clearLocalSession()
         val client = GoogleSignIn.getClient(context, getGoogleSignInOptions())
         client.signOut().addOnCompleteListener {
             clearLocalSession()
@@ -187,6 +188,7 @@ class GoogleAccountManager(
             // Automatically bridge to Supabase Auth under the hood so RLS is authenticated
             if (supabaseAuthManager != null) {
                 CoroutineScope(Dispatchers.IO).launch {
+                    val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
                     if (!idToken.isNullOrBlank()) {
                         try {
                             val authResult = supabaseAuthManager.signInWithGoogleIdToken(idToken)
@@ -197,26 +199,34 @@ class GoogleAccountManager(
                                     secureStorage.putString(KEY_GOOGLE_PHOTO, session.user.avatarUrl)
                                     _currentUser.value = updatedProfile
                                 }
+                                try {
+                                    com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 0L)
+                                } catch (_: Exception) {}
                                 return@launch
                             }
                         } catch (_: Exception) {}
                     }
 
                     // Fallback to deterministic UUID based on Google email for valid UUID foreign keys
-                    val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
                     supabaseAuthManager.setSession(
                         SupabaseSession(
                             accessToken = GraphiteConfig.supabasePublishableKey,
                             user = SupabaseUser(id = deterministicUuid, email = email)
                         )
                     )
+                    try {
+                        com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 0L)
+                    } catch (_: Exception) {}
                 }
             }
 
-            // Restore any notes previously backed up to Google Drive
+            // Restore any notes previously backed up to Google Drive for this email strictly
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    com.graphite.app.GraphiteApplication.instance.googleDriveManager.restoreNotesFromDrive(com.graphite.app.GraphiteApplication.instance)
+                    com.graphite.app.GraphiteApplication.instance.googleDriveManager.restoreNotesFromDrive(
+                        context = com.graphite.app.GraphiteApplication.instance,
+                        targetEmail = email
+                    )
                 } catch (_: Exception) {
                     // Ignore restore errors on sign in
                 }
@@ -262,9 +272,16 @@ class GoogleAccountManager(
     }
 
     fun clearLocalSession() {
+        try {
+            com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.cancelSync()
+            com.graphite.app.GraphiteApplication.instance.googleDriveManager.cancelNotesSync()
+            com.graphite.app.GraphiteApplication.instance.googleDriveManager.disconnect()
+        } catch (_: Exception) {}
+
         secureStorage.remove(KEY_GOOGLE_EMAIL)
         secureStorage.remove("google_account_email")
         secureStorage.remove("google_drive_authorized_account_email")
+        secureStorage.remove(com.graphite.app.core.drive.GoogleDriveManager.KEY_DRIVE_ACCOUNT_EMAIL)
         secureStorage.remove(KEY_GOOGLE_NAME)
         secureStorage.remove(KEY_GOOGLE_PHOTO)
         secureStorage.remove(KEY_GOOGLE_ID_TOKEN)
