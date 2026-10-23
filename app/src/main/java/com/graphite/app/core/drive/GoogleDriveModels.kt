@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class DriveFolder(
     val id: String,
-    val name: String
+    val name: String,
+    val parentId: String? = null
 ) {
     companion object {
         val ROOT = DriveFolder("root", "My Drive (Root)")

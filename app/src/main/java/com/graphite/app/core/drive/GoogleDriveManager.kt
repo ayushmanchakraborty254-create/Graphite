@@ -78,7 +78,15 @@ data class DriveRemoteFile(
     val id: String,
     val name: String,
     val mimeType: String,
-    val size: Long = 0L
+    val size: Long = 0L,
+    val thumbnailLink: String? = null,
+    val parentFolderId: String? = null,
+    val parentFolderName: String? = null
+)
+
+data class CloudFolderScanResult(
+    val files: List<DriveRemoteFile>,
+    val subfolders: List<DriveFolder>
 )
 
 data class BookshelfSyncReport(
@@ -130,6 +138,24 @@ interface DriveApiV3Uploader {
         folderId: String
     ): Result<List<DriveRemoteFile>> = Result.success(emptyList())
 
+    suspend fun scanFolderRecursively(
+        accountEmail: String,
+        folderId: String,
+        maxDepth: Int = 4
+    ): Result<CloudFolderScanResult> {
+        val filesRes = listFiles(accountEmail, folderId)
+        if (filesRes.isFailure) {
+            return Result.failure(filesRes.exceptionOrNull() ?: Exception("Failed to list files in folder $folderId"))
+        }
+        return Result.success(CloudFolderScanResult(files = filesRes.getOrDefault(emptyList()), subfolders = emptyList()))
+    }
+
+    suspend fun fetchThumbnailBytes(
+        accountEmail: String,
+        fileId: String,
+        thumbnailUrl: String?
+    ): Result<ByteArray?> = Result.success(null)
+
     suspend fun downloadFile(
         accountEmail: String,
         fileId: String
@@ -164,7 +190,7 @@ class DefaultDriveApiV3Uploader(
     private val secureStorage: SecureStorage? = null
 ) : DriveApiV3Uploader {
 
-    private fun getDriveService(accountEmail: String): Drive {
+    private fun getCredential(accountEmail: String): GoogleAccountCredential {
         // Authorized scopes: drive.file for app-created files, and drive.readonly for streaming linked cloud folders
         val credential = GoogleAccountCredential.usingOAuth2(
             context,
@@ -205,11 +231,14 @@ class DefaultDriveApiV3Uploader(
 
         credential.selectedAccount = googleAccount
         credential.selectedAccountName = resolvedEmail
+        return credential
+    }
 
+    private fun getDriveService(accountEmail: String): Drive {
         return Drive.Builder(
             NetHttpTransport(),
             GsonFactory.getDefaultInstance(),
-            credential
+            getCredential(accountEmail)
         ).setApplicationName("Graphite").build()
     }
 
@@ -334,21 +363,23 @@ class DefaultDriveApiV3Uploader(
         }
     }
 
-    override suspend fun listFiles(
+    override suspend fun scanFolderRecursively(
         accountEmail: String,
-        folderId: String
-    ): Result<List<DriveRemoteFile>> = withContext(Dispatchers.IO) {
+        folderId: String,
+        maxDepth: Int
+    ): Result<CloudFolderScanResult> = withContext(Dispatchers.IO) {
         try {
             val driveService = getDriveService(accountEmail)
             val cleanFolderId = folderId.trim()
             val allFiles = mutableListOf<DriveRemoteFile>()
-            val foldersToScan = ArrayDeque<String>()
-            foldersToScan.add(cleanFolderId)
+            val allSubfolders = mutableListOf<DriveFolder>()
+            val foldersToScan = ArrayDeque<Pair<String, String>>()
+            foldersToScan.add(cleanFolderId to "")
             val scannedFolders = mutableSetOf<String>()
-            var depthRemaining = 3
+            var depthRemaining = maxDepth
 
             while (foldersToScan.isNotEmpty() && depthRemaining >= 0) {
-                val currentFolderId = foldersToScan.removeFirst()
+                val (currentFolderId, currentFolderName) = foldersToScan.removeFirst()
                 if (!scannedFolders.add(currentFolderId)) continue
 
                 val parentQuery = if (currentFolderId == "root" || currentFolderId.isBlank()) {
@@ -364,7 +395,7 @@ class DefaultDriveApiV3Uploader(
                         .setQ("$parentQuery and mimeType != 'application/vnd.google-apps.folder' and trashed = false")
                         .setSupportsAllDrives(true)
                         .setIncludeItemsFromAllDrives(true)
-                        .setFields("nextPageToken, files(id, name, mimeType, size)")
+                        .setFields("nextPageToken, files(id, name, mimeType, size, thumbnailLink)")
                         .setPageSize(100)
                     if (!pageToken.isNullOrBlank()) {
                         request.pageToken = pageToken
@@ -378,7 +409,10 @@ class DefaultDriveApiV3Uploader(
                                     id = fid,
                                     name = file.name ?: "Unnamed",
                                     mimeType = file.mimeType ?: "application/octet-stream",
-                                    size = file.getSize() ?: 0L
+                                    size = file.getSize() ?: 0L,
+                                    thumbnailLink = file.thumbnailLink,
+                                    parentFolderId = currentFolderId,
+                                    parentFolderName = currentFolderName
                                 )
                             )
                         }
@@ -386,7 +420,7 @@ class DefaultDriveApiV3Uploader(
                     pageToken = result.nextPageToken
                 } while (!pageToken.isNullOrBlank())
 
-                // 2. Discover nested subfolders so books in subfolders are also found
+                // 2. Discover nested subfolders so books in subfolders are also found and cataloged
                 if (depthRemaining > 0) {
                     try {
                         val subfolderReq = driveService.files().list()
@@ -394,22 +428,115 @@ class DefaultDriveApiV3Uploader(
                             .setSupportsAllDrives(true)
                             .setIncludeItemsFromAllDrives(true)
                             .setFields("files(id, name)")
-                            .setPageSize(50)
+                            .setPageSize(100)
                             .execute()
                         subfolderReq.files?.forEach { sf ->
-                            sf.id?.let { sid -> foldersToScan.add(sid) }
+                            val sid = sf.id
+                            val sname = sf.name ?: "Folder"
+                            if (!sid.isNullOrBlank()) {
+                                allSubfolders.add(
+                                    DriveFolder(
+                                        id = sid,
+                                        name = sname,
+                                        parentId = currentFolderId
+                                    )
+                                )
+                                foldersToScan.add(sid to sname)
+                            }
                         }
-                    } catch (_: Exception) {
-                        // Keep files found so far even if subfolder listing fails
-                    }
+                    } catch (_: Exception) {}
                 }
                 depthRemaining--
             }
 
-            Result.success(allFiles.distinctBy { it.id })
+            Result.success(
+                CloudFolderScanResult(
+                    files = allFiles.distinctBy { it.id },
+                    subfolders = allSubfolders.distinctBy { it.id }
+                )
+            )
         } catch (e: Exception) {
-            SafeLogger.e("DefaultDriveApiV3Uploader", "listFiles failed for folderId=$folderId: ${e.message}", e)
+            SafeLogger.e("DefaultDriveApiV3Uploader", "scanFolderRecursively failed for folderId=$folderId: ${e.message}", e)
             Result.failure(e)
+        }
+    }
+
+    override suspend fun listFiles(
+        accountEmail: String,
+        folderId: String
+    ): Result<List<DriveRemoteFile>> =
+        scanFolderRecursively(accountEmail, folderId).map { it.files }
+
+    override suspend fun fetchThumbnailBytes(
+        accountEmail: String,
+        fileId: String,
+        thumbnailUrl: String?
+    ): Result<ByteArray?> = withContext(Dispatchers.IO) {
+        try {
+            val cleanId = fileId.removePrefix("drive_").trim()
+            val credential = getCredential(accountEmail)
+            val thumbUrl = if (!thumbnailUrl.isNullOrBlank()) {
+                thumbnailUrl
+            } else {
+                val driveService = Drive.Builder(
+                    NetHttpTransport(),
+                    GsonFactory.getDefaultInstance(),
+                    credential
+                ).setApplicationName("Graphite").build()
+                val driveFile = driveService.files().get(cleanId)
+                    .setSupportsAllDrives(true)
+                    .setFields("id, thumbnailLink")
+                    .execute()
+                driveFile.thumbnailLink
+            }
+
+            if (thumbUrl.isNullOrBlank()) {
+                return@withContext Result.success(null)
+            }
+
+            val highResUrl = if (thumbUrl.contains("=")) {
+                thumbUrl.substringBeforeLast("=") + "=s400"
+            } else {
+                "$thumbUrl=s400"
+            }
+
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+
+            val token = try { credential.token } catch (_: Throwable) { null }
+
+            var bytes: ByteArray? = null
+            if (!token.isNullOrBlank()) {
+                try {
+                    val req = okhttp3.Request.Builder()
+                        .url(highResUrl)
+                        .header("Authorization", "Bearer $token")
+                        .build()
+                    client.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            bytes = resp.body?.bytes()
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            if (bytes == null || bytes!!.isEmpty()) {
+                try {
+                    val req = okhttp3.Request.Builder().url(highResUrl).build()
+                    client.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            bytes = resp.body?.bytes()
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            Result.success(bytes)
+        } catch (e: Exception) {
+            SafeLogger.e("DefaultDriveApiV3Uploader", "fetchThumbnailBytes failed for $fileId: ${e.message}")
+            Result.success(null)
         }
     }
 
@@ -1597,13 +1724,80 @@ class GoogleDriveManager(
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_LINKED_CLOUD_FOLDERS), encoded)
         _linkedCloudFolders.value = updated
 
+        // Clear cached subfolders
+        saveCloudSubfolders(folderId, emptyList())
+
         // Remove cloud-only books associated with this unlinked folder from repository
         val currentBooks = GraphiteRepository.books.value
         for (b in currentBooks) {
-            if (b.driveFolderId == folderId && b.filePath == null) {
+            if ((b.driveFolderId == folderId || b.rootDriveFolderId == folderId) && b.filePath == null) {
                 GraphiteRepository.deleteBook(b.id)
             }
         }
+    }
+
+    fun getCloudSubfolders(rootFolderId: String): List<DriveFolder> {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return emptyList()
+        val key = getAccountFolderKey("cloud_subfolders_${rootFolderId}")
+        val jsonStr = secureStorage.getString(key) ?: return emptyList()
+        return try {
+            Json.decodeFromString<List<DriveFolder>>(jsonStr)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveCloudSubfolders(rootFolderId: String, subfolders: List<DriveFolder>) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
+        val key = getAccountFolderKey("cloud_subfolders_${rootFolderId}")
+        val jsonStr = Json.encodeToString(subfolders)
+        secureStorage.putString(key, jsonStr)
+    }
+
+    suspend fun fetchAndCacheCover(
+        context: Context,
+        book: Book
+    ): String? = withContext(ioDispatcher) {
+        val fileId = book.driveFileId ?: return@withContext null
+        val coversDir = File(context.filesDir, "covers").apply { mkdirs() }
+        val coverFile = File(coversDir, "drive_${fileId}.jpg")
+        if (coverFile.exists() && coverFile.length() > 0) {
+            return@withContext coverFile.absolutePath
+        }
+
+        // Check if cached stream PDF exists to extract page 0
+        val cachedStreamPdf = File(context.cacheDir, "stream_${fileId}.pdf")
+        if (cachedStreamPdf.exists() && cachedStreamPdf.length() > 0) {
+            val bmp = com.graphite.app.core.importer.PdfThumbnailHelper.getOrRenderThumbnail(
+                context, cachedStreamPdf.absolutePath, 320
+            )
+            if (bmp != null) {
+                try {
+                    java.io.FileOutputStream(coverFile).use { fos ->
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, fos)
+                    }
+                    if (coverFile.exists() && coverFile.length() > 0) {
+                        GraphiteRepository.addBook(book.copy(coverImagePath = coverFile.absolutePath))
+                        return@withContext coverFile.absolutePath
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        val accountEmail = getResolvedAccountEmail(context) ?: return@withContext null
+        try {
+            val uploader = uploaderProvider(context)
+            val bytesResult = uploader.fetchThumbnailBytes(accountEmail, fileId, null)
+            val bytes = bytesResult.getOrNull()
+            if (bytes != null && bytes.isNotEmpty()) {
+                coverFile.writeBytes(bytes)
+                GraphiteRepository.addBook(book.copy(coverImagePath = coverFile.absolutePath))
+                return@withContext coverFile.absolutePath
+            }
+        } catch (_: Exception) {}
+        null
     }
 
     suspend fun importDriveCloudFolder(
@@ -1625,27 +1819,33 @@ class GoogleDriveManager(
                 folder.id
             }
 
-            var filesResult = uploader.listFiles(accountEmail, targetFolderId)
+            var scanResult = uploader.scanFolderRecursively(accountEmail, targetFolderId)
             // If primary folder ID returned 0 files or failed, attempt name resolution as fallback
-            if (filesResult.isFailure || filesResult.getOrDefault(emptyList()).isEmpty()) {
+            if (scanResult.isFailure || scanResult.getOrDefault(CloudFolderScanResult(emptyList(), emptyList())).files.isEmpty()) {
                 val resolved = uploader.findFolderByName(accountEmail, folder.name).getOrNull()
                 if (resolved != null && resolved.id != targetFolderId) {
                     targetFolderId = resolved.id
-                    filesResult = uploader.listFiles(accountEmail, targetFolderId)
+                    scanResult = uploader.scanFolderRecursively(accountEmail, targetFolderId)
                 }
             }
 
-            if (filesResult.isFailure) {
-                val err = filesResult.exceptionOrNull()
-                SafeLogger.e(TAG, "Failed to list files in cloud folder '${folder.name}' ($targetFolderId): ${err?.message}", err)
+            if (scanResult.isFailure) {
+                val err = scanResult.exceptionOrNull()
+                SafeLogger.e(TAG, "Failed to scan cloud folder '${folder.name}' ($targetFolderId): ${err?.message}", err)
                 return@withContext Result.failure(err ?: IllegalStateException("Could not access files in Drive folder \"${folder.name}\""))
             }
 
-            val files = filesResult.getOrDefault(emptyList())
+            val scanData = scanResult.getOrDefault(CloudFolderScanResult(emptyList(), emptyList()))
+            val files = scanData.files
+            val subfolders = scanData.subfolders
+
+            // Persist the subfolder hierarchy for this linked cloud folder
+            saveCloudSubfolders(folder.id, subfolders)
 
             var count = 0
             val localBooks = GraphiteRepository.books.value
             val activeTwoWayId = _activeBookshelfFolder.value?.id
+            val coversDir = File(context.filesDir, "covers").apply { mkdirs() }
 
             for (remoteFile in files) {
                 val cleanName = remoteFile.name
@@ -1657,20 +1857,38 @@ class GoogleDriveManager(
                 if (cleanName.equals("graphite_notes_backup.json", ignoreCase = true) || cleanName.startsWith(".graphite")) continue
 
                 val normalizedRemote = GraphiteRepository.normalizeBookTitle(cleanName)
+                val immediateFolderId = remoteFile.parentFolderId ?: folder.id
+                val immediateFolderName = remoteFile.parentFolderName?.takeIf { it.isNotBlank() } ?: folder.name
+
+                // Try to cache thumbnail if available
+                val coverFile = File(coversDir, "drive_${remoteFile.id}.jpg")
+                var coverPath = if (coverFile.exists() && coverFile.length() > 0) coverFile.absolutePath else null
+                if (coverPath == null && !remoteFile.thumbnailLink.isNullOrBlank()) {
+                    try {
+                        val thumbBytes = uploader.fetchThumbnailBytes(accountEmail, remoteFile.id, remoteFile.thumbnailLink).getOrNull()
+                        if (thumbBytes != null && thumbBytes.isNotEmpty()) {
+                            coverFile.writeBytes(thumbBytes)
+                            coverPath = coverFile.absolutePath
+                        }
+                    } catch (_: Exception) {}
+                }
+
                 val existing = localBooks.find { b ->
                     b.driveFileId == remoteFile.id ||
                             b.id == "drive_${remoteFile.id}" ||
-                            (GraphiteRepository.normalizeBookTitle(b.title) == normalizedRemote && b.driveFolderId == folder.id)
+                            (GraphiteRepository.normalizeBookTitle(b.title) == normalizedRemote &&
+                                    (b.driveFolderId == immediateFolderId || b.driveFolderId == folder.id || b.rootDriveFolderId == folder.id))
                 }
 
                 if (existing != null) {
-                    // Do NOT re-tag books that belong to 2-way sync into cloud folders
                     val isTwoWayBook = (activeTwoWayId != null && existing.driveFolderId == activeTwoWayId) || (!existing.isCloudOnly && existing.driveFolderId == null)
                     if (!isTwoWayBook) {
                         val updated = existing.copy(
-                            driveFolderId = folder.id,
-                            driveFolderName = folder.name,
-                            driveFileId = remoteFile.id
+                            driveFolderId = immediateFolderId,
+                            driveFolderName = immediateFolderName,
+                            driveFileId = remoteFile.id,
+                            rootDriveFolderId = folder.id,
+                            coverImagePath = coverPath ?: existing.coverImagePath
                         )
                         GraphiteRepository.addBook(updated)
                         count++
@@ -1682,7 +1900,7 @@ class GoogleDriveManager(
                     val cloudBook = Book(
                         id = "drive_${remoteFile.id}",
                         title = displayTitle,
-                        author = folder.name,
+                        author = immediateFolderName,
                         progressPercent = 0,
                         coverType = BookCoverType.CUSTOM,
                         totalChapters = 1,
@@ -1691,8 +1909,10 @@ class GoogleDriveManager(
                         filePath = null, // Cloud-only, zero permanent local storage!
                         mimeType = "application/pdf",
                         driveFileId = remoteFile.id,
-                        driveFolderId = folder.id,
-                        driveFolderName = folder.name
+                        driveFolderId = immediateFolderId,
+                        driveFolderName = immediateFolderName,
+                        rootDriveFolderId = folder.id,
+                        coverImagePath = coverPath
                     )
                     GraphiteRepository.addBook(cloudBook)
                     count++

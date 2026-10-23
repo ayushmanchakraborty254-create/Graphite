@@ -44,8 +44,41 @@ fun BookCover(
     book: Book,
     modifier: Modifier = Modifier
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val isPdf = book.mimeType.equals("application/pdf", ignoreCase = true) ||
-            book.filePath?.endsWith(".pdf", ignoreCase = true) == true
+            book.filePath?.endsWith(".pdf", ignoreCase = true) == true ||
+            book.isCloudOnly
+
+    // 1. Resolve cached cover file (from book.coverImagePath or context.filesDir/covers/drive_${fileId}.jpg)
+    var resolvedCoverPath by remember(book.id, book.coverImagePath, book.driveFileId) {
+        val path = book.coverImagePath?.takeIf { File(it).let { f -> f.exists() && f.length() > 0 } }
+            ?: book.driveFileId?.let { fid ->
+                val f = File(File(context.filesDir, "covers"), "drive_${fid}.jpg")
+                if (f.exists() && f.length() > 0) f.absolutePath else null
+            }
+        mutableStateOf(path)
+    }
+
+    // 2. Check if a cached streamed PDF exists for this cloud book
+    val cachedStreamPdfPath = remember(book.driveFileId) {
+        if (!book.driveFileId.isNullOrBlank()) {
+            val f = File(context.cacheDir, "stream_${book.driveFileId}.pdf")
+            if (f.exists() && f.length() > 0) f.absolutePath else null
+        } else null
+    }
+
+    // 3. Asynchronous on-demand cover fetch for cloud books if not yet cached
+    LaunchedEffect(book.driveFileId, resolvedCoverPath) {
+        if (resolvedCoverPath == null && !book.driveFileId.isNullOrBlank()) {
+            try {
+                val driveManager = com.graphite.app.GraphiteApplication.instance.googleDriveManager
+                val fetched = driveManager.fetchAndCacheCover(context, book)
+                if (!fetched.isNullOrBlank()) {
+                    resolvedCoverPath = fetched
+                }
+            } catch (_: Exception) {}
+        }
+    }
 
     Box(
         modifier = modifier
@@ -53,16 +86,37 @@ fun BookCover(
             .clip(RoundedCornerShape(6.dp))
             .border(1.dp, Color(0xFF2E2E2E), RoundedCornerShape(6.dp))
     ) {
-        if (isPdf && !book.filePath.isNullOrBlank()) {
-            // First page of the PDF rendered as the cover page
+        val currentCover = resolvedCoverPath
+        if (currentCover != null) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                CoverImageView(filePath = currentCover, fallbackTitle = book.title)
+                if (isPdf) {
+                    Box(
+                        modifier = Modifier
+                            .padding(5.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color(0xFFD32F2F).copy(alpha = 0.90f))
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                            .align(Alignment.TopStart)
+                    ) {
+                        Text(
+                            text = if (book.isCloudOnly) "CLOUD" else "PDF",
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        } else if (isPdf && (!book.filePath.isNullOrBlank() || cachedStreamPdfPath != null)) {
+            val pdfPath = book.filePath ?: cachedStreamPdfPath!!
             Box(modifier = Modifier.fillMaxSize()) {
                 PdfPageThumbnail(
-                    filePath = book.filePath,
+                    filePath = pdfPath,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
                     targetWidth = 320
                 )
-                // Subtle badge indicating PDF document at top left
                 Box(
                     modifier = Modifier
                         .padding(5.dp)
@@ -72,7 +126,7 @@ fun BookCover(
                         .align(Alignment.TopStart)
                 ) {
                     Text(
-                        text = "PDF",
+                        text = if (book.isCloudOnly) "CLOUD" else "PDF",
                         color = Color.White,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Bold
@@ -80,10 +134,8 @@ fun BookCover(
                 }
             }
         } else if (!book.filePath.isNullOrBlank() && isImageFile(book.filePath)) {
-            // Book cover image file
             CoverImageView(filePath = book.filePath, fallbackTitle = book.title)
         } else {
-            // Standard book artwork (Treasure Island, CE PPT, or textured book styling)
             StandardBookCoverLayout(
                 coverType = book.coverType,
                 title = book.title,

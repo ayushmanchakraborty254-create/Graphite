@@ -2,9 +2,12 @@ package com.graphite.app.feature.reader.screens
 
 import android.app.Activity
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import com.google.android.gms.auth.api.identity.Identity
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -101,6 +104,7 @@ fun BookshelfScreen(
     val activeDriveFolder by driveManager.activeBookshelfFolder.collectAsState()
     val linkedCloudFolders by driveManager.linkedCloudFolders.collectAsState()
     var isSyncingCloudFolder by remember { mutableStateOf(false) }
+    var currentCloudSubfolderId by remember(selectedCategory) { mutableStateOf<String?>(null) }
 
     val syncCloudFolder: (DriveFolder) -> Unit = { folder ->
         isSyncingCloudFolder = true
@@ -338,7 +342,7 @@ fun BookshelfScreen(
                                 selectedCategory.startsWith("☁ ") -> {
                                     val folderName = selectedCategory.removePrefix("☁ ")
                                     val folder = linkedCloudFolders.find { it.name.equals(folderName, ignoreCase = true) }
-                                    book.driveFolderId == folder?.id || (book.driveFolderName != null && book.driveFolderName.equals(folderName, ignoreCase = true))
+                                    book.rootDriveFolderId == folder?.id || book.driveFolderId == folder?.id || (book.driveFolderName != null && book.driveFolderName.equals(folderName, ignoreCase = true))
                                 }
                                 else -> true
                             }
@@ -640,7 +644,7 @@ fun BookshelfScreen(
                         item(key = "cloud_${folder.id}") {
                             val catName = "☁ ${folder.name}"
                             val isSelected = selectedCategory == catName
-                            val count = books.count { it.driveFolderId == folder.id }
+                            val count = books.count { it.driveFolderId == folder.id || it.rootDriveFolderId == folder.id }
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
                                 color = if (isSelected) Color(0xFF142436) else Color(0xFF121A24),
@@ -710,6 +714,38 @@ fun BookshelfScreen(
                 linkedCloudFolders.find { it.name.equals(fName, ignoreCase = true) }
             } else null
 
+            val allCloudSubfolders = remember(activeCloudFolder?.id, books) {
+                if (activeCloudFolder != null) driveManager.getCloudSubfolders(activeCloudFolder.id) else emptyList()
+            }
+            val subfolderMap = remember(allCloudSubfolders) {
+                allCloudSubfolders.associateBy { it.id }
+            }
+            val subfolderIds = remember(allCloudSubfolders) {
+                allCloudSubfolders.map { it.id }.toSet()
+            }
+            val currentSubfolder = currentCloudSubfolderId?.let { subfolderMap[it] }
+
+            // Handle system back button when inside a subfolder
+            BackHandler(enabled = activeCloudFolder != null && currentCloudSubfolderId != null) {
+                val parent = currentSubfolder?.parentId
+                currentCloudSubfolderId = if (parent == null || parent == activeCloudFolder?.id || parent == "root") {
+                    null
+                } else {
+                    parent
+                }
+            }
+
+            // Visible subfolders at current navigation level
+            val visibleSubfolders = remember(activeCloudFolder?.id, currentCloudSubfolderId, allCloudSubfolders, searchQuery) {
+                if (activeCloudFolder == null || searchQuery.isNotBlank()) {
+                    emptyList()
+                } else if (currentCloudSubfolderId == null) {
+                    allCloudSubfolders.filter { it.parentId == activeCloudFolder.id || it.parentId == null || it.parentId == "root" }
+                } else {
+                    allCloudSubfolders.filter { it.parentId == currentCloudSubfolderId }
+                }
+            }
+
             if (activeCloudFolder != null) {
                 Surface(
                     color = Color(0xFF0F1E2E),
@@ -774,6 +810,56 @@ fun BookshelfScreen(
                         }
                     }
                 }
+
+                // Breadcrumb Navigation Bar when inside a subfolder
+                if (currentCloudSubfolderId != null) {
+                    Surface(
+                        color = Color(0xFF101C2B),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFF1E3A5F)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp, bottom = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    val parent = currentSubfolder?.parentId
+                                    currentCloudSubfolderId = if (parent == null || parent == activeCloudFolder.id || parent == "root") {
+                                        null
+                                    } else {
+                                        parent
+                                    }
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back",
+                                    tint = Color(0xFF64B5F6),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "☁ ${activeCloudFolder.name}",
+                                color = Color(0xFF90CAF9),
+                                fontSize = 12.sp,
+                                modifier = Modifier.clickable { currentCloudSubfolderId = null }
+                            )
+                            Text("  ›  ", color = Color.Gray, fontSize = 12.sp)
+                            Text(
+                                text = currentSubfolder?.name ?: "Subfolder",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
 
             // Filter & Sort
@@ -789,9 +875,21 @@ fun BookshelfScreen(
                                 !book.isCloudOnly
                     }
                     selectedCategory.startsWith("☁ ") -> {
-                        val folderName = selectedCategory.removePrefix("☁ ")
-                        val folder = linkedCloudFolders.find { it.name.equals(folderName, ignoreCase = true) }
-                        book.driveFolderId == folder?.id || (book.driveFolderName != null && book.driveFolderName.equals(folderName, ignoreCase = true))
+                        val folder = activeCloudFolder
+                        val belongsToThisCloud = folder != null && (
+                            book.rootDriveFolderId == folder.id ||
+                            book.driveFolderId == folder.id ||
+                            (book.driveFolderName != null && book.driveFolderName.equals(folder.name, ignoreCase = true))
+                        )
+                        if (!belongsToThisCloud) {
+                            false
+                        } else if (searchQuery.isNotBlank()) {
+                            true
+                        } else if (currentCloudSubfolderId == null) {
+                            book.driveFolderId == folder!!.id || book.driveFolderId == null || book.driveFolderId !in subfolderIds
+                        } else {
+                            book.driveFolderId == currentCloudSubfolderId
+                        }
                     }
                     else -> true
                 }
@@ -810,15 +908,24 @@ fun BookshelfScreen(
                 }
             }
 
+            val itemsCountText = when {
+                visibleSubfolders.isNotEmpty() && filteredBooks.isNotEmpty() ->
+                    "${visibleSubfolders.size} Folders, ${filteredBooks.size} Books"
+                visibleSubfolders.isNotEmpty() ->
+                    "${visibleSubfolders.size} Folders"
+                else ->
+                    "${filteredBooks.size} Books"
+            }
+
             Text(
-                text = "${filteredBooks.size} Books",
+                text = itemsCountText,
                 color = Color(0xFF757575),
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
             )
 
             // Bookshelf List or Grid
-            if (filteredBooks.isEmpty()) {
+            if (filteredBooks.isEmpty() && visibleSubfolders.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -938,7 +1045,15 @@ fun BookshelfScreen(
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         contentPadding = PaddingValues(bottom = 88.dp)
                     ) {
-                        items(filteredBooks) { book ->
+                        items(visibleSubfolders, key = { "sub_${it.id}" }) { subfolder ->
+                            val subCount = books.count { it.driveFolderId == subfolder.id }
+                            CloudSubfolderGridCard(
+                                folder = subfolder,
+                                bookCount = subCount,
+                                onClick = { currentCloudSubfolderId = subfolder.id }
+                            )
+                        }
+                        items(filteredBooks, key = { it.id }) { book ->
                             BookshelfItemGridCard(
                                 book = book,
                                 isSelected = book.id in selectedBookIds,
@@ -988,7 +1103,15 @@ fun BookshelfScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                         contentPadding = PaddingValues(bottom = 88.dp)
                     ) {
-                        items(filteredBooks) { book ->
+                        items(visibleSubfolders, key = { "sub_${it.id}" }) { subfolder ->
+                            val subCount = books.count { it.driveFolderId == subfolder.id }
+                            CloudSubfolderRow(
+                                folder = subfolder,
+                                bookCount = subCount,
+                                onClick = { currentCloudSubfolderId = subfolder.id }
+                            )
+                        }
+                        items(filteredBooks, key = { it.id }) { book ->
                             BookshelfItemRow(
                                 book = book,
                                 isSelected = book.id in selectedBookIds,
@@ -2292,4 +2415,144 @@ private fun ImportBookDialog(
         },
         containerColor = GraphiteSurfaceVariant
     )
+}
+
+@Composable
+private fun CloudSubfolderGridCard(
+    folder: DriveFolder,
+    bookCount: Int,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF132235),
+        border = BorderStroke(1.dp, Color(0xFF233E5E)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Surface(
+                    color = Color(0xFF1E3A5F).copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = "Folder",
+                        color = Color(0xFF90CAF9),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF1E3A5F)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = null,
+                    tint = Color(0xFF64B5F6),
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = folder.name,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (bookCount == 1) "1 book" else "$bookCount books",
+                    color = Color(0xFF90CAF9),
+                    fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloudSubfolderRow(
+    folder: DriveFolder,
+    bookCount: Int,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF132235),
+        border = BorderStroke(1.dp, Color(0xFF233E5E)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF1E3A5F)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = Color(0xFF64B5F6),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column {
+                    Text(
+                        text = folder.name,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (bookCount == 1) "1 book" else "$bookCount books",
+                        color = Color(0xFF90CAF9),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
+                tint = Color(0xFF64B5F6),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
 }

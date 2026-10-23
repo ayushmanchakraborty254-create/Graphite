@@ -310,7 +310,9 @@ object GraphiteRepository {
                 driveFolderName = scopedBook.driveFolderName ?: existing.driveFolderName,
                 mimeType = if (scopedBook.mimeType.isNotBlank()) scopedBook.mimeType else existing.mimeType,
                 content = if (scopedBook.content.isNotBlank()) scopedBook.content else existing.content,
-                totalChapters = if (scopedBook.totalChapters > 1) scopedBook.totalChapters else existing.totalChapters
+                totalChapters = if (scopedBook.totalChapters > 1) scopedBook.totalChapters else existing.totalChapters,
+                coverImagePath = scopedBook.coverImagePath ?: existing.coverImagePath,
+                rootDriveFolderId = scopedBook.rootDriveFolderId ?: existing.rootDriveFolderId
             )
             userBookList[existingIndex] = updated
             resultingBook = updated
@@ -1271,6 +1273,8 @@ object GraphiteRepository {
             put("userId", book.userId)
             book.driveFolderId?.let { put("driveFolderId", it) }
             book.driveFolderName?.let { put("driveFolderName", it) }
+            book.coverImagePath?.let { put("coverImagePath", it) }
+            book.rootDriveFolderId?.let { put("rootDriveFolderId", it) }
         }
     }
 
@@ -1292,7 +1296,9 @@ object GraphiteRepository {
             driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null,
             userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null,
             driveFolderId = if (json.has("driveFolderId") && !json.isNull("driveFolderId")) json.getString("driveFolderId") else null,
-            driveFolderName = if (json.has("driveFolderName") && !json.isNull("driveFolderName")) json.getString("driveFolderName") else null
+            driveFolderName = if (json.has("driveFolderName") && !json.isNull("driveFolderName")) json.getString("driveFolderName") else null,
+            coverImagePath = if (json.has("coverImagePath") && !json.isNull("coverImagePath")) json.getString("coverImagePath") else null,
+            rootDriveFolderId = if (json.has("rootDriveFolderId") && !json.isNull("rootDriveFolderId")) json.getString("rootDriveFolderId") else null
         )
     }
 }

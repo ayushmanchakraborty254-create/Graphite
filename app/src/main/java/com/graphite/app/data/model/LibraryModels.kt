@@ -21,7 +21,9 @@ data class Book(
     val driveFileId: String? = null,
     val userId: String? = null,
     val driveFolderId: String? = null,
-    val driveFolderName: String? = null
+    val driveFolderName: String? = null,
+    val coverImagePath: String? = null,
+    val rootDriveFolderId: String? = null
 ) {
     val isCloudOnly: Boolean get() = filePath == null && !driveFileId.isNullOrBlank()
 }
