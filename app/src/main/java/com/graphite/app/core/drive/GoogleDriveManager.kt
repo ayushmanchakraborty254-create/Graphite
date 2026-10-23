@@ -659,14 +659,24 @@ class GoogleDriveManager(
         refreshBookshelfFolders()
     }
 
+    fun clearAccountFolderState() {
+        _activeBookshelfFolder.value = null
+        _linkedCloudFolders.value = emptyList()
+        _curatedBookshelfFolders.value = emptyList()
+        _defaultBookshelfFolder.value = null
+        _uploadState.value = DriveUploadState.Idle
+        _authStatus.value = DriveAuthStatus.NotAuthorized
+    }
+
     /**
-     * Revokes local Drive authorization state.
+     * Revokes local Drive authorization state and clears all loaded folder flows.
      */
     fun disconnect() {
         secureStorage.remove(KEY_DRIVE_ACCOUNT_EMAIL)
         secureStorage.remove("google_drive_authorized_account_email")
-        _authStatus.value = DriveAuthStatus.NotAuthorized
-        _uploadState.value = DriveUploadState.Idle
+        secureStorage.remove("google_user_email")
+        secureStorage.remove("google_account_email")
+        clearAccountFolderState()
         refreshBookshelfFolders()
     }
 
@@ -1335,11 +1345,16 @@ class GoogleDriveManager(
 
 
     private fun getAccountFolderKey(baseKey: String): String {
-        val email = getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() } ?: "guest"
+        val email = getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() } ?: "anonymous"
         return "${baseKey}_$email"
     }
 
     fun refreshBookshelfFolders() {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) {
+            clearAccountFolderState()
+            return
+        }
         _curatedBookshelfFolders.value = getCuratedBookshelfFolders()
         _defaultBookshelfFolder.value = getDefaultBookshelfFolder()
         _activeBookshelfFolder.value = getBookshelfSyncedFolder()
@@ -1347,6 +1362,8 @@ class GoogleDriveManager(
     }
 
     fun getDefaultBookshelfFolder(): DriveFolder? {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return null
         val id = secureStorage.getString(getAccountFolderKey(KEY_BOOKSHELF_DEFAULT_FOLDER_ID))
         val name = secureStorage.getString(getAccountFolderKey(KEY_BOOKSHELF_DEFAULT_FOLDER_NAME))
         return if (!id.isNullOrBlank() && !name.isNullOrBlank()) {
@@ -1357,6 +1374,8 @@ class GoogleDriveManager(
     }
 
     fun setDefaultBookshelfFolder(folder: DriveFolder) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_DEFAULT_FOLDER_ID), folder.id)
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_DEFAULT_FOLDER_NAME), folder.name)
         _defaultBookshelfFolder.value = folder
@@ -1402,6 +1421,8 @@ class GoogleDriveManager(
     }
 
     fun addCuratedBookshelfFolder(folder: DriveFolder) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
         if (folder.id == "default_graphite_bookshelf" || folder.name.equals("Graphite Bookshelf", ignoreCase = true)) {
             return
         }
@@ -1418,6 +1439,8 @@ class GoogleDriveManager(
     }
 
     fun removeCuratedBookshelfFolder(folderId: String) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
         val updated = getCuratedBookshelfFolders().filterNot { it.id == folderId }
         val encoded = Json.encodeToString(updated)
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_CURATED_FOLDERS), encoded)
@@ -1431,6 +1454,8 @@ class GoogleDriveManager(
     }
 
     fun getBookshelfSyncedFolder(): DriveFolder? {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return null
         val folderId = secureStorage.getString(getAccountFolderKey(KEY_BOOKSHELF_SYNC_FOLDER_ID))
         val folderName = secureStorage.getString(getAccountFolderKey(KEY_BOOKSHELF_SYNC_FOLDER_NAME))
         return if (!folderId.isNullOrBlank() && !folderName.isNullOrBlank() && folderId != "default_graphite_bookshelf") {
@@ -1441,6 +1466,8 @@ class GoogleDriveManager(
     }
 
     fun setBookshelfSyncedFolder(folder: DriveFolder?) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank() && folder != null) return
         if (folder != null) {
             if (folder.id == "default_graphite_bookshelf" || folder.name.equals("Graphite Bookshelf", ignoreCase = true)) {
                 return
@@ -1545,6 +1572,8 @@ class GoogleDriveManager(
     }
 
     fun addLinkedCloudFolder(folder: DriveFolder) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
         if (folder.id == "default_graphite_bookshelf" || folder.name.equals("Graphite Bookshelf", ignoreCase = true)) {
             return
         }
@@ -1561,6 +1590,8 @@ class GoogleDriveManager(
     }
 
     fun removeLinkedCloudFolder(folderId: String) {
+        val email = getAuthorizedAccountEmail()
+        if (email.isNullOrBlank()) return
         val updated = getLinkedCloudFolders().filterNot { it.id == folderId }
         val encoded = Json.encodeToString(updated)
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_LINKED_CLOUD_FOLDERS), encoded)

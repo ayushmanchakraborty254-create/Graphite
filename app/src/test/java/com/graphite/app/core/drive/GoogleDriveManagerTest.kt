@@ -1132,4 +1132,65 @@ class GoogleDriveManagerTest {
         assertTrue("Failure must be propagated to caller, never swallowed as 0", result.isFailure)
         assertTrue(result.exceptionOrNull()?.message?.contains("Forbidden") == true || result.exceptionOrNull()?.message?.contains("permission denied") == true)
     }
+
+    @Test
+    fun testBookshelfFolderIsolationOnAccountSwitch() {
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        // 1. Alice signs in and sets up 2-Way sync folder and linked cloud folder
+        manager.saveAuthorizedAccount("alice@example.com")
+        val aliceFolder = DriveFolder("alice_folder_id", "Adventures Of Tintin")
+        val aliceCloudFolder = DriveFolder("alice_cloud_id", "Tintin Comics")
+        manager.setBookshelfSyncedFolder(aliceFolder)
+        manager.addLinkedCloudFolder(aliceCloudFolder)
+
+        assertEquals("Adventures Of Tintin", manager.activeBookshelfFolder.value?.name)
+        assertEquals(1, manager.linkedCloudFolders.value.size)
+        assertEquals("Tintin Comics", manager.linkedCloudFolders.value[0].name)
+
+        // 2. Disconnect / Sign out
+        manager.disconnect()
+        assertNull("activeBookshelfFolder must be null after disconnect", manager.activeBookshelfFolder.value)
+        assertTrue("linkedCloudFolders must be empty after disconnect", manager.linkedCloudFolders.value.isEmpty())
+        assertTrue("curatedBookshelfFolders must be empty after disconnect", manager.curatedBookshelfFolders.value.isEmpty())
+
+        // 3. Bob signs in (Account Switch)
+        manager.saveAuthorizedAccount("bob@example.com")
+        assertNull("Bob must NOT see Alice's 2-way sync folder", manager.activeBookshelfFolder.value)
+        assertTrue("Bob must NOT see Alice's linked cloud folders", manager.linkedCloudFolders.value.isEmpty())
+
+        // Bob sets his own folder
+        val bobFolder = DriveFolder("bob_folder_id", "Bob SciFi Books")
+        manager.setBookshelfSyncedFolder(bobFolder)
+        assertEquals("Bob SciFi Books", manager.activeBookshelfFolder.value?.name)
+
+        // 4. Switch back to Alice
+        manager.saveAuthorizedAccount("alice@example.com")
+        assertEquals("Alice's sync folder must be restored on account switch", "Adventures Of Tintin", manager.activeBookshelfFolder.value?.name)
+        assertEquals(1, manager.linkedCloudFolders.value.size)
+        assertEquals("Tintin Comics", manager.linkedCloudFolders.value[0].name)
+    }
+
+    @Test
+    fun testBookshelfFolderReturnsNullWhenUnauthenticatedOrGuest() {
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        // No account authorized
+        assertNull(manager.getBookshelfSyncedFolder())
+        assertNull(manager.getDefaultBookshelfFolder())
+        assertTrue(manager.getCuratedBookshelfFolders().isEmpty())
+        assertTrue(manager.getLinkedCloudFolders().isEmpty())
+
+        // Attempting to set or add folder when unauthenticated is ignored
+        manager.setBookshelfSyncedFolder(DriveFolder("fake_id", "Fake"))
+        manager.addLinkedCloudFolder(DriveFolder("fake_cloud", "Fake Cloud"))
+        assertNull(manager.activeBookshelfFolder.value)
+        assertTrue(manager.linkedCloudFolders.value.isEmpty())
+    }
 }

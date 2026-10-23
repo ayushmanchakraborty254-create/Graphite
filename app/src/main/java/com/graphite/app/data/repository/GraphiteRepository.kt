@@ -97,6 +97,9 @@ object GraphiteRepository {
             _stats.update {
                 it.copy(notesCount = 0, totalBooks = 0)
             }
+            try {
+                com.graphite.app.GraphiteApplication.instance.googleDriveManager.clearAccountFolderState()
+            } catch (_: Throwable) {}
             return
         }
 

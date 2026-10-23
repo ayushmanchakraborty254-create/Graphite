@@ -91,6 +91,7 @@ class GoogleAccountManager(
     fun hasActiveSession(): Boolean = _currentUser.value != null || _isGuestMode.value
 
     fun enableGuestMode() {
+        clearLocalSession()
         secureStorage.putBoolean("is_guest_mode", true)
         _isGuestMode.value = true
         _currentUser.value = null
@@ -101,6 +102,9 @@ class GoogleAccountManager(
         secureStorage.putBoolean("is_guest_mode", false)
         _isGuestMode.value = false
         graphiteRepository.setActiveUser(null)
+        try {
+            com.graphite.app.GraphiteApplication.instance.googleDriveManager.disconnect()
+        } catch (_: Throwable) {}
     }
 
     private fun restoreFromStorage() {
@@ -152,8 +156,7 @@ class GoogleAccountManager(
             .requestEmail()
             .requestProfile()
             .requestScopes(
-                com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_FILE),
-                com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_READONLY)
+                com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_FILE)
             )
             .build()
     }
@@ -310,7 +313,6 @@ class GoogleAccountManager(
         try {
             com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.cancelSync()
             com.graphite.app.GraphiteApplication.instance.googleDriveManager.cancelNotesSync()
-            com.graphite.app.GraphiteApplication.instance.googleDriveManager.disconnect()
         } catch (_: Exception) {}
 
         secureStorage.remove(KEY_GOOGLE_EMAIL)
@@ -325,6 +327,10 @@ class GoogleAccountManager(
         _isGuestMode.value = false
         supabaseAuthManager?.clearSession()
         graphiteRepository.setActiveUser(null)
+
+        try {
+            com.graphite.app.GraphiteApplication.instance.googleDriveManager.disconnect()
+        } catch (_: Exception) {}
     }
 
     companion object {

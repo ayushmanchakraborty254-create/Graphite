@@ -131,6 +131,7 @@ fun BookshelfScreen(
     LaunchedEffect(googleUser?.email, isGuestMode) {
         selectedCategory = "All Books"
         selectedBookIds = emptySet()
+        driveManager.refreshBookshelfFolders()
     }
 
     val fileImportLauncher = rememberLauncherForActivityResult(
@@ -276,10 +277,12 @@ fun BookshelfScreen(
     }
 
     val standardCategories = listOf("All Books", "Favorites", "Unread", "Completed")
-    val categories = remember(activeDriveFolder, linkedCloudFolders) {
+    val categories = remember(googleUser, activeDriveFolder, linkedCloudFolders) {
         val list = standardCategories.toMutableList()
-        activeDriveFolder?.let { list.add("🔄 ${it.name}") }
-        linkedCloudFolders.forEach { list.add("☁ ${it.name}") }
+        if (googleUser != null) {
+            activeDriveFolder?.let { list.add("🔄 ${it.name}") }
+            linkedCloudFolders.forEach { list.add("☁ ${it.name}") }
+        }
         list
     }
 
@@ -557,8 +560,8 @@ fun BookshelfScreen(
                 )
             )
 
-            // Interactive Drive Folder Chips (when user has 2-way sync folder or linked cloud folders)
-            if (activeDriveFolder != null || linkedCloudFolders.isNotEmpty()) {
+            // Interactive Drive Folder Chips (when user has signed-in Google account and 2-way sync folder or linked cloud folders)
+            if (googleUser != null && (activeDriveFolder != null || linkedCloudFolders.isNotEmpty())) {
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -702,7 +705,7 @@ fun BookshelfScreen(
                 }
             }
 
-            val activeCloudFolder = if (selectedCategory.startsWith("☁ ")) {
+            val activeCloudFolder = if (googleUser != null && selectedCategory.startsWith("☁ ")) {
                 val fName = selectedCategory.removePrefix("☁ ")
                 linkedCloudFolders.find { it.name.equals(fName, ignoreCase = true) }
             } else null
@@ -822,7 +825,7 @@ fun BookshelfScreen(
                         .padding(bottom = 88.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (activeCloudFolder != null) {
+                    if (googleUser != null && activeCloudFolder != null) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center,

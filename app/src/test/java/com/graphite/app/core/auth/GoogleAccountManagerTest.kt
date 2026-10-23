@@ -1,5 +1,6 @@
 package com.graphite.app.core.auth
 
+import com.graphite.app.core.config.GraphiteConfig
 import com.graphite.app.core.security.InMemorySecureStorage
 import com.graphite.app.core.supabase.SupabaseAuthManager
 import kotlinx.coroutines.Dispatchers
@@ -207,5 +208,23 @@ class GoogleAccountManagerTest {
             userMetadata = emptyMap()
         )
         assertNull(userWithoutAvatar.avatarUrl)
+    }
+
+    @Test
+    fun testGoogleSignInOptionsRequestsOnlyDriveFileScopeAndNoRestrictedDriveReadonly() {
+        val manager = GoogleAccountManager(
+            secureStorage = secureStorage,
+            supabaseAuthManager = supabaseAuthManager
+        )
+
+        val options = manager.getGoogleSignInOptions()
+        val scopes = options.scopes.map { it.scopeUri }
+
+        // Must request drive.file so app can access files it creates/opens
+        assertTrue("Options must contain drive.file", scopes.contains(GraphiteConfig.DRIVE_SCOPE_FILE))
+
+        // Must NEVER request drive.readonly to avoid Google Unverified App blocking warning
+        assertFalse("Options must NEVER request restricted drive.readonly", scopes.contains(GraphiteConfig.DRIVE_SCOPE_READONLY))
+        assertFalse("Options must NEVER request full drive scope", scopes.contains("https://www.googleapis.com/auth/drive"))
     }
 }
