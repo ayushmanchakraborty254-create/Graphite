@@ -1719,19 +1719,41 @@ class GoogleDriveManager(
     fun removeLinkedCloudFolder(folderId: String) {
         val email = getAuthorizedAccountEmail()
         if (email.isNullOrBlank()) return
-        val updated = getLinkedCloudFolders().filterNot { it.id == folderId }
+        val currentLinked = getLinkedCloudFolders()
+        val targetFolder = currentLinked.find { it.id == folderId }
+        val updated = currentLinked.filterNot { it.id == folderId }
         val encoded = Json.encodeToString(updated)
         secureStorage.putString(getAccountFolderKey(KEY_BOOKSHELF_LINKED_CLOUD_FOLDERS), encoded)
         _linkedCloudFolders.value = updated
 
-        // Clear cached subfolders
+        // 1. Collect all subfolders belonging to this cloud folder before clearing
+        val subfolders = getCloudSubfolders(folderId)
+        val allFolderIds = (listOf(folderId) + subfolders.map { it.id }).toMutableSet()
+        val folderName = targetFolder?.name
+
+        // 2. Clear cached subfolders
         saveCloudSubfolders(folderId, emptyList())
 
-        // Remove cloud-only books associated with this unlinked folder from repository
+        // 3. Remove all cloud-only books associated with this unlinked folder or any subfolder
         val currentBooks = GraphiteRepository.books.value
-        for (b in currentBooks) {
-            if ((b.driveFolderId == folderId || b.rootDriveFolderId == folderId) && b.filePath == null) {
-                GraphiteRepository.deleteBook(b.id)
+        val toDelete = currentBooks.filter { b ->
+            val isCloudBook = b.isCloudOnly || b.filePath == null || b.id.startsWith("drive_")
+            val matchesId = b.driveFolderId in allFolderIds || b.rootDriveFolderId in allFolderIds || (b.rootDriveFolderId == folderId)
+            val matchesName = !folderName.isNullOrBlank() && (
+                b.driveFolderName.equals(folderName, ignoreCase = true) ||
+                b.author.equals(folderName, ignoreCase = true)
+            )
+            isCloudBook && (matchesId || matchesName)
+        }
+
+        for (b in toDelete) {
+            GraphiteRepository.deleteBook(b.id)
+            b.driveFileId?.let { fid ->
+                try {
+                    val app = com.graphite.app.GraphiteApplication.instance
+                    File(app.cacheDir, "stream_${fid}.pdf").delete()
+                    File(File(app.filesDir, "covers"), "drive_${fid}.jpg").delete()
+                } catch (_: Exception) {}
             }
         }
     }

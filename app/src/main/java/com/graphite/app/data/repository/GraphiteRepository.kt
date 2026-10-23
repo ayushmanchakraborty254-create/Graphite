@@ -863,6 +863,32 @@ object GraphiteRepository {
                 // Filter out legacy mock books
                 if (book.id == "book_treasure_island" || book.id == "book_ce_ppt") continue
 
+                // Prune orphaned cloud books whose linked folders were unlinked
+                val isCloudBook = book.isCloudOnly || (book.filePath == null && book.id.startsWith("drive_"))
+                if (isCloudBook) {
+                    val driveManager = try { com.graphite.app.GraphiteApplication.instance.googleDriveManager } catch (_: Throwable) { null }
+                    if (driveManager != null && driveManager.getAuthorizedAccountEmail() != null) {
+                        val linkedFolders = driveManager.linkedCloudFolders.value
+                        val activeTwoWayId = driveManager.activeBookshelfFolder.value?.id ?: driveManager.getBookshelfSyncedFolder()?.id
+                        val isTwoWay = activeTwoWayId != null && (book.driveFolderId == activeTwoWayId || book.rootDriveFolderId == activeTwoWayId)
+                        val isLinked = linkedFolders.any { lf ->
+                            lf.id == book.rootDriveFolderId || lf.id == book.driveFolderId ||
+                                lf.name.equals(book.driveFolderName, ignoreCase = true) ||
+                                lf.name.equals(book.author, ignoreCase = true)
+                        }
+                        if (!isTwoWay && !isLinked) {
+                            book.driveFileId?.let { fid ->
+                                try {
+                                    val app = com.graphite.app.GraphiteApplication.instance
+                                    java.io.File(app.cacheDir, "stream_${fid}.pdf").delete()
+                                    java.io.File(java.io.File(app.filesDir, "covers"), "drive_${fid}.jpg").delete()
+                                } catch (_: Exception) {}
+                            }
+                            continue
+                        }
+                    }
+                }
+
                 // Filter out non-PDF files if user requested PDF only (allow Drive-streamed books where filePath is null)
                 val isNonPdf = (book.filePath != null && !book.filePath.endsWith(".pdf", ignoreCase = true)) ||
                         (book.mimeType.isNotBlank() && book.mimeType != "application/pdf" && !book.mimeType.contains("pdf", ignoreCase = true))

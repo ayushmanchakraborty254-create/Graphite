@@ -112,6 +112,13 @@ class SupabaseAuthManager(
                 ?: secureStorage.getString(KEY_REFRESH_TOKEN)
 
             if (refreshToken.isNullOrBlank()) {
+                val googleIdToken = secureStorage.getString("google_user_id_token")
+                if (!googleIdToken.isNullOrBlank()) {
+                    val googleAuthRes = signInWithGoogleIdToken(googleIdToken)
+                    if (googleAuthRes.isSuccess) {
+                        return@withLock googleAuthRes
+                    }
+                }
                 return@withLock Result.failure(
                     IllegalStateException("No refresh token available to refresh session")
                 )
