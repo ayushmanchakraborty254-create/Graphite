@@ -98,9 +98,26 @@ fun BookshelfScreen(
     var showDriveSyncDialog by remember { mutableStateOf(false) }
     var showLinkCloudFolderBrowser by remember { mutableStateOf(false) }
     val isSyncingDrive by driveManager.isSyncingBookshelf.collectAsState()
-    val driveSyncStatus by driveManager.bookshelfSyncStatus.collectAsState()
     val activeDriveFolder by driveManager.activeBookshelfFolder.collectAsState()
     val linkedCloudFolders by driveManager.linkedCloudFolders.collectAsState()
+    var isSyncingCloudFolder by remember { mutableStateOf(false) }
+
+    val syncCloudFolder: (DriveFolder) -> Unit = { folder ->
+        isSyncingCloudFolder = true
+        scope.launch {
+            Toast.makeText(context, "Scanning Google Drive folder \"${folder.name}\"...", Toast.LENGTH_SHORT).show()
+            val res = driveManager.importDriveCloudFolder(context, folder)
+            isSyncingCloudFolder = false
+            if (res.isSuccess) {
+                val count = res.getOrDefault(0)
+                Toast.makeText(context, "Synced \"${folder.name}\": $count books ready to stream (0 MB storage used)", Toast.LENGTH_LONG).show()
+                selectedCategory = "☁ ${folder.name}"
+            } else {
+                val err = res.exceptionOrNull()?.message ?: "Unknown error"
+                Toast.makeText(context, "Failed to sync \"${folder.name}\": $err", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     // Book Selection & Deletion state
     var selectedBookIds by remember { mutableStateOf(setOf<String>()) }
@@ -685,6 +702,77 @@ fun BookshelfScreen(
                 }
             }
 
+            val activeCloudFolder = if (selectedCategory.startsWith("☁ ")) {
+                val fName = selectedCategory.removePrefix("☁ ")
+                linkedCloudFolders.find { it.name.equals(fName, ignoreCase = true) }
+            } else null
+
+            if (activeCloudFolder != null) {
+                Surface(
+                    color = Color(0xFF0F1E2E),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF1E3A5F)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.Cloud,
+                                contentDescription = null,
+                                tint = Color(0xFF64B5F6),
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = activeCloudFolder.name,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Streams on demand • 0 MB local storage used",
+                                    color = Color(0xFF90CAF9),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                        Button(
+                            onClick = { syncCloudFolder(activeCloudFolder) },
+                            enabled = !isSyncingCloudFolder,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2)),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            if (isSyncingCloudFolder) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Scanning...", fontSize = 11.sp, color = Color.White)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = Color.White
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Sync Files", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Filter & Sort
             val filteredBooks = books.filter { book ->
                 val matchesCategory = when {
@@ -734,41 +822,97 @@ fun BookshelfScreen(
                         .padding(bottom = 88.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MenuBook,
-                            contentDescription = null,
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = if (!hasActiveSession) "Account Required" else if (searchQuery.isNotBlank()) "No matching PDF books" else "No PDF books in Bookshelf",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (!hasActiveSession) "Sign in with Google to sync your reading library with Drive, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Tap + to import a PDF document or sync with Google Drive",
-                            color = Color(0xFF9E9E9E),
-                            fontSize = 13.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                        if (!hasActiveSession) {
-                            Spacer(modifier = Modifier.height(14.dp))
+                    if (activeCloudFolder != null) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CloudQueue,
+                                contentDescription = null,
+                                tint = Color(0xFF64B5F6),
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No books found in \"${activeCloudFolder.name}\"",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Tap the button below to scan this Google Drive folder and list its PDF books for instant on-demand streaming (0 MB local storage footprint).",
+                                color = Color(0xFF90CAF9),
+                                fontSize = 13.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
                             Button(
-                                onClick = {
-                                    pendingAccountAction = "access your books"
-                                    showAccountRequiredDialog = true
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
-                                shape = RoundedCornerShape(8.dp)
+                                onClick = { syncCloudFolder(activeCloudFolder) },
+                                enabled = !isSyncingCloudFolder,
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
                             ) {
-                                Text("Sign In / Guest Account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                if (isSyncingCloudFolder) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Scanning Drive Files...", color = Color.White)
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudDownload,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                        tint = Color.White
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Fetch & Stream Books from Drive", color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MenuBook,
+                                contentDescription = null,
+                                tint = Color.DarkGray,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (!hasActiveSession) "Account Required" else if (searchQuery.isNotBlank()) "No matching PDF books" else "No PDF books in Bookshelf",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (!hasActiveSession) "Sign in with Google to sync your reading library with Drive, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Tap + to import a PDF document or sync with Google Drive",
+                                color = Color(0xFF9E9E9E),
+                                fontSize = 13.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            if (!hasActiveSession) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Button(
+                                    onClick = {
+                                        pendingAccountAction = "access your books"
+                                        showAccountRequiredDialog = true
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Sign In / Guest Account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
                             }
                         }
                     }
@@ -1415,6 +1559,25 @@ private fun BookshelfDriveSyncDialog(
                                         }
                                         IconButton(
                                             onClick = {
+                                                scope.launch {
+                                                    Toast.makeText(context, "Scanning \"${cloudFolder.name}\" in Drive...", Toast.LENGTH_SHORT).show()
+                                                    val res = driveManager.importDriveCloudFolder(context, cloudFolder)
+                                                    if (res.isSuccess) {
+                                                        val c = res.getOrDefault(0)
+                                                        Toast.makeText(context, "Synced ${cloudFolder.name}: $c books found (0 MB storage)", Toast.LENGTH_LONG).show()
+                                                    } else {
+                                                        val err = res.exceptionOrNull()?.message ?: "Sync failed"
+                                                        Toast.makeText(context, "Error: $err", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.Refresh, contentDescription = "Sync Folder", tint = Color(0xFF64B5F6), modifier = Modifier.size(16.dp))
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        IconButton(
+                                            onClick = {
                                                 driveManager.removeLinkedCloudFolder(cloudFolder.id)
                                                 Toast.makeText(context, "Unlinked ${cloudFolder.name}", Toast.LENGTH_SHORT).show()
                                             },
@@ -1427,15 +1590,41 @@ private fun BookshelfDriveSyncDialog(
                             }
                         }
 
-                        Button(
-                            onClick = { showLinkCloudFolderBrowserInDialog = true },
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A334E))
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF64B5F6))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Link Another Drive Folder", color = Color.White, fontSize = 12.sp)
+                            Button(
+                                onClick = { showLinkCloudFolderBrowserInDialog = true },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A334E))
+                            ) {
+                                Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color(0xFF64B5F6))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Link Folder", color = Color.White, fontSize = 11.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        Toast.makeText(context, "Scanning all linked cloud folders...", Toast.LENGTH_SHORT).show()
+                                        val res = driveManager.syncAllLinkedCloudFolders(context)
+                                        if (res.isSuccess) {
+                                            val c = res.getOrDefault(0)
+                                            Toast.makeText(context, "Synced all folders: $c books ready to stream (0 MB storage)", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            Toast.makeText(context, "Sync failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color.White)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Sync All", color = Color.White, fontSize = 11.sp)
+                            }
                         }
                     }
                 }

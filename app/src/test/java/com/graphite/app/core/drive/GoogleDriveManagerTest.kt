@@ -1047,4 +1047,89 @@ class GoogleDriveManagerTest {
         val state = manager.uploadState.value
         assertTrue("Upload state must be Error for null intent", state is DriveUploadState.Error)
     }
+
+    @Test
+    fun testImportDriveCloudFolder_ZeroLocalStorageStreaming() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "user@example.com")
+        val fakeUploader = object : DriveApiV3Uploader {
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult = DriveUploadResult.Success(fileId = "remote_id", fileName = fileName)
+
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.success(
+                    listOf(
+                        DriveRemoteFile("remote_pdf_1", "Quantum Mechanics.pdf", "application/pdf", 1024L),
+                        DriveRemoteFile("remote_pdf_2", "Algorithms.pdf", "application/pdf", 2048L),
+                        DriveRemoteFile("not_a_pdf", "notes.txt", "text/plain", 500L)
+                    )
+                )
+            }
+
+            override suspend fun downloadFile(accountEmail: String, fileId: String): Result<ByteArray> {
+                return Result.success("streamed_pdf_bytes".toByteArray())
+            }
+        }
+
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { fakeUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val folder = DriveFolder("drive_folder_123", "Science Books")
+        val dummyContext = android.app.Application()
+        val result = manager.importDriveCloudFolder(dummyContext, folder)
+
+        assertTrue(result.isSuccess)
+        assertEquals(2, result.getOrNull())
+
+        val cloudBooks = com.graphite.app.data.repository.GraphiteRepository.books.value.filter { it.driveFolderId == "drive_folder_123" }
+        assertEquals(2, cloudBooks.size)
+
+        for (book in cloudBooks) {
+            assertNull("Cloud books must NEVER have persistent local filePath (0 MB local footprint)", book.filePath)
+            assertNotNull("Cloud book must retain driveFileId for streaming", book.driveFileId)
+            assertTrue(book.isCloudOnly)
+        }
+
+        val streamRes = manager.streamFileBytes(dummyContext, cloudBooks.first().driveFileId!!)
+        assertTrue("Streaming on demand must succeed", streamRes.isSuccess)
+        assertEquals("streamed_pdf_bytes", String(streamRes.getOrNull()!!))
+    }
+
+    @Test
+    fun testImportDriveCloudFolder_PropagatesListingFailure() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "user@example.com")
+        val fakeUploader = object : DriveApiV3Uploader {
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult = DriveUploadResult.Success(fileId = "remote_id", fileName = fileName)
+
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.failure(IllegalStateException("Drive 403 Forbidden - permission denied"))
+            }
+        }
+
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { fakeUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+
+        val folder = DriveFolder("forbidden_folder", "Private Docs")
+        val dummyContext = android.app.Application()
+        val result = manager.importDriveCloudFolder(dummyContext, folder)
+
+        assertTrue("Failure must be propagated to caller, never swallowed as 0", result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message?.contains("Forbidden") == true || result.exceptionOrNull()?.message?.contains("permission denied") == true)
+    }
 }

@@ -148,6 +148,11 @@ interface DriveApiV3Uploader {
         parentFolderId: String? = null
     ): Result<DriveRemoteFile?> = Result.success(null)
 
+    suspend fun findFolderByName(
+        accountEmail: String,
+        folderName: String
+    ): Result<DriveFolder?> = Result.success(null)
+
     suspend fun deleteFile(
         accountEmail: String,
         fileId: String
@@ -332,29 +337,75 @@ class DefaultDriveApiV3Uploader(
     ): Result<List<DriveRemoteFile>> = withContext(Dispatchers.IO) {
         try {
             val driveService = getDriveService(accountEmail)
-            val parentQuery = if (folderId == "root" || folderId.isBlank()) {
-                "'root' in parents"
-            } else {
-                "'$folderId' in parents"
-            }
-            val result = driveService.files().list()
-                .setQ("$parentQuery and mimeType != 'application/vnd.google-apps.folder' and trashed = false")
-                .setSupportsAllDrives(true)
-                .setIncludeItemsFromAllDrives(true)
-                .setFields("files(id, name, mimeType, size)")
-                .setPageSize(100)
-                .execute()
+            val cleanFolderId = folderId.trim()
+            val allFiles = mutableListOf<DriveRemoteFile>()
+            val foldersToScan = ArrayDeque<String>()
+            foldersToScan.add(cleanFolderId)
+            val scannedFolders = mutableSetOf<String>()
+            var depthRemaining = 3
 
-            val files = result.files?.map {
-                DriveRemoteFile(
-                    id = it.id ?: "",
-                    name = it.name ?: "Unnamed",
-                    mimeType = it.mimeType ?: "application/octet-stream",
-                    size = it.getSize() ?: 0L
-                )
-            } ?: emptyList()
-            Result.success(files)
+            while (foldersToScan.isNotEmpty() && depthRemaining >= 0) {
+                val currentFolderId = foldersToScan.removeFirst()
+                if (!scannedFolders.add(currentFolderId)) continue
+
+                val parentQuery = if (currentFolderId == "root" || currentFolderId.isBlank()) {
+                    "'root' in parents"
+                } else {
+                    "'$currentFolderId' in parents"
+                }
+
+                // 1. Fetch non-folder files in this directory with pagination
+                var pageToken: String? = null
+                do {
+                    val request = driveService.files().list()
+                        .setQ("$parentQuery and mimeType != 'application/vnd.google-apps.folder' and trashed = false")
+                        .setSupportsAllDrives(true)
+                        .setIncludeItemsFromAllDrives(true)
+                        .setFields("nextPageToken, files(id, name, mimeType, size)")
+                        .setPageSize(100)
+                    if (!pageToken.isNullOrBlank()) {
+                        request.pageToken = pageToken
+                    }
+                    val result = request.execute()
+                    result.files?.forEach { file ->
+                        val fid = file.id
+                        if (!fid.isNullOrBlank()) {
+                            allFiles.add(
+                                DriveRemoteFile(
+                                    id = fid,
+                                    name = file.name ?: "Unnamed",
+                                    mimeType = file.mimeType ?: "application/octet-stream",
+                                    size = file.getSize() ?: 0L
+                                )
+                            )
+                        }
+                    }
+                    pageToken = result.nextPageToken
+                } while (!pageToken.isNullOrBlank())
+
+                // 2. Discover nested subfolders so books in subfolders are also found
+                if (depthRemaining > 0) {
+                    try {
+                        val subfolderReq = driveService.files().list()
+                            .setQ("$parentQuery and mimeType = 'application/vnd.google-apps.folder' and trashed = false")
+                            .setSupportsAllDrives(true)
+                            .setIncludeItemsFromAllDrives(true)
+                            .setFields("files(id, name)")
+                            .setPageSize(50)
+                            .execute()
+                        subfolderReq.files?.forEach { sf ->
+                            sf.id?.let { sid -> foldersToScan.add(sid) }
+                        }
+                    } catch (_: Exception) {
+                        // Keep files found so far even if subfolder listing fails
+                    }
+                }
+                depthRemaining--
+            }
+
+            Result.success(allFiles.distinctBy { it.id })
         } catch (e: Exception) {
+            SafeLogger.e("DefaultDriveApiV3Uploader", "listFiles failed for folderId=$folderId: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -364,13 +415,15 @@ class DefaultDriveApiV3Uploader(
         fileId: String
     ): Result<ByteArray> = withContext(Dispatchers.IO) {
         try {
+            val cleanId = fileId.removePrefix("drive_").trim()
             val driveService = getDriveService(accountEmail)
-            val inputStream = driveService.files().get(fileId)
+            val inputStream = driveService.files().get(cleanId)
                 .setSupportsAllDrives(true)
                 .executeMediaAsInputStream()
             val bytes = inputStream.use { it.readBytes() }
             Result.success(bytes)
         } catch (e: Exception) {
+            SafeLogger.e("DefaultDriveApiV3Uploader", "downloadFile failed for fileId=$fileId: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -422,6 +475,32 @@ class DefaultDriveApiV3Uploader(
         }
     }
 
+    override suspend fun findFolderByName(
+        accountEmail: String,
+        folderName: String
+    ): Result<DriveFolder?> = withContext(Dispatchers.IO) {
+        try {
+            val driveService = getDriveService(accountEmail)
+            val escapedName = folderName.replace("'", "\\'")
+            val result = driveService.files().list()
+                .setQ("name = '$escapedName' and mimeType = 'application/vnd.google-apps.folder' and trashed = false")
+                .setSupportsAllDrives(true)
+                .setIncludeItemsFromAllDrives(true)
+                .setFields("files(id, name)")
+                .setPageSize(1)
+                .execute()
+            val file = result.files?.firstOrNull()
+            if (file != null && !file.id.isNullOrBlank()) {
+                Result.success(DriveFolder(file.id, file.name ?: folderName))
+            } else {
+                Result.success(null)
+            }
+        } catch (e: Exception) {
+            SafeLogger.e("DefaultDriveApiV3Uploader", "findFolderByName failed for $folderName: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     override suspend fun deleteFile(
         accountEmail: String,
         fileId: String
@@ -464,8 +543,27 @@ class GoogleDriveManager(
     private val _customFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
     val customFolders: StateFlow<List<DriveFolder>> = _customFolders.asStateFlow()
 
+    private val _isSyncingBookshelf = MutableStateFlow(false)
+    val isSyncingBookshelf: StateFlow<Boolean> = _isSyncingBookshelf.asStateFlow()
+
+    private val _bookshelfSyncStatus = MutableStateFlow<String?>(null)
+    val bookshelfSyncStatus: StateFlow<String?> = _bookshelfSyncStatus.asStateFlow()
+
+    private val _curatedBookshelfFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
+    val curatedBookshelfFolders: StateFlow<List<DriveFolder>> = _curatedBookshelfFolders.asStateFlow()
+
+    private val _defaultBookshelfFolder = MutableStateFlow<DriveFolder?>(null)
+    val defaultBookshelfFolder: StateFlow<DriveFolder?> = _defaultBookshelfFolder.asStateFlow()
+
+    private val _activeBookshelfFolder = MutableStateFlow<DriveFolder?>(null)
+    val activeBookshelfFolder: StateFlow<DriveFolder?> = _activeBookshelfFolder.asStateFlow()
+
+    private val _linkedCloudFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
+    val linkedCloudFolders: StateFlow<List<DriveFolder>> = _linkedCloudFolders.asStateFlow()
+
     init {
         restoreAuthState()
+        refreshBookshelfFolders()
     }
 
     private fun restoreAuthState() {
@@ -1072,6 +1170,17 @@ class GoogleDriveManager(
 
             val uploader = uploaderProvider(context)
             val folderResult = uploader.getFolder(accountEmail, folderId)
+            val isExplicitFileError = folderResult.exceptionOrNull()?.message?.contains("is a file", ignoreCase = true) == true
+            if (isExplicitFileError) {
+                val errorMsg = folderResult.exceptionOrNull()?.message
+                    ?: "Selected item is a file, not a folder. Please choose a destination folder."
+                SafeLogger.e(TAG, "Selected Drive item is not a folder: $errorMsg")
+                if (targetNotebook != null) {
+                    setUploadError(errorMsg, targetNotebook)
+                }
+                return@withContext Result.failure(folderResult.exceptionOrNull() ?: IllegalArgumentException(errorMsg))
+            }
+
             val resolvedFolder = if (folderResult.isSuccess) {
                 folderResult.getOrThrow()
             } else if (!folderName.isNullOrBlank()) {
@@ -1224,27 +1333,6 @@ class GoogleDriveManager(
         _uploadState.value = DriveUploadState.Idle
     }
 
-    private val _isSyncingBookshelf = MutableStateFlow(false)
-    val isSyncingBookshelf: StateFlow<Boolean> = _isSyncingBookshelf.asStateFlow()
-
-    private val _bookshelfSyncStatus = MutableStateFlow<String?>(null)
-    val bookshelfSyncStatus: StateFlow<String?> = _bookshelfSyncStatus.asStateFlow()
-
-    private val _curatedBookshelfFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
-    val curatedBookshelfFolders: StateFlow<List<DriveFolder>> = _curatedBookshelfFolders.asStateFlow()
-
-    private val _defaultBookshelfFolder = MutableStateFlow<DriveFolder?>(null)
-    val defaultBookshelfFolder: StateFlow<DriveFolder?> = _defaultBookshelfFolder.asStateFlow()
-
-    private val _activeBookshelfFolder = MutableStateFlow<DriveFolder?>(null)
-    val activeBookshelfFolder: StateFlow<DriveFolder?> = _activeBookshelfFolder.asStateFlow()
-
-    private val _linkedCloudFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
-    val linkedCloudFolders: StateFlow<List<DriveFolder>> = _linkedCloudFolders.asStateFlow()
-
-    init {
-        refreshBookshelfFolders()
-    }
 
     private fun getAccountFolderKey(baseKey: String): String {
         val email = getAuthorizedAccountEmail()?.takeIf { it.isNotBlank() } ?: "guest"
@@ -1498,7 +1586,21 @@ class GoogleDriveManager(
 
         try {
             val uploader = uploaderProvider(context)
-            val filesResult = uploader.listFiles(accountEmail, folder.id)
+
+            // Resolve genuine Drive folder ID if it's a placeholder or needs name resolution
+            val targetFolderId = if (folder.id.startsWith("custom_") || folder.id.startsWith("default_")) {
+                uploader.findFolderByName(accountEmail, folder.name).getOrNull()?.id ?: folder.id
+            } else {
+                folder.id
+            }
+
+            val filesResult = uploader.listFiles(accountEmail, targetFolderId)
+            if (filesResult.isFailure) {
+                val err = filesResult.exceptionOrNull()
+                SafeLogger.e(TAG, "Failed to list files in cloud folder '${folder.name}' ($targetFolderId): ${err?.message}", err)
+                return@withContext Result.failure(err ?: IllegalStateException("Could not access files in Drive folder \"${folder.name}\""))
+            }
+
             val files = filesResult.getOrDefault(emptyList())
 
             var count = 0
@@ -1507,10 +1609,11 @@ class GoogleDriveManager(
             for (remoteFile in files) {
                 val cleanName = remoteFile.name
                 val isPdf = cleanName.endsWith(".pdf", ignoreCase = true) ||
-                        remoteFile.mimeType.equals("application/pdf", ignoreCase = true)
+                        remoteFile.mimeType.equals("application/pdf", ignoreCase = true) ||
+                        remoteFile.mimeType.equals("application/x-pdf", ignoreCase = true) ||
+                        remoteFile.mimeType.contains("pdf", ignoreCase = true)
                 if (!isPdf) continue
-                if (cleanName.startsWith("doc_") || cleanName.equals("graphite_notes_backup.json", ignoreCase = true)) continue
-                if (cleanName.matches(Regex("^[0-9a-fA-F-]{36}(\\..+)?$"))) continue
+                if (cleanName.equals("graphite_notes_backup.json", ignoreCase = true) || cleanName.startsWith(".graphite")) continue
 
                 val normalizedRemote = GraphiteRepository.normalizeBookTitle(cleanName)
                 val existing = localBooks.find { b ->
@@ -1520,14 +1623,13 @@ class GoogleDriveManager(
                 }
 
                 if (existing != null) {
-                    if (existing.driveFolderId != folder.id || existing.driveFolderName != folder.name) {
-                        GraphiteRepository.addBook(
-                            existing.copy(
-                                driveFolderId = folder.id,
-                                driveFolderName = folder.name
-                            )
-                        )
-                    }
+                    val updated = existing.copy(
+                        driveFolderId = folder.id,
+                        driveFolderName = folder.name,
+                        driveFileId = remoteFile.id
+                    )
+                    GraphiteRepository.addBook(updated)
+                    count++
                 } else {
                     val rawBaseTitle = if (cleanName.endsWith(".pdf", ignoreCase = true)) cleanName.removeSuffix(".pdf") else cleanName
                     val displayTitle = rawBaseTitle.replace('_', ' ').replace('-', ' ').trim()
@@ -1541,7 +1643,7 @@ class GoogleDriveManager(
                         totalChapters = 1,
                         currentChapter = 1,
                         content = "",
-                        filePath = null, // Cloud-only, zero local storage!
+                        filePath = null, // Cloud-only, zero permanent local storage!
                         mimeType = "application/pdf",
                         driveFileId = remoteFile.id,
                         driveFolderId = folder.id,
@@ -1556,6 +1658,24 @@ class GoogleDriveManager(
             SafeLogger.e(TAG, "Failed to import cloud folder: ${e.message}", e)
             Result.failure(e)
         }
+    }
+
+    suspend fun syncLinkedCloudFolder(
+        context: Context,
+        folder: DriveFolder
+    ): Result<Int> = importDriveCloudFolder(context, folder)
+
+    suspend fun syncAllLinkedCloudFolders(
+        context: Context
+    ): Result<Int> = withContext(ioDispatcher) {
+        val folders = getLinkedCloudFolders()
+        if (folders.isEmpty()) return@withContext Result.success(0)
+        var total = 0
+        for (folder in folders) {
+            val res = importDriveCloudFolder(context, folder)
+            total += res.getOrDefault(0)
+        }
+        Result.success(total)
     }
 
     suspend fun downloadCloudBookToDevice(
