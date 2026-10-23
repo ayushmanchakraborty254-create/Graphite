@@ -96,6 +96,7 @@ fun NoteshelfScreen(
 
     var importStatusMessage by remember { mutableStateOf<String?>(null) }
     var isImportingFile by remember { mutableStateOf(false) }
+    var importProgressText by remember { mutableStateOf("Reading and validating document from tablet storage...") }
 
     val configuration = LocalConfiguration.current
     val isTablet = configuration.screenWidthDp >= 600
@@ -190,23 +191,51 @@ fun NoteshelfScreen(
     }
 
     val fileImportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
             isImportingFile = true
             scope.launch {
-                val result = fileImportManager.importToNotes(context, uri)
-                isImportingFile = false
-                when (result) {
-                    is ImportResult.SuccessNotebook -> {
-                        importStatusMessage = result.message
-                        onOpenNotebook(result.notebook.id)
+                if (uris.size == 1) {
+                    importProgressText = "Reading and validating document from tablet storage..."
+                    val result = fileImportManager.importToNotes(context, uris[0])
+                    isImportingFile = false
+                    when (result) {
+                        is ImportResult.SuccessNotebook -> {
+                            importStatusMessage = result.message
+                            onOpenNotebook(result.notebook.id)
+                        }
+                        is ImportResult.SuccessBook -> {
+                            importStatusMessage = "Imported \"${result.book.title}\""
+                        }
+                        is ImportResult.Error -> {
+                            importStatusMessage = result.message
+                        }
                     }
-                    is ImportResult.SuccessBook -> {
-                        importStatusMessage = "Imported \"${result.book.title}\""
+                } else {
+                    var successCount = 0
+                    var failCount = 0
+                    val total = uris.size
+                    for ((index, uri) in uris.withIndex()) {
+                        importProgressText = "Importing document ${index + 1} of $total..."
+                        try {
+                            when (fileImportManager.importToNotes(context, uri)) {
+                                is ImportResult.SuccessNotebook, is ImportResult.SuccessBook -> {
+                                    successCount++
+                                }
+                                is ImportResult.Error -> {
+                                    failCount++
+                                }
+                            }
+                        } catch (_: Exception) {
+                            failCount++
+                        }
                     }
-                    is ImportResult.Error -> {
-                        importStatusMessage = result.message
+                    isImportingFile = false
+                    importStatusMessage = when {
+                        failCount == 0 -> "Successfully imported all $successCount notes."
+                        successCount > 0 -> "Imported $successCount notes ($failCount failed)."
+                        else -> "Failed to import selected documents."
                     }
                 }
             }
@@ -1827,8 +1856,8 @@ fun NoteshelfScreen(
                         Icon(Icons.Default.FileDownload, contentDescription = null, tint = Color(0xFF64B5F6), modifier = Modifier.size(22.dp))
                         Spacer(modifier = Modifier.width(14.dp))
                         Column {
-                            Text("Import Document", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("Import PDF, Word (.docx), PPTX or files", color = Color.Gray, fontSize = 11.sp)
+                            Text("Import Documents", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Import single or multiple PDF, Word (.docx), PPTX or files", color = Color.Gray, fontSize = 11.sp)
                         }
                     }
 
@@ -1935,7 +1964,7 @@ fun NoteshelfScreen(
     if (isImportingFile) {
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("Importing File", color = Color.White, fontWeight = FontWeight.Bold) },
+            title = { Text("Importing Notes", color = Color.White, fontWeight = FontWeight.Bold) },
             text = {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -1943,7 +1972,7 @@ fun NoteshelfScreen(
                 ) {
                     CircularProgressIndicator(color = GraphiteOrange, modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
                     Spacer(modifier = Modifier.width(16.dp))
-                    Text("Reading and validating document from tablet storage...", color = Color.LightGray, fontSize = 13.sp)
+                    Text(importProgressText, color = Color.LightGray, fontSize = 13.sp)
                 }
             },
             confirmButton = {},
