@@ -871,7 +871,10 @@ class GoogleDriveManager(
                 "true"
             )
 
-        val email = accountEmail ?: secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)
+        val email = accountEmail
+            ?: secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "null" }
+            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "null" }
         if (!email.isNullOrBlank()) {
             builder.setAccount(Account(email, "com.google"))
         }
@@ -1066,7 +1069,11 @@ class GoogleDriveManager(
 
             val uploader = uploaderProvider(context)
             val folderResult = uploader.getFolder(accountEmail, folderId)
-            if (folderResult.isFailure) {
+            val resolvedFolder = if (folderResult.isSuccess) {
+                folderResult.getOrThrow()
+            } else if (!folderName.isNullOrBlank()) {
+                DriveFolder(id = folderId, name = folderName)
+            } else {
                 val errorMsg = folderResult.exceptionOrNull()?.message
                     ?: "Selected item is a file, not a folder. Please choose a destination folder."
                 SafeLogger.e(TAG, "Selected Drive item is not a folder: $errorMsg")
@@ -1075,7 +1082,6 @@ class GoogleDriveManager(
                 }
                 return@withContext Result.failure(folderResult.exceptionOrNull() ?: IllegalArgumentException(errorMsg))
             }
-            val resolvedFolder = folderResult.getOrThrow()
 
             _customFolders.value = (_customFolders.value + resolvedFolder).distinctBy { it.id }
             addCuratedBookshelfFolder(resolvedFolder)

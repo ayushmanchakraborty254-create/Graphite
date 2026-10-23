@@ -146,6 +146,118 @@ fun BookshelfScreen(
         }
     }
 
+    var isAuthorizingCloudPicker by remember { mutableStateOf(false) }
+
+    val cloudPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { activityResult ->
+        isAuthorizingCloudPicker = false
+        if (activityResult.resultCode == Activity.RESULT_OK) {
+            val data = activityResult.data
+            if (data != null) {
+                scope.launch {
+                    var pickedFolder: DriveFolder? = null
+                    try {
+                        val authClient = Identity.getAuthorizationClient(context)
+                        val authResult = authClient.getAuthorizationResultFromIntent(data)
+                        authResult.toGoogleSignInAccount()?.email?.let { email ->
+                            driveManager.saveAuthorizedAccount(email)
+                        }
+                        val res = driveManager.handlePickerAuthorizationResult(
+                            context = context,
+                            result = authResult,
+                            notebook = null
+                        )
+                        if (res.isSuccess) {
+                            pickedFolder = res.getOrNull()
+                        }
+                    } catch (_: Exception) {}
+
+                    if (pickedFolder == null) {
+                        val fallback = driveManager.handlePickerResult(
+                            context = context,
+                            intent = data,
+                            notebook = null
+                        )
+                        if (fallback.isSuccess) {
+                            pickedFolder = fallback.getOrNull()
+                        }
+                    }
+
+                    if (pickedFolder != null) {
+                        showLinkCloudFolderBrowser = false
+                        Toast.makeText(context, "Linking \"${pickedFolder.name}\" from Drive...", Toast.LENGTH_SHORT).show()
+                        val importRes = driveManager.importDriveCloudFolder(context, pickedFolder)
+                        if (importRes.isSuccess) {
+                            val count = importRes.getOrDefault(0)
+                            Toast.makeText(context, "Linked \"${pickedFolder.name}\" with $count books (0 MB storage used)", Toast.LENGTH_LONG).show()
+                            selectedCategory = "☁ ${pickedFolder.name}"
+                        } else {
+                            Toast.makeText(context, "Failed: ${importRes.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Toast.makeText(context, "No folder selected in Drive Picker", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
+
+    val launchCloudPicker: () -> Unit = {
+        isAuthorizingCloudPicker = true
+        scope.launch {
+            try {
+                val authClient = Identity.getAuthorizationClient(context)
+                val request = driveManager.buildPickerAuthorizationRequest()
+                authClient.authorize(request)
+                    .addOnSuccessListener { authResult ->
+                        if (authResult.hasResolution()) {
+                            val pendingIntent = authResult.pendingIntent
+                            if (pendingIntent != null) {
+                                cloudPickerLauncher.launch(
+                                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                                )
+                            } else {
+                                isAuthorizingCloudPicker = false
+                                Toast.makeText(context, "Picker authorization resolution missing", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            isAuthorizingCloudPicker = false
+                            scope.launch {
+                                val res = driveManager.handlePickerAuthorizationResult(
+                                    context = context,
+                                    result = authResult,
+                                    notebook = null
+                                )
+                                if (res.isSuccess) {
+                                    val chosen = res.getOrNull()
+                                    if (chosen != null) {
+                                        showLinkCloudFolderBrowser = false
+                                        Toast.makeText(context, "Linking \"${chosen.name}\" from Drive...", Toast.LENGTH_SHORT).show()
+                                        val importRes = driveManager.importDriveCloudFolder(context, chosen)
+                                        if (importRes.isSuccess) {
+                                            val count = importRes.getOrDefault(0)
+                                            Toast.makeText(context, "Linked \"${chosen.name}\" with $count books (0 MB storage used)", Toast.LENGTH_LONG).show()
+                                            selectedCategory = "☁ ${chosen.name}"
+                                        } else {
+                                            Toast.makeText(context, "Failed: ${importRes.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        isAuthorizingCloudPicker = false
+                        Toast.makeText(context, "Google Drive Picker error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+            } catch (e: Exception) {
+                isAuthorizingCloudPicker = false
+                Toast.makeText(context, "Error starting Google Drive Picker: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     val standardCategories = listOf("All Books", "Favorites", "Unread", "Completed")
     val categories = remember(activeDriveFolder, linkedCloudFolders) {
         val list = standardCategories.toMutableList()
@@ -822,10 +934,8 @@ fun BookshelfScreen(
                     }
                 }
             },
-            onLaunchPicker = {
-                Toast.makeText(context, "Please select a folder from the list", Toast.LENGTH_SHORT).show()
-            },
-            isAuthorizingPicker = false,
+            onLaunchPicker = { launchCloudPicker() },
+            isAuthorizingPicker = isAuthorizingCloudPicker,
             onDismiss = { showLinkCloudFolderBrowser = false }
         )
     }
@@ -967,6 +1077,28 @@ private fun BookshelfDriveSyncDialog(
     var showCustomFolderDialog by remember { mutableStateOf(false) }
     var customFolderInput by remember { mutableStateOf("") }
     var isAuthorizingPicker by remember { mutableStateOf(false) }
+    var isPickingForCloudFolder by remember { mutableStateOf(false) }
+
+    val handlePickerFolderChosen = { chosen: DriveFolder ->
+        if (isPickingForCloudFolder) {
+            showLinkCloudFolderBrowserInDialog = false
+            scope.launch {
+                Toast.makeText(context, "Linking \"${chosen.name}\" from Drive...", Toast.LENGTH_SHORT).show()
+                val importRes = driveManager.importDriveCloudFolder(context, chosen)
+                if (importRes.isSuccess) {
+                    val count = importRes.getOrDefault(0)
+                    Toast.makeText(context, "Linked \"${chosen.name}\" with $count books (0 MB storage used)", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "Failed: ${importRes.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            driveManager.addCuratedBookshelfFolder(chosen)
+            driveManager.setBookshelfSyncedFolder(chosen)
+            showDriveFolderBrowser = false
+            Toast.makeText(context, "Added to synced folders: ${chosen.name}", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     val pickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -976,6 +1108,7 @@ private fun BookshelfDriveSyncDialog(
             val data = activityResult.data
             if (data != null) {
                 scope.launch {
+                    var pickedFolder: DriveFolder? = null
                     try {
                         val authClient = Identity.getAuthorizationClient(context)
                         val authResult = authClient.getAuthorizationResultFromIntent(data)
@@ -988,34 +1121,74 @@ private fun BookshelfDriveSyncDialog(
                             notebook = null
                         )
                         if (res.isSuccess) {
-                            val chosen = res.getOrNull()
-                            if (chosen != null) {
-                                driveManager.addCuratedBookshelfFolder(chosen)
-                                driveManager.setBookshelfSyncedFolder(chosen)
-                                showDriveFolderBrowser = false
-                                Toast.makeText(context, "Added to synced folders: ${chosen.name}", Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
+                            pickedFolder = res.getOrNull()
                         }
                     } catch (_: Exception) {}
 
-                    val fallback = driveManager.handlePickerResult(
-                        context = context,
-                        intent = data,
-                        notebook = null
-                    )
-                    if (fallback.isSuccess) {
-                        val chosen = fallback.getOrNull()
-                        if (chosen != null) {
-                            driveManager.addCuratedBookshelfFolder(chosen)
-                            driveManager.setBookshelfSyncedFolder(chosen)
-                            showDriveFolderBrowser = false
-                            Toast.makeText(context, "Added to synced folders: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                    if (pickedFolder == null) {
+                        val fallback = driveManager.handlePickerResult(
+                            context = context,
+                            intent = data,
+                            notebook = null
+                        )
+                        if (fallback.isSuccess) {
+                            pickedFolder = fallback.getOrNull()
                         }
+                    }
+
+                    if (pickedFolder != null) {
+                        handlePickerFolderChosen(pickedFolder)
                     } else {
                         Toast.makeText(context, "No folder selected in Drive Picker", Toast.LENGTH_SHORT).show()
                     }
                 }
+            }
+        }
+    }
+
+    val launchDialogPicker = { forCloudFolder: Boolean ->
+        isPickingForCloudFolder = forCloudFolder
+        isAuthorizingPicker = true
+        scope.launch {
+            try {
+                val authClient = Identity.getAuthorizationClient(context)
+                val request = driveManager.buildPickerAuthorizationRequest()
+                authClient.authorize(request)
+                    .addOnSuccessListener { authResult ->
+                        if (authResult.hasResolution()) {
+                            val pendingIntent = authResult.pendingIntent
+                            if (pendingIntent != null) {
+                                pickerLauncher.launch(
+                                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                                )
+                            } else {
+                                isAuthorizingPicker = false
+                                Toast.makeText(context, "Picker authorization resolution missing", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            isAuthorizingPicker = false
+                            scope.launch {
+                                val res = driveManager.handlePickerAuthorizationResult(
+                                    context = context,
+                                    result = authResult,
+                                    notebook = null
+                                )
+                                if (res.isSuccess) {
+                                    val chosen = res.getOrNull()
+                                    if (chosen != null) {
+                                        handlePickerFolderChosen(chosen)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        isAuthorizingPicker = false
+                        Toast.makeText(context, "Google Drive Picker error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+            } catch (e: Exception) {
+                isAuthorizingPicker = false
+                Toast.makeText(context, "Error starting Google Drive Picker: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1307,55 +1480,8 @@ private fun BookshelfDriveSyncDialog(
                 showDriveFolderBrowser = false
                 Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
             },
-            onLaunchPicker = {
-                isAuthorizingPicker = true
-                scope.launch {
-                    try {
-                        val authClient = Identity.getAuthorizationClient(context)
-                        val request = driveManager.buildPickerAuthorizationRequest()
-                        authClient.authorize(request)
-                            .addOnSuccessListener { authResult ->
-                                if (authResult.hasResolution()) {
-                                    val pendingIntent = authResult.pendingIntent
-                                    if (pendingIntent != null) {
-                                        pickerLauncher.launch(
-                                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                                        )
-                                    } else {
-                                        isAuthorizingPicker = false
-                                        Toast.makeText(context, "Picker authorization resolution missing", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    isAuthorizingPicker = false
-                                    scope.launch {
-                                        val res = driveManager.handlePickerAuthorizationResult(
-                                            context = context,
-                                            result = authResult,
-                                            notebook = null
-                                        )
-                                        if (res.isSuccess) {
-                                            val chosen = res.getOrNull()
-                                            if (chosen != null) {
-                                                driveManager.addCuratedBookshelfFolder(chosen)
-                                                driveManager.setBookshelfSyncedFolder(chosen)
-                                                showDriveFolderBrowser = false
-                                                Toast.makeText(context, "Sync destination set to: ${chosen.name}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            .addOnFailureListener { e ->
-                                isAuthorizingPicker = false
-                                Toast.makeText(context, "Google Drive Picker error: ${e.message}", Toast.LENGTH_SHORT).show()
-                            }
-                    } catch (e: Exception) {
-                        isAuthorizingPicker = false
-                        Toast.makeText(context, "Error starting Google Drive Picker: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            },
-            isAuthorizingPicker = isAuthorizingPicker,
+            onLaunchPicker = { launchDialogPicker(false) },
+            isAuthorizingPicker = isAuthorizingPicker && !isPickingForCloudFolder,
             onDismiss = { showDriveFolderBrowser = false }
         )
     }
@@ -1377,10 +1503,8 @@ private fun BookshelfDriveSyncDialog(
                     }
                 }
             },
-            onLaunchPicker = {
-                Toast.makeText(context, "Please select a folder from the browser list", Toast.LENGTH_SHORT).show()
-            },
-            isAuthorizingPicker = false,
+            onLaunchPicker = { launchDialogPicker(true) },
+            isAuthorizingPicker = isAuthorizingPicker && isPickingForCloudFolder,
             onDismiss = { showLinkCloudFolderBrowserInDialog = false }
         )
     }
