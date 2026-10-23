@@ -567,10 +567,7 @@ class GoogleDriveManager(
     }
 
     private fun restoreAuthState() {
-        val savedAccount = secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+        val savedAccount = getAuthorizedAccountEmail()
         if (!savedAccount.isNullOrBlank()) {
             saveAuthorizedAccount(savedAccount)
         }
@@ -599,10 +596,7 @@ class GoogleDriveManager(
         val account = GoogleSignIn.getLastSignedInAccount(context)
         val hasScope = account != null && GoogleSignIn.hasPermissions(account, driveScope)
         val resolvedEmail = (account?.account?.name ?: account?.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString(KEY_DRIVE_ACCOUNT_EMAIL)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
-            ?: secureStorage.getString("google_user_email")?.takeIf { it.isNotBlank() && it != "null" }
-            ?: secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "null" }
-            ?: try { com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" } } catch (_: Exception) { null }
+            ?: getAuthorizedAccountEmail()
 
         if (!resolvedEmail.isNullOrBlank()) {
             if (_authStatus.value !is DriveAuthStatus.Authorized) {
@@ -715,8 +709,10 @@ class GoogleDriveManager(
         val googleEmail = secureStorage.getString("google_account_email")?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
         if (!googleEmail.isNullOrBlank()) return googleEmail
         return try {
-            com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" }
-        } catch (_: Exception) {
+            if (com.graphite.app.GraphiteApplication.instance.isGoogleAccountManagerInitialized) {
+                com.graphite.app.GraphiteApplication.instance.googleAccountManager.currentUser.value?.email?.takeIf { it.isNotBlank() && it != "null" }
+            } else null
+        } catch (_: Throwable) {
             null
         }
     }

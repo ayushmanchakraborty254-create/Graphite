@@ -14,6 +14,7 @@ class GoogleAccountManagerTest {
 
     @Before
     fun setUp() {
+        com.graphite.app.data.repository.GraphiteRepository.clearAllDataForTesting()
         secureStorage = InMemorySecureStorage()
         supabaseAuthManager = SupabaseAuthManager(
             secureStorage = secureStorage,

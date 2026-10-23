@@ -27,6 +27,9 @@ class GraphiteApplication : Application() {
     lateinit var googleAccountManager: com.graphite.app.core.auth.GoogleAccountManager
         private set
 
+    val isGoogleAccountManagerInitialized: Boolean
+        get() = ::googleAccountManager.isInitialized
+
     lateinit var fileImportManager: com.graphite.app.core.importer.FileImportManager
         private set
 
@@ -37,20 +40,24 @@ class GraphiteApplication : Application() {
         private set
 
     override fun onCreate() {
-
         super.onCreate()
         instance = this
+
+        setupGlobalCrashHandler()
 
         secureStorage = SecureStorage.create(this)
         supabaseAuthManager = SupabaseAuthManager(secureStorage)
         supabaseNotesRepository = SupabaseNotesRepository(supabaseAuthManager)
         supabaseSyncManager = SupabaseSyncManager(supabaseAuthManager, supabaseNotesRepository)
-        googleDriveManager = GoogleDriveManager(secureStorage)
+
+        // Initialize googleAccountManager BEFORE googleDriveManager so account references are ready
         googleAccountManager = com.graphite.app.core.auth.GoogleAccountManager(
             secureStorage = secureStorage,
             supabaseAuthManager = supabaseAuthManager,
             context = this
         )
+        googleDriveManager = GoogleDriveManager(secureStorage)
+
         fileImportManager = com.graphite.app.core.importer.FileImportManager(
             supabaseAuthManager = supabaseAuthManager,
             supabaseSyncManager = supabaseSyncManager
@@ -58,7 +65,28 @@ class GraphiteApplication : Application() {
         voiceRecorderManager = com.graphite.app.core.voice.VoiceRecorderManager(this)
         appUpdateManager = com.graphite.app.core.updater.AppUpdateManager()
 
-        com.graphite.app.data.repository.GraphiteRepository.initStorage(this)
+        try {
+            com.graphite.app.data.repository.GraphiteRepository.initStorage(this)
+        } catch (e: Throwable) {
+            android.util.Log.e("GraphiteApplication", "Failed to initialize storage on startup: ${e.message}", e)
+        }
+    }
+
+    private fun setupGlobalCrashHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("GraphiteFatal", "FATAL CRASH on thread ${thread.name}: ${throwable.message}", throwable)
+            try {
+                val crashFile = java.io.File(filesDir, "graphite_fatal_crash.txt")
+                crashFile.writeText(
+                    "Time: ${java.util.Date()}\n" +
+                    "Thread: ${thread.name}\n" +
+                    "Exception: ${throwable.javaClass.name}: ${throwable.message}\n" +
+                    "StackTrace:\n${android.util.Log.getStackTraceString(throwable)}\n"
+                )
+            } catch (_: Throwable) {}
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
     }
 
 

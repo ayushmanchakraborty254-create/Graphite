@@ -38,7 +38,7 @@ class SupabaseCrossDeviceSyncTest {
     @Before
     fun setUp() {
         cloudTable.clear()
-        GraphiteRepository.clearActiveUserWorkspace()
+        GraphiteRepository.clearAllDataForTesting()
         GraphiteRepository.setActiveUser("default_test_user")
     }
 

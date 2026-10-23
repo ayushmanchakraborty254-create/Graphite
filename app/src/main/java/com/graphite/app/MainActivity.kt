@@ -59,10 +59,26 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        GraphiteApplication.instance.googleAccountManager.restoreSession(this)
-        handleDeepLinkIntent(intent)
-        handleShareIntent(intent)
+        try {
+            enableEdgeToEdge()
+        } catch (_: Throwable) {}
+        try {
+            if (GraphiteApplication.instance.isGoogleAccountManagerInitialized) {
+                GraphiteApplication.instance.googleAccountManager.restoreSession(this)
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Failed to restore session on create: ${e.message}", e)
+        }
+        try {
+            handleDeepLinkIntent(intent)
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Failed to handle deep link on create: ${e.message}", e)
+        }
+        try {
+            handleShareIntent(intent)
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Failed to handle share intent on create: ${e.message}", e)
+        }
         setContent {
 
             GraphiteTheme {

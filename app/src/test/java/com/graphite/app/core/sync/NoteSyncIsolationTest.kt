@@ -39,6 +39,8 @@ class NoteSyncIsolationTest {
 
     @Before
     fun setUp() {
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser("isolation_test_user")
         driveSecureStorage = InMemorySecureStorage()
         supabaseSecureStorage = InMemorySecureStorage()
         driveUploadCounter = AtomicInteger(0)

@@ -138,6 +138,20 @@ object GraphiteRepository {
         setActiveUser(null)
     }
 
+    /**
+     * Completely resets all in-memory repository state for testing.
+     */
+    fun clearAllDataForTesting() {
+        userNotebooksMap.clear()
+        userBooksMap.clear()
+        userFoldersMap.clear()
+        _notebooks.value = emptyList()
+        _books.value = emptyList()
+        _folders.value = emptyList()
+        activeUserId = null
+        _stats.value = ReadingStats(totalHoursRead = 0.0f, totalBooks = 0, notesCount = 0)
+    }
+
     fun updateNotebookDriveStatus(notebookId: String, driveFileId: String?, isUploaded: Boolean = true) {
         val currentUid = activeUserId ?: "guest"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }

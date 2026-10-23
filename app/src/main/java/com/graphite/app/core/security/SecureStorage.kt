@@ -23,26 +23,60 @@ interface SecureStorage {
 
         /**
          * Robust storage creator:
-         * 1. Attempts EncryptedSharedPreferences.
-         * 2. If keystore keys or file are corrupted (e.g. from version update or signature change), clears corrupted file and retries.
-         * 3. If encryption is unsupported on the device, safely falls back to persistent disk-backed SharedPreferences (NEVER in-memory!).
+         * 1. Attempts EncryptedSharedPreferences with a probe read/write to guarantee decryption works.
+         * 2. If keystore keys or file are corrupted (e.g. from version update, AutoBackup restore, or reinstall),
+         *    clears corrupted XML file and resets the KeyStore master key entry before retrying.
+         * 3. If encryption fails or is unsupported on the device, safely falls back to persistent disk-backed SharedPreferences.
          */
         fun create(context: Context): SecureStorage {
-            return try {
-                createEncrypted(context)
-            } catch (e: Exception) {
-                try {
-                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
-                    val prefsFile = java.io.File(sharedPrefsDir, "$PREFS_FILE.xml")
-                    if (prefsFile.exists()) {
-                        prefsFile.delete()
-                    }
-                    createEncrypted(context)
-                } catch (_: Exception) {
-                    val fallbackPrefs = context.getSharedPreferences("graphite_persistent_prefs", Context.MODE_PRIVATE)
-                    SharedPreferencesSecureStorage(fallbackPrefs)
-                }
+            // Attempt 1: Standard EncryptedSharedPreferences with probe test
+            try {
+                val enc = createEncrypted(context)
+                // Test read to guarantee keystore can decrypt existing data without throwing SecurityException
+                enc.getString("__probe__", null)
+                return enc
+            } catch (e: Throwable) {
+                android.util.Log.w("SecureStorage", "Initial EncryptedSharedPreferences failed (likely keystore key mismatch from restore/reinstall): ${e.message}")
             }
+
+            // Attempt 2: Clear corrupted file and delete stale AndroidKeyStore key alias
+            try {
+                cleanCorruptedStorage(context)
+                val enc = createEncrypted(context)
+                enc.getString("__probe__", null)
+                return enc
+            } catch (e: Throwable) {
+                android.util.Log.e("SecureStorage", "EncryptedSharedPreferences retry failed, falling back to persistent preferences: ${e.message}")
+            }
+
+            // Attempt 3: Persistent disk-backed SharedPreferences (always reliable)
+            return try {
+                val fallbackPrefs = context.getSharedPreferences("graphite_persistent_prefs", Context.MODE_PRIVATE)
+                SharedPreferencesSecureStorage(fallbackPrefs)
+            } catch (_: Throwable) {
+                InMemorySecureStorage()
+            }
+        }
+
+        private fun cleanCorruptedStorage(context: Context) {
+            try {
+                val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+                val prefsFile = java.io.File(sharedPrefsDir, "$PREFS_FILE.xml")
+                if (prefsFile.exists()) {
+                    prefsFile.delete()
+                }
+            } catch (_: Throwable) {}
+
+            try {
+                val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore")
+                keyStore.load(null)
+                if (keyStore.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
+                    keyStore.deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+                }
+                if (keyStore.containsAlias("_androidx_security_master_key_")) {
+                    keyStore.deleteEntry("_androidx_security_master_key_")
+                }
+            } catch (_: Throwable) {}
         }
 
         /**
@@ -76,37 +110,72 @@ private class SharedPreferencesSecureStorage(
 ) : SecureStorage {
 
     override fun getString(key: String, defaultValue: String?): String? {
-        return prefs.getString(key, defaultValue)
+        return try {
+            prefs.getString(key, defaultValue)
+        } catch (e: Throwable) {
+            android.util.Log.w("SecureStorage", "Failed to get string for key $key: ${e.message}")
+            defaultValue
+        }
     }
 
     override fun putString(key: String, value: String?) {
-        prefs.edit().apply {
-            if (value != null) putString(key, value) else remove(key)
-        }.apply()
+        try {
+            prefs.edit().apply {
+                if (value != null) putString(key, value) else remove(key)
+            }.apply()
+        } catch (e: Throwable) {
+            android.util.Log.e("SecureStorage", "Failed to put string for key $key: ${e.message}")
+        }
     }
 
     override fun getLong(key: String, defaultValue: Long): Long {
-        return prefs.getLong(key, defaultValue)
+        return try {
+            prefs.getLong(key, defaultValue)
+        } catch (e: Throwable) {
+            android.util.Log.w("SecureStorage", "Failed to get long for key $key: ${e.message}")
+            defaultValue
+        }
     }
 
     override fun putLong(key: String, value: Long) {
-        prefs.edit().putLong(key, value).apply()
+        try {
+            prefs.edit().putLong(key, value).apply()
+        } catch (e: Throwable) {
+            android.util.Log.e("SecureStorage", "Failed to put long for key $key: ${e.message}")
+        }
     }
 
     override fun getBoolean(key: String, defaultValue: Boolean): Boolean {
-        return prefs.getBoolean(key, defaultValue)
+        return try {
+            prefs.getBoolean(key, defaultValue)
+        } catch (e: Throwable) {
+            android.util.Log.w("SecureStorage", "Failed to get boolean for key $key: ${e.message}")
+            defaultValue
+        }
     }
 
     override fun putBoolean(key: String, value: Boolean) {
-        prefs.edit().putBoolean(key, value).apply()
+        try {
+            prefs.edit().putBoolean(key, value).apply()
+        } catch (e: Throwable) {
+            android.util.Log.e("SecureStorage", "Failed to put boolean for key $key: ${e.message}")
+        }
     }
 
     override fun remove(key: String) {
-        prefs.edit().remove(key).apply()
+        try {
+            prefs.edit().remove(key).apply()
+        } catch (e: Throwable) {
+            android.util.Log.e("SecureStorage", "Failed to remove key $key: ${e.message}")
+        }
     }
 
     override fun clear() {
-        prefs.edit().clear().apply()
+        try {
+            prefs.edit().clear().apply()
+        } catch (e: Throwable) {
+            android.util.Log.e("SecureStorage", "Failed to clear preferences: ${e.message}")
+        }
     }
 }
 
