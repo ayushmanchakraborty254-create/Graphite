@@ -38,10 +38,9 @@ object HandwritingRecognizerHelper {
 
     // Active production Gemini multimodal vision models in order of speed and capability
     private val geminiModels = listOf(
-        "gemini-flash-lite-latest",
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-flash-latest"
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-8b"
     )
 
     /**
@@ -75,17 +74,17 @@ object HandwritingRecognizerHelper {
 
         val bounds = RectF(minX, minY, maxX, maxY)
 
-        // Scale strokes to optimal high-resolution AI vision canvas (target height ~600px, width up to 2200px)
-        // Scaling up ensures cursive loops ('e', 'l', 'a', 'o', 'd') remain open, distinct, and never clog into black blobs.
-        val targetHeight = 600f
-        val targetWidth = 1800f
+        // Scale strokes to optimal AI vision canvas (target height ~360px, width up to 1200px)
+        // Optimal scaling ensures cursive loops remain open without generating oversized bitmaps.
+        val targetHeight = 360f
+        val targetWidth = 1200f
         val scaleX = targetWidth / rawWidth.coerceAtLeast(15f)
         val scaleY = targetHeight / rawHeight.coerceAtLeast(15f)
-        val scale = min(scaleX, scaleY).coerceIn(1.2f, 5.5f)
+        val scale = min(scaleX, scaleY).coerceIn(1.0f, 3.5f)
 
-        val pad = 48f * scale
-        val renderW = ((rawWidth * scale) + pad * 2f).toInt().coerceIn(240, 2400)
-        val renderH = ((rawHeight * scale) + pad * 2f).toInt().coerceIn(200, 2400)
+        val pad = (20f * scale).coerceIn(16f, 36f)
+        val renderW = ((rawWidth * scale) + pad * 2f).toInt().coerceIn(160, 1400)
+        val renderH = ((rawHeight * scale) + pad * 2f).toInt().coerceIn(120, 900)
 
         val bitmap = Bitmap.createBitmap(renderW, renderH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
@@ -109,7 +108,7 @@ object HandwritingRecognizerHelper {
             if (stroke.points.isEmpty()) continue
 
             // Proportional stroke width relative to scaled canvas (prevents cursive loops from merging)
-            val strokeW = (stroke.baseWidth * scale * 1.15f).coerceIn(3.5f, 12f)
+            val strokeW = (stroke.baseWidth * scale * 1.0f).coerceIn(2.5f, 8f)
             strokePaint.strokeWidth = strokeW
 
             // Handle single-point strokes (dots on 'i'/'j', periods '.', commas, short accents)
@@ -200,11 +199,11 @@ object HandwritingRecognizerHelper {
 
     private fun recognizeWithGeminiVision(bitmap: Bitmap, apiKey: String, modelName: String): String {
         val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, stream)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
         val jpegBytes = stream.toByteArray()
         val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
 
-        val isOAuthToken = apiKey.startsWith("ya29.")
+        val isOAuthToken = apiKey.startsWith("AQ.") || apiKey.startsWith("ya29.")
         val endpoint = if (isOAuthToken) {
             "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
         } else {
@@ -214,14 +213,15 @@ object HandwritingRecognizerHelper {
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 12000
-            readTimeout = 18000
+            connectTimeout = 6000
+            readTimeout = 10000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             if (isOAuthToken) {
                 setRequestProperty("Authorization", "Bearer $apiKey")
+            } else {
+                setRequestProperty("x-goog-api-key", apiKey)
             }
-            setRequestProperty("x-goog-api-key", apiKey)
         }
 
         val prompt = """
@@ -279,6 +279,9 @@ object HandwritingRecognizerHelper {
                 }
             }
             return textBuilder.toString().trim()
+        } else {
+            val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            android.util.Log.e("HandwritingRecognizer", "Gemini API error ($responseCode) on $modelName: $errorBody")
         }
         return ""
     }

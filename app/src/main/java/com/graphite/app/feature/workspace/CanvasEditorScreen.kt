@@ -82,6 +82,8 @@ import com.graphite.app.core.importer.DocumentContentParser
 import com.graphite.app.core.importer.ParsedDocument
 import com.graphite.app.core.theme.*
 import com.graphite.app.data.model.NotebookItem
+import com.graphite.app.data.model.NotebookCover
+import com.graphite.app.feature.noteshelf.FullCoverPickerSheet
 import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.feature.diagnostic.InputModePolicy
 import com.graphite.app.feature.diagnostic.MotionActionType
@@ -176,6 +178,7 @@ fun CanvasEditorScreen(
     var showMoreSettingsDialog by remember { mutableStateOf(false) }
     var showStylusDialog by remember { mutableStateOf(false) }
     var showZoomBox by remember { mutableStateOf(false) }
+    var showCoverPicker by remember { mutableStateOf(false) }
 
     // Zoom & Pan state
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
@@ -3692,15 +3695,11 @@ fun CanvasEditorScreen(
 
                         HorizontalDivider(color = Color(0xFF2C2C2E))
 
-                        // NOTEBOOK SECTION (Image 3)
+                        // NOTEBOOK SECTION
                         Text("NOTEBOOK", color = Color(0xFF00BCD4), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        MenuClickableRowWithIcon(Icons.Default.ZoomIn, "Zoom Box") {
+                        MenuClickableRowWithIcon(Icons.Default.Palette, "Change Cover", hasChevron = true) {
                             showDocumentMenu = false
-                            showZoomBox = !showZoomBox
-                        }
-                        MenuClickableRowWithIcon(Icons.Default.Lock, "Password", hasChevron = true) {
-                            showDocumentMenu = false
-                            showPasswordDialog = true
+                            showCoverPicker = true
                         }
                         MenuClickableRowWithIcon(Icons.Default.Info, "Get Info", hasChevron = true) {
                             showDocumentMenu = false
@@ -4302,6 +4301,24 @@ fun CanvasEditorScreen(
                 },
                 containerColor = Color(0xFF1E1E22)
             )
+        }
+
+        if (showCoverPicker) {
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = { showCoverPicker = false },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                FullCoverPickerSheet(
+                    selectedCover = notebook?.cover ?: NotebookCover(),
+                    onSelectCover = { newCover ->
+                        notebook?.let { nb ->
+                            GraphiteRepository.updateNotebookCover(nb.id, newCover)
+                        }
+                        showCoverPicker = false
+                    },
+                    onDismiss = { showCoverPicker = false }
+                )
+            }
         }
 
         if (showStylusDialog) {

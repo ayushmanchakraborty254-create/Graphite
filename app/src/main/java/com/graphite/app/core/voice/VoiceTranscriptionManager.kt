@@ -106,8 +106,9 @@ object VoiceTranscriptionManager {
             setRequestProperty("Content-Type", "application/json")
             if (isOAuthToken) {
                 setRequestProperty("Authorization", "Bearer $apiKey")
+            } else {
+                setRequestProperty("x-goog-api-key", apiKey)
             }
-            setRequestProperty("x-goog-api-key", apiKey)
         }
 
         val promptText = when (mode) {

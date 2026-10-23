@@ -540,6 +540,29 @@ object GraphiteRepository {
         }
     }
 
+    fun updateNotebookCover(id: String, cover: NotebookCover) {
+        val now = System.currentTimeMillis()
+        val formatter = SimpleDateFormat("dd/MM/yy hh:mm a", Locale.getDefault())
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val index = userList.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val existing = userList[index]
+            val updated = existing.copy(
+                cover = cover,
+                updatedAtMillis = now,
+                updatedAtFormatted = formatter.format(Date(now)),
+                version = existing.version + 1
+            )
+            userList[index] = updated
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
+        }
+    }
+
     fun updateNotebookFilePath(id: String, filePath: String, mimeType: String? = null) {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }

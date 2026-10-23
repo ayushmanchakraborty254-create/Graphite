@@ -132,6 +132,7 @@ fun NoteshelfScreen(
     var showNewFolderDialog by remember { mutableStateOf(false) }
     var selectedParentFolderForSubfolder by remember { mutableStateOf<FolderItem?>(null) }
     var showRenameDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
+    var showCoverPickerForNote by remember { mutableStateOf<NotebookItem?>(null) }
     var showMoveFolderDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
     var showMoveMultiFolderDialog by remember { mutableStateOf(false) }
     var showCreationOptionsSheet by remember { mutableStateOf(false) }
@@ -1382,6 +1383,7 @@ fun NoteshelfScreen(
                                 onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
                                 onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
                                 onRename = { showRenameDialogForNote = notebook },
+                                onChangeCover = { showCoverPickerForNote = notebook },
                                 onMoveFolder = { showMoveFolderDialogForNote = notebook },
                                 onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
                                 onPermanentlyDelete = { notesToDelete = listOf(notebook) },
@@ -1492,6 +1494,7 @@ fun NoteshelfScreen(
                                 onToggleStar = { GraphiteRepository.toggleStarNotebook(notebook.id) },
                                 onToggleBookmark = { GraphiteRepository.toggleBookmarkNotebook(notebook.id) },
                                 onRename = { showRenameDialogForNote = notebook },
+                                onChangeCover = { showCoverPickerForNote = notebook },
                                 onMoveFolder = { showMoveFolderDialogForNote = notebook },
                                 onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
                                 onPermanentlyDelete = { notesToDelete = listOf(notebook) },
@@ -1901,6 +1904,22 @@ fun NoteshelfScreen(
                 showRenameDialogForNote = null
             }
         )
+    }
+
+    showCoverPickerForNote?.let { note ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { showCoverPickerForNote = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            FullCoverPickerSheet(
+                selectedCover = note.cover,
+                onSelectCover = { newCover ->
+                    GraphiteRepository.updateNotebookCover(note.id, newCover)
+                    showCoverPickerForNote = null
+                },
+                onDismiss = { showCoverPickerForNote = null }
+            )
+        }
     }
 
     showMoveFolderDialogForNote?.let { note ->
@@ -2572,6 +2591,7 @@ private fun NotebookThumbnailCard(
     onToggleStar: () -> Unit,
     onToggleBookmark: () -> Unit,
     onRename: () -> Unit,
+    onChangeCover: (() -> Unit)? = null,
     onMoveFolder: () -> Unit,
     onRestore: () -> Unit,
     onPermanentlyDelete: () -> Unit,
@@ -3019,6 +3039,16 @@ private fun NotebookThumbnailCard(
                             onRename()
                         }
                     )
+                    if (!isPdf) {
+                        DropdownMenuItem(
+                            text = { Text("Change Cover", color = Color.White) },
+                            leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null, tint = GraphiteOrange) },
+                            onClick = {
+                                menuExpanded = false
+                                onChangeCover?.invoke()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Move to Folder", color = Color.White) },
                         onClick = {
@@ -3125,6 +3155,7 @@ private fun NotebookListRow(
     onToggleStar: () -> Unit,
     onToggleBookmark: () -> Unit,
     onRename: () -> Unit,
+    onChangeCover: (() -> Unit)? = null,
     onMoveFolder: () -> Unit,
     onRestore: () -> Unit,
     onPermanentlyDelete: () -> Unit,
@@ -3360,6 +3391,16 @@ private fun NotebookListRow(
                     text = { Text("Rename", color = Color.White) },
                     onClick = { menuExpanded = false; onRename() }
                 )
+                if (!isPdf) {
+                    DropdownMenuItem(
+                        text = { Text("Change Cover", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null, tint = GraphiteOrange) },
+                        onClick = {
+                            menuExpanded = false
+                            onChangeCover?.invoke()
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Move to Folder", color = Color.White) },
                     onClick = { menuExpanded = false; onMoveFolder() }
