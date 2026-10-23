@@ -694,11 +694,13 @@ object GraphiteRepository {
         } catch (_: Throwable) { null }
 
         for (remote in remoteNotes) {
-            // Strict account isolation: Verify note belongs to current user
-            val belongsToUser = remote.userId == currentUid ||
-                (currentSupabaseId != null && remote.userId == currentSupabaseId) ||
-                (deterministicId != null && remote.userId == deterministicId) ||
-                (currentUid == "guest" && (remote.userId == null || remote.userId == "guest" || remote.userId == "default"))
+            // Account isolation: Verify note belongs to current user (or is blank/default/supabase UUID)
+            val belongsToUser = remote.userId.isNullOrBlank() ||
+                remote.userId.equals(currentUid, ignoreCase = true) ||
+                remote.userId == "default" ||
+                remote.userId == "guest" ||
+                (currentSupabaseId != null && remote.userId.equals(currentSupabaseId, ignoreCase = true)) ||
+                (deterministicId != null && remote.userId.equals(deterministicId, ignoreCase = true))
 
             if (!belongsToUser) {
                 continue

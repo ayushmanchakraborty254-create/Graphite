@@ -2339,21 +2339,24 @@ class GoogleDriveManager(
                 remoteAnywhere.getOrNull()
             }
 
-            // 2. If existing, download and reconcile first (so notes from previous sessions/devices are not overwritten)
+            // 2. If existing and local notes are empty, download and reconcile (e.g. fresh install before Supabase sync)
             if (existingRemote != null) {
-                _notesSyncStatus.value = "Fetching existing remote notes..."
-                val downloadRes = uploader.downloadFile(accountEmail, existingRemote.id)
-                if (downloadRes.isSuccess) {
-                    val remoteBytes = downloadRes.getOrThrow()
-                    if (remoteBytes.isNotEmpty()) {
-                        val remoteJson = remoteBytes.toString(Charsets.UTF_8)
-                        GraphiteRepository.importNotesFromJson(remoteJson, userId = accountEmail)
+                val hasLocalNotes = GraphiteRepository.getAllNotesForActiveUser().isNotEmpty()
+                if (!hasLocalNotes) {
+                    _notesSyncStatus.value = "Fetching existing remote notes..."
+                    val downloadRes = uploader.downloadFile(accountEmail, existingRemote.id)
+                    if (downloadRes.isSuccess) {
+                        val remoteBytes = downloadRes.getOrThrow()
+                        if (remoteBytes.isNotEmpty()) {
+                            val remoteJson = remoteBytes.toString(Charsets.UTF_8)
+                            GraphiteRepository.importNotesFromJson(remoteJson, userId = accountEmail)
+                        }
+                    } else {
+                        val ex = downloadRes.exceptionOrNull() ?: IOException("Failed to download notes backup from Drive")
+                        _isSyncingNotes.value = false
+                        _notesSyncStatus.value = "Download failed: ${ex.message}"
+                        return@withContext Result.failure(ex)
                     }
-                } else {
-                    val ex = downloadRes.exceptionOrNull() ?: IOException("Failed to download notes backup from Drive")
-                    _isSyncingNotes.value = false
-                    _notesSyncStatus.value = "Download failed: ${ex.message}"
-                    return@withContext Result.failure(ex)
                 }
             }
 
@@ -2434,6 +2437,37 @@ class GoogleDriveManager(
         } catch (e: Exception) {
             _isSyncingNotes.value = false
             _notesSyncStatus.value = "Notes sync failed: ${e.message}"
+            Result.failure(e)
+        }
+    }
+
+    suspend fun backupNotesToDriveDirectly(context: Context, targetEmail: String? = null): Result<Int> = withContext(ioDispatcher) {
+        val accountEmail = targetEmail?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
+            ?: getAuthorizedAccountEmail()
+            ?: return@withContext Result.failure(IllegalStateException("No authorized email for Drive backup"))
+        if (!hasDrivePermission(context)) return@withContext Result.failure(IllegalStateException("No Drive permission"))
+
+        try {
+            val uploader = uploaderProvider(context)
+            val fileName = "graphite_notes_backup.json"
+            val mimeType = "application/json"
+
+            val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
+            val notesFolder = existingFolders.find { it.name.equals("Graphite Notes", ignoreCase = true) }
+                ?: uploader.createFolder(accountEmail, "Graphite Notes", "root").getOrDefault(DriveFolder("folder_graphite_notes", "Graphite Notes"))
+            val notesFolderId = notesFolder.id
+
+            val remoteInFolder = uploader.findFileByName(accountEmail, fileName, notesFolderId).getOrNull()
+            val mergedJson = GraphiteRepository.exportNotesAsJson(userId = accountEmail)
+            val uploadBytes = mergedJson.toByteArray(Charsets.UTF_8)
+
+            if (remoteInFolder != null) {
+                uploader.updateFile(accountEmail, remoteInFolder.id, mimeType, uploadBytes)
+            } else {
+                uploader.upload(accountEmail, fileName, mimeType, uploadBytes, notesFolderId)
+            }
+            Result.success(1)
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

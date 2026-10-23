@@ -1914,8 +1914,8 @@ fun NoteshelfScreen(
                     try {
                         val driveManager = com.graphite.app.GraphiteApplication.instance.googleDriveManager
                         val email = driveManager.getAuthorizedAccountEmail()
-                        if (!email.isNullOrBlank()) {
-                            driveManager.syncNotesWithDrive(context)
+                        if (!email.isNullOrBlank() && driveManager.hasDrivePermission(context)) {
+                            driveManager.backupNotesToDriveDirectly(context, email)
                         }
                     } catch (_: Exception) {}
                     isDeletingNotesCloud = false
@@ -2479,7 +2479,7 @@ private fun Modifier.notebookTapDragModifier(
     getRootPosition: () -> Offset = { Offset.Zero }
 ): Modifier = this.pointerInput(key) {
     awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
+        val down = awaitFirstDown(requireUnconsumed = true)
         val downTime = System.currentTimeMillis()
         val startPos = down.position
         val touchSlop = viewConfiguration.touchSlop
@@ -2497,7 +2497,7 @@ private fun Modifier.notebookTapDragModifier(
                     onDragEnd?.invoke()
                 } else if (!isLongClickTriggered) {
                     val duration = System.currentTimeMillis() - downTime
-                    if (duration < 350) {
+                    if (duration < 350 && !current.isConsumed && !down.isConsumed) {
                         current.consume()
                         onClick()
                     }
@@ -2871,15 +2871,13 @@ private fun NotebookThumbnailCard(
                 }
 
                 // Quick Star Icon on bottom-left - High-contrast elevated circular button
-                Box(
+                IconButton(
+                    onClick = onToggleStar,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(4.dp)
                         .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .clickable { onToggleStar() },
-                    contentAlignment = Alignment.Center
+                        .background(Color.Black.copy(alpha = 0.55f), CircleShape)
                 ) {
                     Icon(
                         imageVector = if (notebook.isStarred) Icons.Default.Star else Icons.Default.StarBorder,

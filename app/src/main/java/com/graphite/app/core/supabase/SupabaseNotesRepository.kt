@@ -86,7 +86,7 @@ class SupabaseNotesRepository(
 
             executeWithRetry { token ->
                 Request.Builder()
-                    .url("$baseUrl/rest/v1/notebooks?select=*&user_id=eq.$userId")
+                    .url("$baseUrl/rest/v1/notebooks?select=*")
                     .header("apikey", publishableKey)
                     .header("Authorization", "Bearer $token")
                     .header("Accept", "application/json")
@@ -103,10 +103,7 @@ class SupabaseNotesRepository(
                 val dtoList = json.decodeFromString<List<SupabaseNotebookDto>>(body)
                 val context = try { com.graphite.app.GraphiteApplication.instance } catch (_: Throwable) { null }
 
-                // Strictly filter to ensure only notes belonging to the current authenticated user are processed
-                val userOnlyDtoList = dtoList.filter { it.userId == userId }
-
-                val notebooks = userOnlyDtoList.map { dto ->
+                val notebooks = dtoList.map { dto ->
                     var resolvedMimeType: String? = null
                     var resolvedFileName: String? = null
                     var resolvedPageCount = 1
@@ -415,7 +412,7 @@ class SupabaseNotesRepository(
                         .build()
                 }.use { response ->
                     val body = response.body?.string()?.trim() ?: ""
-                    if (response.isSuccessful && body.isNotBlank() && body != "[]") {
+                    if (response.isSuccessful && (response.code == 204 || (body.isNotBlank() && body != "[]"))) {
                         isPurged = true
                     }
                 }
