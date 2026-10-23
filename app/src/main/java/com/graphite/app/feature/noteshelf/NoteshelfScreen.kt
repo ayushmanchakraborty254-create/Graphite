@@ -746,6 +746,7 @@ fun NoteshelfScreen(
                             } else {
                                 isSyncingNotes = true
                                 scope.launch {
+                                    googleAccountManager.ensureAuthenticatedWithSupabase(context)
                                     val sResult = syncManager.syncNotes()
                                     isSyncingNotes = false
                                     if (sResult.isSuccess) {
@@ -1910,6 +1911,13 @@ fun NoteshelfScreen(
                         } catch (_: Exception) {}
                         GraphiteRepository.permanentlyDeleteNotebook(n.id)
                     }
+                    try {
+                        val driveManager = com.graphite.app.GraphiteApplication.instance.googleDriveManager
+                        val email = driveManager.getAuthorizedAccountEmail()
+                        if (!email.isNullOrBlank()) {
+                            driveManager.syncNotesWithDrive(context)
+                        }
+                    } catch (_: Exception) {}
                     isDeletingNotesCloud = false
                     selectedNotebookIds = selectedNotebookIds - targetNotes.map { it.id }.toSet()
                     notesToDelete = null

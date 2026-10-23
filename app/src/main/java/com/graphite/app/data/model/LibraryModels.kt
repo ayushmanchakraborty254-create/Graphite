@@ -10,7 +10,7 @@ data class Book(
     val author: String,
     val progressPercent: Int = 0,
     val coverType: BookCoverType = BookCoverType.TREASURE_ISLAND,
-    val lastReadTimeMillis: Long = System.currentTimeMillis(),
+    val lastReadTimeMillis: Long = 0L,
     val totalChapters: Int = 34,
     val currentChapter: Int = 1,
     val content: String = "",
@@ -23,7 +23,8 @@ data class Book(
     val driveFolderId: String? = null,
     val driveFolderName: String? = null,
     val coverImagePath: String? = null,
-    val rootDriveFolderId: String? = null
+    val rootDriveFolderId: String? = null,
+    val hasBeenRead: Boolean = false
 ) {
     val isCloudOnly: Boolean get() = filePath == null && !driveFileId.isNullOrBlank()
 }

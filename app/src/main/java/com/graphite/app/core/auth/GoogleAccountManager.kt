@@ -214,9 +214,22 @@ class GoogleAccountManager(
             if (supabaseAuthManager != null) {
                 CoroutineScope(Dispatchers.IO).launch {
                     val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
-                    if (!idToken.isNullOrBlank()) {
+                    var tokenToUse = idToken
+                    if (tokenToUse.isNullOrBlank()) {
+                        val ctx = context ?: try { com.graphite.app.GraphiteApplication.instance } catch (_: Throwable) { null }
+                        if (ctx != null) {
+                            try {
+                                val client = GoogleSignIn.getClient(ctx, getGoogleSignInOptions())
+                                val silentTask = com.google.android.gms.tasks.Tasks.await(client.silentSignIn(), 5, java.util.concurrent.TimeUnit.SECONDS)
+                                tokenToUse = silentTask?.idToken
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    if (!tokenToUse.isNullOrBlank()) {
+                        secureStorage.putString(KEY_GOOGLE_ID_TOKEN, tokenToUse)
                         try {
-                            val authResult = supabaseAuthManager.signInWithGoogleIdToken(idToken)
+                            val authResult = supabaseAuthManager.signInWithGoogleIdToken(tokenToUse)
                             if (authResult.isSuccess) {
                                 val session = authResult.getOrThrow()
                                 if (photoUrl.isNullOrBlank() && !session.user.avatarUrl.isNullOrBlank()) {
@@ -261,6 +274,50 @@ class GoogleAccountManager(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    suspend fun ensureAuthenticatedWithSupabase(context: Context): Boolean = withContext(Dispatchers.IO) {
+        if (supabaseAuthManager == null) return@withContext false
+        val current = supabaseAuthManager.currentSession
+        if (current != null && !current.isExpired && current.accessToken.isNotBlank() && current.accessToken != GraphiteConfig.supabasePublishableKey) {
+            return@withContext true
+        }
+
+        // 1. Try refreshing session via refresh_token
+        val refreshRes = supabaseAuthManager.refreshSession(force = true)
+        if (refreshRes.isSuccess && refreshRes.getOrNull()?.accessToken?.isNotBlank() == true) {
+            return@withContext true
+        }
+
+        // 2. Refresh Google ID token silently
+        val freshToken = kotlinx.coroutines.suspendCancellableCoroutine<String?> { cont ->
+            try {
+                val client = GoogleSignIn.getClient(context, getGoogleSignInOptions())
+                client.silentSignIn().addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        val acct = task.result
+                        val tok = acct?.idToken
+                        if (!tok.isNullOrBlank()) {
+                            secureStorage.putString(KEY_GOOGLE_ID_TOKEN, tok)
+                        }
+                        if (cont.isActive) cont.resumeWith(Result.success(tok))
+                    } else {
+                        if (cont.isActive) cont.resumeWith(Result.success(secureStorage.getString(KEY_GOOGLE_ID_TOKEN)))
+                    }
+                }
+            } catch (_: Exception) {
+                if (cont.isActive) cont.resumeWith(Result.success(secureStorage.getString(KEY_GOOGLE_ID_TOKEN)))
+            }
+        }
+
+        if (!freshToken.isNullOrBlank()) {
+            val authRes = supabaseAuthManager.signInWithGoogleIdToken(freshToken)
+            if (authRes.isSuccess) {
+                return@withContext true
+            }
+        }
+
+        false
     }
 
     fun setProfileDirectly(profile: GoogleProfile) {

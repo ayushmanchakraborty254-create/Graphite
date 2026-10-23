@@ -87,6 +87,10 @@ fun ReaderViewScreen(
         return
     }
 
+    LaunchedEffect(book.id) {
+        GraphiteRepository.markBookAsRead(book.id)
+    }
+
     val ext = book.filePath?.substringAfterLast('.', "")?.lowercase() ?: ""
     val isPdf = (book.filePath != null && ext == "pdf") || book.mimeType.contains("pdf", ignoreCase = true) || !book.driveFileId.isNullOrBlank()
     val isPptx = ext in listOf("pptx", "ppt") || book.coverType == BookCoverType.CE_PPT || book.mimeType.contains("presentation", ignoreCase = true)

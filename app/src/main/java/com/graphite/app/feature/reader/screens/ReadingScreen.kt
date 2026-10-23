@@ -121,8 +121,12 @@ fun ReadingScreen(
             )
         }
 
-        // Recent Books List or Grid
-        val filteredBooks = if (searchQuery.isBlank()) books else books.filter {
+        // Recent Books List or Grid (Strictly books that have been opened / read)
+        val recentBooks = remember(books) {
+            books.filter { it.hasBeenRead && it.lastReadTimeMillis > 0L }
+                .sortedByDescending { it.lastReadTimeMillis }
+        }
+        val filteredBooks = if (searchQuery.isBlank()) recentBooks else recentBooks.filter {
             it.title.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true)
         }
 
@@ -150,7 +154,7 @@ fun ReadingScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (!hasActiveSession) "Sign in with Google to sync your reading library, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Your opened and imported PDF books will appear here",
+                        text = if (!hasActiveSession) "Sign in with Google to sync your reading library, or use a guest account to read offline." else if (searchQuery.isNotBlank()) "Try a different search query" else "Books you open and read will appear here",
                         color = Color(0xFF9E9E9E),
                         fontSize = 13.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -175,43 +179,12 @@ fun ReadingScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                items(filteredBooks.size) { idx ->
+                items(filteredBooks.size, key = { filteredBooks[it].id }) { idx ->
                     val book = filteredBooks[idx]
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable { onOpenBook(book.id) },
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141414))
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            BookCover(
-                                book = book,
-                                modifier = Modifier.width(90.dp).height(125.dp)
-                            )
-                            Text(
-                                text = book.title,
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                            )
-                            Button(
-                                onClick = { onOpenBook(book.id) },
-                                shape = RoundedCornerShape(16.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("${book.progressPercent}%", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
+                    RecentBookGridCard(
+                        book = book,
+                        onOpen = { onOpenBook(book.id) }
+                    )
                 }
             }
         } else {
@@ -219,7 +192,7 @@ fun ReadingScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(filteredBooks) { book ->
+                items(filteredBooks, key = { it.id }) { book ->
                     RecentBookCard(
                         book = book,
                         onOpen = { onOpenBook(book.id) }
@@ -247,11 +220,113 @@ fun ReadingScreen(
 }
 
 @Composable
+private fun RecentBookGridCard(
+    book: Book,
+    onOpen: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onOpen),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF141414))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                BookCover(
+                    book = book,
+                    modifier = Modifier
+                        .width(90.dp)
+                        .height(125.dp)
+                        .align(Alignment.Center)
+                )
+                Box(modifier = Modifier.align(Alignment.TopEnd)) {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Options",
+                            tint = Color(0xFF888888),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                        modifier = Modifier.background(GraphiteSurfaceVariant)
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Open Reader", color = Color.White) },
+                            onClick = {
+                                menuExpanded = false
+                                onOpen()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Mark as Completed", color = Color.White) },
+                            onClick = {
+                                GraphiteRepository.updateBookProgress(book.id, 100)
+                                menuExpanded = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Remove from Recents", color = Color(0xFFFF8A80)) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFF8A80),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                GraphiteRepository.removeBookFromRecents(book.id)
+                                menuExpanded = false
+                                android.widget.Toast.makeText(context, "Removed from Recents", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = book.title,
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+
+            Button(
+                onClick = onOpen,
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(28.dp)
+            ) {
+                Text("${book.progressPercent}%", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
 private fun RecentBookCard(
     book: Book,
     onOpen: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Row(
         modifier = Modifier
@@ -347,6 +422,22 @@ private fun RecentBookCard(
                     onClick = {
                         GraphiteRepository.updateBookProgress(book.id, 100)
                         menuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Remove from Recents", color = Color(0xFFFF8A80)) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = null,
+                            tint = Color(0xFFFF8A80),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    onClick = {
+                        GraphiteRepository.removeBookFromRecents(book.id)
+                        menuExpanded = false
+                        android.widget.Toast.makeText(context, "Removed from Recents", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 )
             }

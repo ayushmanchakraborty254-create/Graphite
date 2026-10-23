@@ -410,11 +410,12 @@ class SupabaseNotesRepository(
                         .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
                         .header("apikey", publishableKey)
                         .header("Authorization", "Bearer $token")
-                        .header("Prefer", "return=minimal")
+                        .header("Prefer", "return=representation")
                         .delete()
                         .build()
                 }.use { response ->
-                    if (response.isSuccessful || response.code == 404) {
+                    val body = response.body?.string()?.trim() ?: ""
+                    if (response.isSuccessful && body.isNotBlank() && body != "[]") {
                         isPurged = true
                     }
                 }

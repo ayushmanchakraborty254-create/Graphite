@@ -270,7 +270,38 @@ object GraphiteRepository {
             if (userBookList[i].id == id) {
                 userBookList[i] = userBookList[i].copy(
                     progressPercent = progress.coerceIn(0, 100),
+                    lastReadTimeMillis = System.currentTimeMillis(),
+                    hasBeenRead = true
+                )
+            }
+        }
+        _books.value = userBookList.toList()
+        saveToDisk()
+    }
+
+    fun markBookAsRead(id: String) {
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        for (i in userBookList.indices) {
+            if (userBookList[i].id == id) {
+                userBookList[i] = userBookList[i].copy(
+                    hasBeenRead = true,
                     lastReadTimeMillis = System.currentTimeMillis()
+                )
+            }
+        }
+        _books.value = userBookList.toList()
+        saveToDisk()
+    }
+
+    fun removeBookFromRecents(id: String) {
+        val currentUid = activeUserId ?: "guest"
+        val userBookList = userBooksMap.getOrPut(currentUid) { mutableListOf() }
+        for (i in userBookList.indices) {
+            if (userBookList[i].id == id) {
+                userBookList[i] = userBookList[i].copy(
+                    hasBeenRead = false,
+                    lastReadTimeMillis = 0L
                 )
             }
         }
@@ -312,7 +343,8 @@ object GraphiteRepository {
                 content = if (scopedBook.content.isNotBlank()) scopedBook.content else existing.content,
                 totalChapters = if (scopedBook.totalChapters > 1) scopedBook.totalChapters else existing.totalChapters,
                 coverImagePath = scopedBook.coverImagePath ?: existing.coverImagePath,
-                rootDriveFolderId = scopedBook.rootDriveFolderId ?: existing.rootDriveFolderId
+                rootDriveFolderId = scopedBook.rootDriveFolderId ?: existing.rootDriveFolderId,
+                hasBeenRead = scopedBook.hasBeenRead || existing.hasBeenRead
             )
             userBookList[existingIndex] = updated
             resultingBook = updated
@@ -663,12 +695,10 @@ object GraphiteRepository {
 
         for (remote in remoteNotes) {
             // Strict account isolation: Verify note belongs to current user
-            val belongsToUser = remote.userId == null ||
-                remote.userId == currentUid ||
+            val belongsToUser = remote.userId == currentUid ||
                 (currentSupabaseId != null && remote.userId == currentSupabaseId) ||
                 (deterministicId != null && remote.userId == deterministicId) ||
-                remote.userId == "default" ||
-                remote.userId == "guest"
+                (currentUid == "guest" && (remote.userId == null || remote.userId == "guest" || remote.userId == "default"))
 
             if (!belongsToUser) {
                 continue
@@ -1275,6 +1305,7 @@ object GraphiteRepository {
             book.driveFolderName?.let { put("driveFolderName", it) }
             book.coverImagePath?.let { put("coverImagePath", it) }
             book.rootDriveFolderId?.let { put("rootDriveFolderId", it) }
+            put("hasBeenRead", book.hasBeenRead)
         }
     }
 
@@ -1285,7 +1316,7 @@ object GraphiteRepository {
             author = json.optString("author", "Unknown Author"),
             progressPercent = json.optInt("progressPercent", 0),
             coverType = try { BookCoverType.valueOf(json.optString("coverType", "TREASURE_ISLAND")) } catch (_: Exception) { BookCoverType.CUSTOM },
-            lastReadTimeMillis = json.optLong("lastReadTimeMillis", System.currentTimeMillis()),
+            lastReadTimeMillis = json.optLong("lastReadTimeMillis", 0L),
             totalChapters = json.optInt("totalChapters", 1),
             currentChapter = json.optInt("currentChapter", 1),
             content = json.optString("content", ""),
@@ -1298,7 +1329,8 @@ object GraphiteRepository {
             driveFolderId = if (json.has("driveFolderId") && !json.isNull("driveFolderId")) json.getString("driveFolderId") else null,
             driveFolderName = if (json.has("driveFolderName") && !json.isNull("driveFolderName")) json.getString("driveFolderName") else null,
             coverImagePath = if (json.has("coverImagePath") && !json.isNull("coverImagePath")) json.getString("coverImagePath") else null,
-            rootDriveFolderId = if (json.has("rootDriveFolderId") && !json.isNull("rootDriveFolderId")) json.getString("rootDriveFolderId") else null
+            rootDriveFolderId = if (json.has("rootDriveFolderId") && !json.isNull("rootDriveFolderId")) json.getString("rootDriveFolderId") else null,
+            hasBeenRead = if (json.has("hasBeenRead")) json.optBoolean("hasBeenRead", false) else (json.optInt("progressPercent", 0) > 0)
         )
     }
 }
