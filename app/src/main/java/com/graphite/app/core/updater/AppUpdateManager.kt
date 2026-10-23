@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -51,7 +52,8 @@ data class UpdateInfo(
     val releaseNotes: String,
     val downloadUrl: String,
     val publishedAt: String,
-    val isNewer: Boolean
+    val isNewer: Boolean,
+    val apkSize: Long = 0L
 )
 
 sealed class UpdateState {
@@ -100,6 +102,15 @@ class AppUpdateManager(
         isManualCheck: Boolean = false,
         onComplete: (Boolean) -> Unit = {}
     ) {
+        val currentState = _updateState.value
+        // NEVER interrupt an active download or a build ready to install
+        if (currentState is UpdateState.Downloading || currentState is UpdateState.ReadyToInstall) {
+            onComplete(false)
+            return
+        }
+        if (!isManualCheck && currentState is UpdateState.Checking) {
+            return
+        }
         _updateState.value = UpdateState.Checking
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -134,6 +145,7 @@ class AppUpdateManager(
                 // Find APK asset download URL and accurate asset upload timestamp
                 var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
                 var assetTimestamp = publishedAt
+                var apkSize = 0L
                 val assets = latest.optJSONArray("assets")
                 if (assets != null) {
                     for (i in 0 until assets.length()) {
@@ -143,6 +155,7 @@ class AppUpdateManager(
                             apkUrl = asset.optString("browser_download_url", apkUrl)
                             val upd = asset.optString("updated_at", "")
                             if (upd.isNotBlank()) assetTimestamp = upd
+                            apkSize = asset.optLong("size", 0L)
                             break
                         }
                     }
@@ -187,7 +200,8 @@ class AppUpdateManager(
                         releaseNotes = body,
                         downloadUrl = apkUrl,
                         publishedAt = publishedAt,
-                        isNewer = true
+                        isNewer = true,
+                        apkSize = apkSize
                     )
                     _latestAvailableUpdate.value = updateInfo
 
@@ -223,8 +237,11 @@ class AppUpdateManager(
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
         lastDownloadUrl = downloadUrl
-        _updateState.value = UpdateState.Downloading(0, 0L, 0L, 0L)
-        cancelDownload(context)
+        downloadJob?.cancel()
+        downloadJob = null
+
+        val knownTotalBytes = _latestAvailableUpdate.value?.apkSize ?: 0L
+        _updateState.value = UpdateState.Downloading(0, 0L, knownTotalBytes, 0L)
 
         downloadJob = CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -234,6 +251,7 @@ class AppUpdateManager(
                 val request = Request.Builder()
                     .url(downloadUrl)
                     .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                    .addHeader("Accept-Encoding", "identity")
                     .addHeader("Accept", "*/*")
                     .build()
 
@@ -244,7 +262,8 @@ class AppUpdateManager(
                 }
 
                 val body = response.body ?: throw IllegalStateException("Empty response body")
-                val contentLength = body.contentLength()
+                val headerLength = body.contentLength()
+                val contentLength = if (headerLength > 0L) headerLength else knownTotalBytes
 
                 val inputStream = body.byteStream()
                 val outputStream = FileOutputStream(apkFile)
@@ -254,6 +273,7 @@ class AppUpdateManager(
                 var totalBytesRead = 0L
                 var lastUpdateTime = System.currentTimeMillis()
                 var bytesSinceLastUpdate = 0L
+                var smoothedSpeedKbps = 0L
 
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     outputStream.write(buffer, 0, bytesRead)
@@ -262,20 +282,21 @@ class AppUpdateManager(
 
                     val now = System.currentTimeMillis()
                     val elapsed = now - lastUpdateTime
-                    if (elapsed >= 200L || (contentLength > 0 && totalBytesRead == contentLength)) {
-                        val speed = if (elapsed > 0) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
+                    if (elapsed >= 250L || (contentLength > 0L && totalBytesRead >= contentLength)) {
+                        val instantSpeed = if (elapsed > 0L) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
+                        smoothedSpeedKbps = if (smoothedSpeedKbps == 0L) instantSpeed else ((smoothedSpeedKbps * 3 + instantSpeed) / 4)
                         lastUpdateTime = now
                         bytesSinceLastUpdate = 0L
 
-                        val progress = if (contentLength > 0) {
-                            ((totalBytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
+                        val progress = if (contentLength > 0L) {
+                            ((totalBytesRead * 100L) / contentLength).toInt().coerceIn(0, 100)
                         } else 0
 
                         _updateState.value = UpdateState.Downloading(
                             progressPercent = progress,
                             bytesDownloaded = totalBytesRead,
                             totalBytes = contentLength,
-                            speedKbps = speed
+                            speedKbps = smoothedSpeedKbps
                         )
                     }
                 }
@@ -284,7 +305,7 @@ class AppUpdateManager(
                 outputStream.close()
                 inputStream.close()
 
-                if (apkFile.length() == 0L || (contentLength > 0 && totalBytesRead < contentLength)) {
+                if (apkFile.length() == 0L || (contentLength > 0L && totalBytesRead < contentLength)) {
                     _updateState.value = UpdateState.Error("Download incomplete: received $totalBytesRead of $contentLength bytes")
                     return@launch
                 }
@@ -295,7 +316,7 @@ class AppUpdateManager(
                 }
             } catch (e: Exception) {
                 if (e !is kotlinx.coroutines.CancellationException) {
-                    _updateState.value = UpdateState.Error("Download failed: ${e.message}")
+                    _updateState.value = UpdateState.Error("Download failed: ${e.message ?: "Network error"}")
                 }
             }
         }
@@ -478,7 +499,7 @@ fun AppUpdateModalDialog(
         }
         is UpdateState.Downloading -> {
             AlertDialog(
-                onDismissRequest = { updateManager.cancelDownload(context) },
+                onDismissRequest = { /* Do not abort download on accidental tap outside */ },
                 title = {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -508,12 +529,21 @@ fun AppUpdateModalDialog(
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        LinearProgressIndicator(
-                            progress = { if (state.totalBytes > 0) (state.bytesDownloaded.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f) else 0f },
-                            modifier = Modifier.fillMaxWidth().height(8.dp),
-                            color = GraphiteOrange,
-                            trackColor = Color(0xFF333333)
-                        )
+                        if (state.totalBytes > 0L) {
+                            val fraction = (state.bytesDownloaded.toFloat() / state.totalBytes.toFloat()).coerceIn(0f, 1f)
+                            LinearProgressIndicator(
+                                progress = { fraction },
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                color = GraphiteOrange,
+                                trackColor = Color(0xFF333333)
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                color = GraphiteOrange,
+                                trackColor = Color(0xFF333333)
+                            )
+                        }
                         Spacer(modifier = Modifier.height(10.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),

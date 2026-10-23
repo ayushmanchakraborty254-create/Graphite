@@ -242,12 +242,21 @@ fun MeScreen(
                     if (updateState is UpdateState.Downloading) {
                         val dlState = updateState as UpdateState.Downloading
                         Spacer(modifier = Modifier.height(10.dp))
-                        LinearProgressIndicator(
-                            progress = { if (dlState.totalBytes > 0) (dlState.bytesDownloaded.toFloat() / dlState.totalBytes.toFloat()).coerceIn(0f, 1f) else 0f },
-                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                            color = GraphiteOrange,
-                            trackColor = Color(0xFF333338)
-                        )
+                        if (dlState.totalBytes > 0L) {
+                            val frac = (dlState.bytesDownloaded.toFloat() / dlState.totalBytes.toFloat()).coerceIn(0f, 1f)
+                            LinearProgressIndicator(
+                                progress = { frac },
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                color = GraphiteOrange,
+                                trackColor = Color(0xFF333338)
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                color = GraphiteOrange,
+                                trackColor = Color(0xFF333338)
+                            )
+                        }
                     }
                 }
             }
