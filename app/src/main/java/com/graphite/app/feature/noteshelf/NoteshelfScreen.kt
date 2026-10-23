@@ -50,8 +50,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.rotate
@@ -749,7 +750,18 @@ fun NoteshelfScreen(
                                     if (sResult.isSuccess) {
                                         Toast.makeText(context, "Synced ${sResult.getOrNull()} notes with Supabase", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        Toast.makeText(context, "Sync error: ${sResult.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_SHORT).show()
+                                        val err = sResult.exceptionOrNull()?.message ?: ""
+                                        val userFriendlyMsg = when {
+                                            err.contains("42501") || err.contains("row-level security", ignoreCase = true) ->
+                                                "Notes saved locally. Sign in with Google to sync across devices."
+                                            err.contains("401") || err.contains("unauthorized", ignoreCase = true) ->
+                                                "Sync session expired. Please tap your avatar to refresh."
+                                            err.contains("Unable to resolve host") || err.contains("timeout", ignoreCase = true) ->
+                                                "Network offline. Notes saved safely on device."
+                                            else ->
+                                                "Notes saved locally on device."
+                                        }
+                                        Toast.makeText(context, userFriendlyMsg, Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -2441,6 +2453,74 @@ private fun FolderListRow(
     }
 }
 
+/**
+ * Handles three distinct note item gestures:
+ * 1. Quick tap (< 350ms): calls onClick (opens the note).
+ * 2. Stationary hold (>= 380ms): calls onLongClick (selects the note / enters selection mode).
+ * 3. Touch and move past touchSlop: starts immediate drag-and-drop into folders.
+ */
+private fun Modifier.notebookTapDragModifier(
+    key: Any?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDragStart: ((Offset) -> Unit)? = null,
+    onDrag: ((Offset) -> Unit)? = null,
+    onDragEnd: (() -> Unit)? = null,
+    onDragCancel: (() -> Unit)? = null,
+    getRootPosition: () -> Offset = { Offset.Zero }
+): Modifier = this.pointerInput(key) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val downTime = System.currentTimeMillis()
+        val startPos = down.position
+        val touchSlop = viewConfiguration.touchSlop
+        var isDragging = false
+        var isLongClickTriggered = false
+        var isPointerReleased = false
+
+        while (!isPointerReleased) {
+            val event = awaitPointerEvent()
+            val current = event.changes.firstOrNull { it.id == down.id } ?: break
+
+            if (!current.pressed) {
+                isPointerReleased = true
+                if (isDragging) {
+                    onDragEnd?.invoke()
+                } else if (!isLongClickTriggered) {
+                    val duration = System.currentTimeMillis() - downTime
+                    if (duration < 350) {
+                        current.consume()
+                        onClick()
+                    }
+                }
+                break
+            }
+
+            val elapsed = System.currentTimeMillis() - downTime
+            val distance = (current.position - startPos).getDistance()
+
+            if (!isDragging && !isLongClickTriggered) {
+                // If user moves past touchSlop after smaller hold time than long press, start Drag immediately
+                if (distance > touchSlop && onDragStart != null) {
+                    isDragging = true
+                    current.consume()
+                    val rootStart = getRootPosition() + current.position
+                    onDragStart.invoke(rootStart)
+                } else if (elapsed >= 380) {
+                    // If user holds stationary for >= 380ms, trigger Long Tap Select
+                    isLongClickTriggered = true
+                    current.consume()
+                    onLongClick()
+                }
+            } else if (isDragging) {
+                current.consume()
+                val dragAmount = current.position - current.previousPosition
+                onDrag?.invoke(dragAmount)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotebookThumbnailCard(
@@ -2491,26 +2571,16 @@ private fun NotebookThumbnailCard(
                 cardPosRef.x = tl.x
                 cardPosRef.y = tl.y
             }
-            .pointerInput(notebook.id) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { localOffset ->
-                        onDragStart?.invoke(Offset(cardPosRef.x + localOffset.x, cardPosRef.y + localOffset.y))
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDrag?.invoke(dragAmount)
-                    },
-                    onDragEnd = {
-                        onDragEnd?.invoke()
-                    },
-                    onDragCancel = {
-                        onDragCancel?.invoke()
-                    }
-                )
-            }
-            .clickable {
-                onClick()
-            }
+            .notebookTapDragModifier(
+                key = notebook.id,
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onDragStart = onDragStart,
+                onDrag = onDrag,
+                onDragEnd = onDragEnd,
+                onDragCancel = onDragCancel,
+                getRootPosition = { Offset(cardPosRef.x, cardPosRef.y) }
+            )
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -3050,26 +3120,16 @@ private fun NotebookListRow(
             .onGloballyPositioned { coords ->
                 rowBoundsInRoot = coords.boundsInRoot()
             }
-            .pointerInput(notebook.id) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { localOffset ->
-                        onDragStart?.invoke(rowBoundsInRoot.topLeft + localOffset)
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDrag?.invoke(dragAmount)
-                    },
-                    onDragEnd = {
-                        onDragEnd?.invoke()
-                    },
-                    onDragCancel = {
-                        onDragCancel?.invoke()
-                    }
-                )
-            }
-            .clickable {
-                onClick()
-            }
+            .notebookTapDragModifier(
+                key = notebook.id,
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onDragStart = onDragStart,
+                onDrag = onDrag,
+                onDragEnd = onDragEnd,
+                onDragCancel = onDragCancel,
+                getRootPosition = { rowBoundsInRoot.topLeft }
+            )
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -54,6 +54,7 @@ class GoogleAccountManager(
         if (_currentUser.value != null || _isGuestMode.value) return
 
         try {
+            val client = GoogleSignIn.getClient(ctx, getGoogleSignInOptions())
             val lastAccount = GoogleSignIn.getLastSignedInAccount(ctx)
             if (lastAccount != null) {
                 val rawEmail = (lastAccount.account?.name ?: lastAccount.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
@@ -66,6 +67,22 @@ class GoogleAccountManager(
                         idToken = lastAccount.idToken
                     )
                     setProfileDirectly(profile)
+
+                    // Silently refresh Google tokens in the background to get fresh ID token and refresh Supabase auth
+                    client.silentSignIn().addOnCompleteListener { task ->
+                        if (task.isSuccessful) {
+                            val refreshed = task.result
+                            val freshToken = refreshed?.idToken
+                            if (!freshToken.isNullOrBlank() && supabaseAuthManager != null) {
+                                secureStorage.putString(KEY_GOOGLE_ID_TOKEN, freshToken)
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    try {
+                                        supabaseAuthManager.signInWithGoogleIdToken(freshToken)
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -109,13 +126,15 @@ class GoogleAccountManager(
                 com.graphite.app.GraphiteApplication.instance.googleDriveManager.saveAuthorizedAccount(email)
             } catch (_: Exception) {}
 
-            val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
-            supabaseAuthManager?.setSession(
-                SupabaseSession(
-                    accessToken = idToken ?: GraphiteConfig.supabasePublishableKey,
-                    user = SupabaseUser(id = deterministicUuid, email = email)
+            if (supabaseAuthManager?.isAuthenticated() == false) {
+                val deterministicUuid = java.util.UUID.nameUUIDFromBytes(email.toByteArray()).toString()
+                supabaseAuthManager.setSession(
+                    SupabaseSession(
+                        accessToken = idToken ?: GraphiteConfig.supabasePublishableKey,
+                        user = SupabaseUser(id = deterministicUuid, email = email)
+                    )
                 )
-            )
+            }
         } else if (isGuestSaved) {
             _currentUser.value = null
             _isGuestMode.value = true
@@ -132,7 +151,10 @@ class GoogleAccountManager(
             .requestIdToken(webClientId)
             .requestEmail()
             .requestProfile()
-            .requestScopes(com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_FILE))
+            .requestScopes(
+                com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_FILE),
+                com.google.android.gms.common.api.Scope(GraphiteConfig.DRIVE_SCOPE_READONLY)
+            )
             .build()
     }
 
@@ -261,6 +283,19 @@ class GoogleAccountManager(
                 user = SupabaseUser(id = userUid, email = profile.email)
             )
         )
+
+        if (!profile.idToken.isNullOrBlank() && supabaseAuthManager != null) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val authResult = supabaseAuthManager.signInWithGoogleIdToken(profile.idToken)
+                    if (authResult.isSuccess) {
+                        try {
+                            com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 0L)
+                        } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     fun signOut(context: Context, onComplete: () -> Unit = {}) {

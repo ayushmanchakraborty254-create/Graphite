@@ -13,6 +13,7 @@ import com.graphite.app.BuildConfig
 object GraphiteConfig {
 
     const val DRIVE_SCOPE_FILE = "https://www.googleapis.com/auth/drive.file"
+    const val DRIVE_SCOPE_READONLY = "https://www.googleapis.com/auth/drive.readonly"
 
     val supabaseUrl: String by lazy {
         val url = BuildConfig.SUPABASE_URL.trim()

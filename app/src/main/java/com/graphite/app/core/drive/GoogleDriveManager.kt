@@ -165,10 +165,13 @@ class DefaultDriveApiV3Uploader(
 ) : DriveApiV3Uploader {
 
     private fun getDriveService(accountEmail: String): Drive {
-        // Strict minimum scope: https://www.googleapis.com/auth/drive.file
+        // Authorized scopes: drive.file for app-created files, and drive.readonly for streaming linked cloud folders
         val credential = GoogleAccountCredential.usingOAuth2(
             context,
-            listOf(GraphiteConfig.DRIVE_SCOPE_FILE)
+            listOf(
+                GraphiteConfig.DRIVE_SCOPE_FILE,
+                GraphiteConfig.DRIVE_SCOPE_READONLY
+            )
         )
         val signInAccount = GoogleSignIn.getLastSignedInAccount(context)
         val storage = secureStorage ?: try { com.graphite.app.GraphiteApplication.instance.secureStorage } catch (_: Exception) { null }
@@ -574,9 +577,10 @@ class GoogleDriveManager(
     }
 
     /**
-     * Minimum scope for Google Drive: only files created or opened by Graphite.
+     * Scopes for Google Drive: app file access and read-only cloud library streaming.
      */
     val driveScope: Scope = Scope(GraphiteConfig.DRIVE_SCOPE_FILE)
+    val driveReadonlyScope: Scope = Scope(GraphiteConfig.DRIVE_SCOPE_READONLY)
 
     /**
      * Builds GoogleSignInOptions for the Android OAuth authorization flow.
@@ -1584,13 +1588,22 @@ class GoogleDriveManager(
             val uploader = uploaderProvider(context)
 
             // Resolve genuine Drive folder ID if it's a placeholder or needs name resolution
-            val targetFolderId = if (folder.id.startsWith("custom_") || folder.id.startsWith("default_")) {
+            var targetFolderId = if (folder.id.startsWith("custom_") || folder.id.startsWith("default_")) {
                 uploader.findFolderByName(accountEmail, folder.name).getOrNull()?.id ?: folder.id
             } else {
                 folder.id
             }
 
-            val filesResult = uploader.listFiles(accountEmail, targetFolderId)
+            var filesResult = uploader.listFiles(accountEmail, targetFolderId)
+            // If primary folder ID returned 0 files or failed, attempt name resolution as fallback
+            if (filesResult.isFailure || filesResult.getOrDefault(emptyList()).isEmpty()) {
+                val resolved = uploader.findFolderByName(accountEmail, folder.name).getOrNull()
+                if (resolved != null && resolved.id != targetFolderId) {
+                    targetFolderId = resolved.id
+                    filesResult = uploader.listFiles(accountEmail, targetFolderId)
+                }
+            }
+
             if (filesResult.isFailure) {
                 val err = filesResult.exceptionOrNull()
                 SafeLogger.e(TAG, "Failed to list files in cloud folder '${folder.name}' ($targetFolderId): ${err?.message}", err)
@@ -1601,6 +1614,7 @@ class GoogleDriveManager(
 
             var count = 0
             val localBooks = GraphiteRepository.books.value
+            val activeTwoWayId = _activeBookshelfFolder.value?.id
 
             for (remoteFile in files) {
                 val cleanName = remoteFile.name
@@ -1619,13 +1633,17 @@ class GoogleDriveManager(
                 }
 
                 if (existing != null) {
-                    val updated = existing.copy(
-                        driveFolderId = folder.id,
-                        driveFolderName = folder.name,
-                        driveFileId = remoteFile.id
-                    )
-                    GraphiteRepository.addBook(updated)
-                    count++
+                    // Do NOT re-tag books that belong to 2-way sync into cloud folders
+                    val isTwoWayBook = (activeTwoWayId != null && existing.driveFolderId == activeTwoWayId) || (!existing.isCloudOnly && existing.driveFolderId == null)
+                    if (!isTwoWayBook) {
+                        val updated = existing.copy(
+                            driveFolderId = folder.id,
+                            driveFolderName = folder.name,
+                            driveFileId = remoteFile.id
+                        )
+                        GraphiteRepository.addBook(updated)
+                        count++
+                    }
                 } else {
                     val rawBaseTitle = if (cleanName.endsWith(".pdf", ignoreCase = true)) cleanName.removeSuffix(".pdf") else cleanName
                     val displayTitle = rawBaseTitle.replace('_', ' ').replace('-', ' ').trim()

@@ -381,6 +381,19 @@ class SupabaseNotesRepository(
             }.use { response ->
                 val body = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
+                    if (response.code == 403 && (body.contains("42501") || body.contains("USING expression", ignoreCase = true))) {
+                        // A local note ID collided with an existing row owned by another account in the cloud table.
+                        // Re-key notes with fresh UUIDs locally and re-attempt upload under the current account.
+                        val rekeyedNotes = notebooks.map { note ->
+                            val freshId = java.util.UUID.randomUUID().toString()
+                            com.graphite.app.data.repository.GraphiteRepository.updateNotebookId(note.id, freshId)
+                            note.copy(id = freshId)
+                        }
+                        val retryResult = upsertNotes(rekeyedNotes)
+                        if (retryResult.isSuccess) {
+                            return@withContext retryResult
+                        }
+                    }
                     return@withContext Result.failure(
                         IOException("HTTP ${response.code} upserting notes: $body")
                     )

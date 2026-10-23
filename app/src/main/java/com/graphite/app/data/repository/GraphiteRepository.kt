@@ -408,6 +408,18 @@ object GraphiteRepository {
         return newNotebook
     }
 
+    fun updateNotebookId(oldId: String, newId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == oldId }
+        if (idx != -1) {
+            val existing = userList[idx]
+            userList[idx] = existing.copy(id = newId)
+            _notebooks.value = userList.filter { !it.isDeleted }
+            saveToDisk()
+        }
+    }
+
     fun setNotebookPassword(id: String, password: String?) {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
