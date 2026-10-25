@@ -21,7 +21,6 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.resume
-import kotlin.math.max
 import kotlin.math.min
 
 data class HandwritingRecognitionResult(
@@ -38,17 +37,19 @@ object HandwritingRecognizerHelper {
 
     // Active production Gemini multimodal vision models in order of speed and capability
     private val geminiModels = listOf(
-        "gemini-1.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-8b"
+        "gemini-3.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash"
     )
 
     /**
      * Converts a collection of handwritten ink strokes into recognized text.
      * 1. Primary: Advanced Google Gemini Multimodal Vision API (specialized in decoding extremely messy,
-     *    rushed, connected cursive, doctor-like handwriting, and 100+ languages including Hindi, Bengali,
+     *    rushed, connected cursive, doctor-like handwriting, and 100+ languages including English, Bengali, Hindi,
      *    Spanish, French, German, Chinese, Japanese, Arabic, Russian, math, and punctuation).
-     * 2. Secondary fallback: On-device ML Kit OCR for offline environments.
+     * 2. Secondary fallback: Groq Vision API (llama-3.2-11b-vision-preview).
+     * 3. Tertiary fallback: On-device ML Kit OCR for offline environments.
      */
     suspend fun recognizeStrokes(strokes: List<InkStroke>): HandwritingRecognitionResult? = withContext(Dispatchers.Default) {
         if (strokes.isEmpty()) return@withContext null
@@ -153,7 +154,7 @@ object HandwritingRecognizerHelper {
                         break
                     }
                 } catch (_: Exception) {
-                    // Try next model candidate in case of temporary rate limit or 503 spike
+                    // Try next candidate model in case of temporary rate limit or 503 spike
                 }
             }
         }
@@ -218,36 +219,31 @@ object HandwritingRecognizerHelper {
         val jpegBytes = stream.toByteArray()
         val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
 
-        val isOAuthToken = apiKey.startsWith("ya29.")
-        val endpoint = if (isOAuthToken) {
-            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
-        } else {
-            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
-        }
-
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8000
-            readTimeout = 12000
+            readTimeout = 14000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
-            if (isOAuthToken) {
-                setRequestProperty("Authorization", "Bearer $apiKey")
-            } else {
-                setRequestProperty("x-goog-api-key", apiKey)
-            }
+            setRequestProperty("x-goog-api-key", apiKey)
         }
 
         val prompt = """
         You are an elite, world-class handwriting recognition expert with superhuman capability to decipher the messiest, most rushed, illegible, cursive, and doctor-like handwriting with 100% precision.
 
         CRITICAL TRANSCRIPTION INSTRUCTIONS:
-        1. Transcribe EVERY single word, letter, and character present in this handwritten image. Do NOT omit, skip, or truncate any words or letters.
-        2. Decipher rushed cursive ligatures, loops, slants, and connected strokes using language context, grammar, and vocabulary. If a cursive letter is ambiguous, deduce the exact intended word.
-        3. If there are multiple lines of handwriting, preserve the line breaks with newline (\n) characters.
-        4. Accurately transcribe punctuation (periods, commas, apostrophes, question marks, dashes), numbers, and mathematical symbols.
-        5. Support all languages and scripts (English, Hindi, Bengali, Spanish, French, German, Chinese, Japanese, Arabic, Russian, and all other languages).
+        1. STRICTLY TRANSCRIBE IN THE EXACT SAME LANGUAGE AND SCRIPT AS WRITTEN:
+           - English -> English
+           - Bengali (বাংলা) -> Bengali script (বাংলা)
+           - Hindi (हिन्दी) -> Devanagari script (हिन्दी)
+           - Any other language (Spanish, French, German, Russian, Arabic, Japanese, Chinese, etc.) -> Keep in that EXACT original language and script.
+           - ABSOLUTELY DO NOT TRANSLATE into English or any other language! Never translate. Only transcribe verbatim in the source language.
+        2. Transcribe EVERY single word, letter, and character present in this handwritten image. Do NOT omit, skip, or truncate any words or letters.
+        3. Decipher rushed cursive ligatures, loops, slants, and connected strokes using language context, grammar, and vocabulary. If a cursive letter or script ligature is ambiguous or messy, deduce the exact intended word in that language.
+        4. If there are multiple lines of handwriting, preserve the line breaks with newline (\n) characters.
+        5. Accurately transcribe punctuation (periods, commas, apostrophes, question marks, dashes, danda ।), numbers, and mathematical symbols.
         6. Output STRICTLY AND ONLY the transcribed text. Do NOT add any preamble, conversational commentary, explanations, quotes, or markdown code fences.
         """.trimIndent()
 
@@ -256,8 +252,8 @@ object HandwritingRecognizerHelper {
                 val contentObj = JSONObject().apply {
                     val parts = JSONArray().apply {
                         put(JSONObject().put("text", prompt))
-                        put(JSONObject().put("inlineData", JSONObject().apply {
-                            put("mimeType", "image/jpeg")
+                        put(JSONObject().put("inline_data", JSONObject().apply {
+                            put("mime_type", "image/jpeg")
                             put("data", base64Image)
                         }))
                     }
@@ -311,13 +307,19 @@ object HandwritingRecognizerHelper {
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 8000
-            readTimeout = 12000
+            readTimeout = 14000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Authorization", "Bearer $apiKey")
         }
 
-        val prompt = "Transcribe EVERY word, character, and line of handwritten text in this image with exact precision. Support cursive handwriting, punctuation, and multiple languages. Output STRICTLY AND ONLY the transcribed text without quotes, markdown code fences, or commentary."
+        val prompt = """
+        Transcribe EVERY word, character, and line of handwritten text in this image with exact precision.
+        STRICTLY KEEP IN THE SAME LANGUAGE AND SCRIPT AS WRITTEN (e.g. English -> English, Bengali -> Bengali script, Hindi -> Devanagari script).
+        ABSOLUTELY DO NOT TRANSLATE to English or any other language.
+        Support messy cursive, ligatures, punctuation, and multiple lines.
+        Output STRICTLY AND ONLY the transcribed text without quotes, markdown code fences, or commentary.
+        """.trimIndent()
 
         val payload = JSONObject().apply {
             put("model", "llama-3.2-11b-vision-preview")

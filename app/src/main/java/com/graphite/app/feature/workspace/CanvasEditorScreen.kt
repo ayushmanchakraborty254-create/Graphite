@@ -1446,14 +1446,34 @@ fun CanvasEditorScreen(
                                                 y = (pt.y + effectiveOffset.y) * pageScale
                                             )
                                         }
-                                        BezierSplineInterpolator.run {
-                                            drawDynamicStroke(
-                                                points = pts,
-                                                baseWidth = stroke.baseWidth * canonicalScale * d * pageScale,
-                                                color = strokeColor,
-                                                toolType = stroke.toolType
+                                        val path = if (stroke.toolType == InkToolType.SHAPE) {
+                                            androidx.compose.ui.graphics.Path().apply {
+                                                moveTo(pts[0].x, pts[0].y)
+                                                for (i in 1 until pts.size) {
+                                                    lineTo(pts[i].x, pts[i].y)
+                                                }
+                                            }
+                                        } else {
+                                            BezierSplineInterpolator.createSplinePath(pts)
+                                        }
+                                        val effectiveWidth = if (stroke.toolType == InkToolType.SHAPE) {
+                                            stroke.baseWidth * canonicalScale * d * pageScale
+                                        } else {
+                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                            BezierSplineInterpolator.calculateEffectiveWidth(
+                                                stroke.baseWidth * canonicalScale * d * pageScale,
+                                                avgPressure
                                             )
                                         }
+                                        drawPath(
+                                            path = path,
+                                            color = strokeColor,
+                                            style = Stroke(
+                                                width = effectiveWidth,
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
                                     }
                                 }
 
@@ -1463,14 +1483,34 @@ fun CanvasEditorScreen(
                                         val pts = transientStroke.points.map { pt ->
                                             pt.copy(x = pt.x * pageScale, y = pt.y * pageScale)
                                         }
-                                        BezierSplineInterpolator.run {
-                                            drawDynamicStroke(
-                                                points = pts,
-                                                baseWidth = transientStroke.baseWidth * canonicalScale * d * pageScale,
-                                                color = transientStroke.color,
-                                                toolType = transientStroke.toolType
+                                        val path = if (transientStroke.toolType == InkToolType.SHAPE) {
+                                            androidx.compose.ui.graphics.Path().apply {
+                                                moveTo(pts[0].x, pts[0].y)
+                                                for (i in 1 until pts.size) {
+                                                    lineTo(pts[i].x, pts[i].y)
+                                                }
+                                            }
+                                        } else {
+                                            BezierSplineInterpolator.createSplinePath(pts)
+                                        }
+                                        val effectiveWidth = if (transientStroke.toolType == InkToolType.SHAPE) {
+                                            transientStroke.baseWidth * canonicalScale * d * pageScale
+                                        } else {
+                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+                                            BezierSplineInterpolator.calculateEffectiveWidth(
+                                                transientStroke.baseWidth * canonicalScale * d * pageScale,
+                                                avgPressure
                                             )
                                         }
+                                        drawPath(
+                                            path = path,
+                                            color = transientStroke.color,
+                                            style = Stroke(
+                                                width = effectiveWidth,
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
                                     }
                                 }
 
@@ -1479,16 +1519,22 @@ fun CanvasEditorScreen(
                                     val activePts = activePoints.map { pt ->
                                         pt.copy(x = pt.x * pageScale, y = pt.y * pageScale)
                                     }
+                                    val activePath = BezierSplineInterpolator.createSplinePath(activePts)
+                                    val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
                                     val baseW = (if (selectedStudioTool == StudioTool.HIGHLIGHTER) highlighterStrokeWidth else brushStrokeWidth) * canonicalScale
-                                    val strokeTool = if (selectedStudioTool == StudioTool.HIGHLIGHTER) InkToolType.SHAPE else InkToolType.PEN
-                                    BezierSplineInterpolator.run {
-                                        drawDynamicStroke(
-                                            points = activePts,
-                                            baseWidth = baseW * d * pageScale,
-                                            color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
-                                            toolType = strokeTool
+                                    val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
+                                        baseW * d * pageScale,
+                                        currentPressure
+                                    )
+                                    drawPath(
+                                        path = activePath,
+                                        color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
+                                        style = Stroke(
+                                            width = effectiveWidth,
+                                            cap = StrokeCap.Round,
+                                            join = StrokeJoin.Round
                                         )
-                                    }
+                                    )
                                 }
 
                                 // Live Shape drag preview (precise straight lines, no spline distortion)
