@@ -158,7 +158,22 @@ object HandwritingRecognizerHelper {
             }
         }
 
-        // 2. Secondary fallback: On-device ML Kit OCR if offline or all cloud attempts failed
+        // 2. Secondary fallback: Groq Vision API (llama-3.2-11b-vision-preview)
+        if (recognizedText.isBlank()) {
+            val groqKey = GraphiteConfig.groqApiKey
+            if (groqKey.isNotBlank()) {
+                try {
+                    val candidate = recognizeWithGroqVision(bitmap, groqKey).trim()
+                    if (candidate.isNotBlank()) {
+                        recognizedText = candidate
+                    }
+                } catch (_: Exception) {
+                    // Fall back to on-device recognizer
+                }
+            }
+        }
+
+        // 3. Tertiary fallback: On-device ML Kit OCR if completely offline
         if (recognizedText.isBlank()) {
             val inputImage = InputImage.fromBitmap(bitmap, 0)
             recognizedText = suspendCancellableCoroutine { continuation ->
@@ -203,7 +218,7 @@ object HandwritingRecognizerHelper {
         val jpegBytes = stream.toByteArray()
         val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
 
-        val isOAuthToken = apiKey.startsWith("AQ.") || apiKey.startsWith("ya29.")
+        val isOAuthToken = apiKey.startsWith("ya29.")
         val endpoint = if (isOAuthToken) {
             "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
         } else {
@@ -213,8 +228,8 @@ object HandwritingRecognizerHelper {
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 6000
-            readTimeout = 10000
+            connectTimeout = 8000
+            readTimeout = 12000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             if (isOAuthToken) {
@@ -241,8 +256,8 @@ object HandwritingRecognizerHelper {
                 val contentObj = JSONObject().apply {
                     val parts = JSONArray().apply {
                         put(JSONObject().put("text", prompt))
-                        put(JSONObject().put("inline_data", JSONObject().apply {
-                            put("mime_type", "image/jpeg")
+                        put(JSONObject().put("inlineData", JSONObject().apply {
+                            put("mimeType", "image/jpeg")
                             put("data", base64Image)
                         }))
                     }
@@ -282,6 +297,69 @@ object HandwritingRecognizerHelper {
         } else {
             val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
             android.util.Log.e("HandwritingRecognizer", "Gemini API error ($responseCode) on $modelName: $errorBody")
+        }
+        return ""
+    }
+
+    private fun recognizeWithGroqVision(bitmap: Bitmap, apiKey: String): String {
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+        val jpegBytes = stream.toByteArray()
+        val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+
+        val url = URL("https://api.groq.com/openai/v1/chat/completions")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8000
+            readTimeout = 12000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+
+        val prompt = "Transcribe EVERY word, character, and line of handwritten text in this image with exact precision. Support cursive handwriting, punctuation, and multiple languages. Output STRICTLY AND ONLY the transcribed text without quotes, markdown code fences, or commentary."
+
+        val payload = JSONObject().apply {
+            put("model", "llama-3.2-11b-vision-preview")
+            val messages = JSONArray().apply {
+                val userMsg = JSONObject().apply {
+                    put("role", "user")
+                    val contentArr = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("type", "text")
+                            put("text", prompt)
+                        })
+                        put(JSONObject().apply {
+                            put("type", "image_url")
+                            put("image_url", JSONObject().apply {
+                                put("url", "data:image/jpeg;base64,$base64Image")
+                            })
+                        })
+                    }
+                    put("content", contentArr)
+                }
+                put(userMsg)
+            }
+            put("messages", messages)
+            put("temperature", 0.1)
+        }
+
+        OutputStreamWriter(conn.outputStream).use { writer ->
+            writer.write(payload.toString())
+            writer.flush()
+        }
+
+        val responseCode = conn.responseCode
+        if (responseCode == 200) {
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val jsonResponse = JSONObject(responseText)
+            val choices = jsonResponse.optJSONArray("choices")
+            val firstChoice = choices?.optJSONObject(0)
+            val message = firstChoice?.optJSONObject("message")
+            return message?.optString("content")?.trim() ?: ""
+        } else {
+            val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            android.util.Log.e("HandwritingRecognizer", "Groq API error ($responseCode): $errorBody")
         }
         return ""
     }

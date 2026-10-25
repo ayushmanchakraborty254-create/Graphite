@@ -22,7 +22,7 @@ data class WorkspaceUiState(
     val canRedo: Boolean = false,
     val selectedTool: InkToolType = InkToolType.PEN,
     val selectedColor: Color = WorkspaceColors.Red,
-    val selectedStrokeWidth: Float = 2.0f,
+    val selectedStrokeWidth: Float = 3.0f,
     val paperStyle: PaperStyle = PaperStyle.RULED,
     val inputPolicy: InputModePolicy = InputModePolicy.STYLUS_ONLY_FOR_INK,
     val showClearDialog: Boolean = false,

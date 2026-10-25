@@ -240,38 +240,17 @@ object BezierSplineInterpolator {
             return
         }
 
-        val segments = computeSplineSegments(points)
-        if (segments.isEmpty()) return
-
-        val pointWidths = computeDynamicPointWidths(points, baseWidth)
-
-        for (i in segments.indices) {
-            val seg = segments[i]
-            val segWidth = if (i + 1 < pointWidths.size) {
-                (pointWidths[i] + pointWidths[i + 1]) / 2f
-            } else {
-                pointWidths[i]
-            }
-            val segPath = Path().apply {
-                moveTo(seg.startX, seg.startY)
-                cubicTo(
-                    x1 = seg.cp1X,
-                    y1 = seg.cp1Y,
-                    x2 = seg.cp2X,
-                    y2 = seg.cp2Y,
-                    x3 = seg.endX,
-                    y3 = seg.endY
-                )
-            }
-            drawPath(
-                path = segPath,
-                color = drawColor,
-                style = Stroke(
-                    width = segWidth,
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round
-                )
+        val splinePath = createSplinePath(points)
+        val avgPressure = points.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
+        val effectiveWidth = calculateEffectiveWidth(baseWidth, avgPressure)
+        drawPath(
+            path = splinePath,
+            color = drawColor,
+            style = Stroke(
+                width = effectiveWidth,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
             )
-        }
+        )
     }
 }

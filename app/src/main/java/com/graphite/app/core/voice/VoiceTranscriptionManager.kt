@@ -91,7 +91,7 @@ object VoiceTranscriptionManager {
         mode: TranscriptionMode,
         apiKey: String
     ): Result<TranscriptionResult> {
-        val isOAuthToken = apiKey.startsWith("AQ.") || apiKey.startsWith("ya29.")
+        val isOAuthToken = apiKey.startsWith("ya29.")
         val endpoint = if (isOAuthToken) {
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
         } else {

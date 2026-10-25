@@ -63,7 +63,7 @@ object WorkspaceColors {
 data class InkStroke(
     val id: String = UUID.randomUUID().toString(),
     val points: List<InkPoint>,
-    val baseWidth: Float = 2.0f,
+    val baseWidth: Float = 3.0f,
     val color: Color = WorkspaceColors.Red,
     val toolType: InkToolType = InkToolType.PEN,
     val pageIndex: Int = 0,

@@ -3228,6 +3228,9 @@ fun CanvasEditorScreen(
                             else -> brushStrokeWidth
                         }
 
+                        val isPenTool = !isEraser && !isHighlighter && !isShape
+                        val penUiValue = (brushStrokeWidth / 25f * 100f).coerceIn(1f, 100f)
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -3236,7 +3239,13 @@ fun CanvasEditorScreen(
                             Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = if (currentVal == currentVal.toInt().toFloat()) "${currentVal.toInt()} pt" else String.format(java.util.Locale.US, "%.1f pt", currentVal),
+                                    text = if (isPenTool) {
+                                        "${penUiValue.toInt()}"
+                                    } else if (currentVal == currentVal.toInt().toFloat()) {
+                                        "${currentVal.toInt()} pt"
+                                    } else {
+                                        String.format(java.util.Locale.US, "%.1f pt", currentVal)
+                                    },
                                     color = Color(0xFF00BCD4),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
@@ -3309,7 +3318,8 @@ fun CanvasEditorScreen(
                         }
 
                         Spacer(modifier = Modifier.height(10.dp))
-                        val range = if (isEraser) 4f..80f else if (isHighlighter) 6f..60f else 0.5f..40f
+                        val range = if (isEraser) 4f..80f else if (isHighlighter) 6f..60f else if (isShape) 1f..30f else 1f..100f
+                        val sliderValue = if (isPenTool) penUiValue else currentVal
 
                         // Continuous dynamic slider with - and + step buttons
                         Row(
@@ -3318,14 +3328,17 @@ fun CanvasEditorScreen(
                         ) {
                             IconButton(
                                 onClick = {
-                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else if (isShape) 1f else 0.5f
-                                    val nextVal = (currentVal - step).coerceAtLeast(range.start)
-                                    if (isEraser) eraserRadius = nextVal
-                                    else if (isHighlighter) highlighterStrokeWidth = nextVal
-                                    else if (isShape) shapeStrokeWidth = nextVal
-                                    else {
-                                        brushStrokeWidth = nextVal
-                                        workspaceViewModel.selectStrokeWidth(nextVal)
+                                    if (isPenTool) {
+                                        val nextUi = (penUiValue - 1f).coerceAtLeast(1f)
+                                        val actualW = (nextUi / 100f * 25f).coerceIn(0.5f, 25f)
+                                        brushStrokeWidth = actualW
+                                        workspaceViewModel.selectStrokeWidth(actualW)
+                                    } else {
+                                        val step = if (isEraser) 2f else if (isHighlighter) 2f else 1f
+                                        val nextVal = (currentVal - step).coerceAtLeast(range.start)
+                                        if (isEraser) eraserRadius = nextVal
+                                        else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                        else if (isShape) shapeStrokeWidth = nextVal
                                     }
                                 },
                                 modifier = Modifier.size(24.dp)
@@ -3334,15 +3347,18 @@ fun CanvasEditorScreen(
                             }
 
                             Slider(
-                                value = currentVal,
+                                value = sliderValue,
                                 onValueChange = {
-                                    val rounded = kotlin.math.round(it * 2f) / 2f
-                                    if (isEraser) eraserRadius = rounded
-                                    else if (isHighlighter) highlighterStrokeWidth = rounded
-                                    else if (isShape) shapeStrokeWidth = rounded
-                                    else {
-                                        brushStrokeWidth = rounded
-                                        workspaceViewModel.selectStrokeWidth(rounded)
+                                    if (isPenTool) {
+                                        val roundedUi = kotlin.math.round(it)
+                                        val actualW = (roundedUi / 100f * 25f).coerceIn(0.5f, 25f)
+                                        brushStrokeWidth = actualW
+                                        workspaceViewModel.selectStrokeWidth(actualW)
+                                    } else {
+                                        val rounded = kotlin.math.round(it * 2f) / 2f
+                                        if (isEraser) eraserRadius = rounded
+                                        else if (isHighlighter) highlighterStrokeWidth = rounded
+                                        else if (isShape) shapeStrokeWidth = rounded
                                     }
                                 },
                                 valueRange = range,
@@ -3356,14 +3372,17 @@ fun CanvasEditorScreen(
 
                             IconButton(
                                 onClick = {
-                                    val step = if (isEraser) 2f else if (isHighlighter) 2f else if (isShape) 1f else 0.5f
-                                    val nextVal = (currentVal + step).coerceAtMost(range.endInclusive)
-                                    if (isEraser) eraserRadius = nextVal
-                                    else if (isHighlighter) highlighterStrokeWidth = nextVal
-                                    else if (isShape) shapeStrokeWidth = nextVal
-                                    else {
-                                        brushStrokeWidth = nextVal
-                                        workspaceViewModel.selectStrokeWidth(nextVal)
+                                    if (isPenTool) {
+                                        val nextUi = (penUiValue + 1f).coerceAtMost(100f)
+                                        val actualW = (nextUi / 100f * 25f).coerceIn(0.5f, 25f)
+                                        brushStrokeWidth = actualW
+                                        workspaceViewModel.selectStrokeWidth(actualW)
+                                    } else {
+                                        val step = if (isEraser) 2f else if (isHighlighter) 2f else 1f
+                                        val nextVal = (currentVal + step).coerceAtMost(range.endInclusive)
+                                        if (isEraser) eraserRadius = nextVal
+                                        else if (isHighlighter) highlighterStrokeWidth = nextVal
+                                        else if (isShape) shapeStrokeWidth = nextVal
                                     }
                                 },
                                 modifier = Modifier.size(24.dp)
@@ -3376,38 +3395,65 @@ fun CanvasEditorScreen(
                         Text("PRESETS", color = Color.Gray, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                         Spacer(modifier = Modifier.height(4.dp))
 
-                        val presets = if (isEraser) listOf(8f, 16f, 24f, 36f, 50f, 70f)
-                        else if (isHighlighter) listOf(8f, 14f, 20f, 28f, 38f, 50f)
-                        else listOf(1f, 2f, 3f, 5f, 8f, 12f, 16f, 20f, 28f, 36f)
-
-                        // Scrollable row of quick preset chips
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            items(presets) { pt ->
-                                val isSelected = kotlin.math.abs(currentVal - pt) < 0.25f
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isSelected) Color(0xFF00BCD4) else Color(0xFF26262B))
-                                        .clickable {
-                                            if (isEraser) eraserRadius = pt
-                                            else if (isHighlighter) highlighterStrokeWidth = pt
-                                            else {
-                                                brushStrokeWidth = pt
-                                                workspaceViewModel.selectStrokeWidth(pt)
+                        if (isPenTool) {
+                            val penPresets = listOf(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(penPresets) { preset ->
+                                    val isSelected = kotlin.math.abs(penUiValue - preset) < 2.5f
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSelected) Color(0xFF00BCD4) else Color(0xFF26262B))
+                                            .clickable {
+                                                val actual = (preset / 100f * 25f).coerceIn(0.5f, 25f)
+                                                brushStrokeWidth = actual
+                                                workspaceViewModel.selectStrokeWidth(actual)
                                             }
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "${pt.toInt()}",
-                                        color = if (isSelected) Color.White else Color.LightGray,
-                                        fontSize = 11.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                    )
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "$preset",
+                                            color = if (isSelected) Color.White else Color.LightGray,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            val presets = if (isEraser) listOf(8f, 16f, 24f, 36f, 50f, 70f)
+                            else if (isHighlighter) listOf(8f, 14f, 20f, 28f, 38f, 50f)
+                            else listOf(2f, 4f, 6f, 10f, 16f, 24f)
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(presets) { pt ->
+                                    val isSelected = kotlin.math.abs(currentVal - pt) < 0.25f
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSelected) Color(0xFF00BCD4) else Color(0xFF26262B))
+                                            .clickable {
+                                                if (isEraser) eraserRadius = pt
+                                                else if (isHighlighter) highlighterStrokeWidth = pt
+                                                else if (isShape) shapeStrokeWidth = pt
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "${pt.toInt()}",
+                                            color = if (isSelected) Color.White else Color.LightGray,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
                                 }
                             }
                         }
