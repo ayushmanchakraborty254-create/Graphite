@@ -52,6 +52,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.graphicsLayer
@@ -76,13 +77,14 @@ import com.graphite.app.data.model.FolderItem
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.feature.workspace.model.PaperStyle
+import com.graphite.app.feature.workspace.model.SplitLayoutOrientation
 import kotlinx.coroutines.launch
 
 @Composable
 fun NoteshelfScreen(
     onOpenNotebook: (String) -> Unit,
     onNavigateBack: (() -> Unit)? = null,
-    onOpenSplitScreen: ((String, String) -> Unit)? = null,
+    onOpenSplitScreen: ((String, String, SplitLayoutOrientation) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val notebooks by GraphiteRepository.notebooks.collectAsState()
@@ -141,6 +143,7 @@ fun NoteshelfScreen(
     var noteToChangePassword by remember { mutableStateOf<NotebookItem?>(null) }
     var splitScreenDocA by remember { mutableStateOf<NotebookItem?>(null) }
     var showSplitDocPicker by remember { mutableStateOf(false) }
+    var showMultiSelectSplitDialog by remember { mutableStateOf(false) }
 
     val handleOpenNote: (NotebookItem) -> Unit = { notebook ->
         if (notebook.isLocked && !notebook.password.isNullOrBlank()) {
@@ -659,13 +662,9 @@ fun NoteshelfScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (selectedNotebookIds.size == 2 && onOpenSplitScreen != null) {
-                            val twoIds = selectedNotebookIds.toList()
                             Button(
                                 onClick = {
-                                    val idA = twoIds[0]
-                                    val idB = twoIds[1]
-                                    selectedNotebookIds = emptySet()
-                                    onOpenSplitScreen(idA, idB)
+                                    showMultiSelectSplitDialog = true
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
                                 shape = RoundedCornerShape(16.dp),
@@ -1712,13 +1711,93 @@ fun NoteshelfScreen(
             firstDoc = splitScreenDocA!!,
             allNotes = sortedNotebooks,
             onDismiss = { showSplitDocPicker = false; splitScreenDocA = null },
-            onSelectSecondDoc = { docB ->
+            onSelectSecondDoc = { docB, orientation ->
                 val docAId = splitScreenDocA!!.id
                 val docBId = docB.id
                 showSplitDocPicker = false
                 splitScreenDocA = null
-                onOpenSplitScreen(docAId, docBId)
+                onOpenSplitScreen(docAId, docBId, orientation)
             }
+        )
+    }
+
+    if (showMultiSelectSplitDialog && selectedNotebookIds.size == 2 && onOpenSplitScreen != null) {
+        val twoIds = selectedNotebookIds.toList()
+        var selectedOrientation by remember { mutableStateOf(SplitLayoutOrientation.VERTICAL_DIVIDER) }
+        AlertDialog(
+            onDismissRequest = { showMultiSelectSplitDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Splitscreen, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("Split View Layout", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text("Choose how to arrange the 2 documents:", color = Color.LightGray, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val isSideBySide = selectedOrientation == SplitLayoutOrientation.VERTICAL_DIVIDER
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSideBySide) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                                .border(1.5.dp, if (isSideBySide) GraphiteOrange else Color(0xFF333338), RoundedCornerShape(8.dp))
+                                .clickable { selectedOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = if (isSideBySide) GraphiteOrange else Color.Gray, modifier = Modifier.size(24.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("Side-by-Side", color = if (isSideBySide) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                        val isTopBottom = selectedOrientation == SplitLayoutOrientation.HORIZONTAL_DIVIDER
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isTopBottom) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                                .border(1.5.dp, if (isTopBottom) GraphiteOrange else Color(0xFF333338), RoundedCornerShape(8.dp))
+                                .clickable { selectedOrientation = SplitLayoutOrientation.HORIZONTAL_DIVIDER }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.HorizontalSplit, contentDescription = null, tint = if (isTopBottom) GraphiteOrange else Color.Gray, modifier = Modifier.size(24.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("Top & Bottom", color = if (isTopBottom) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val idA = twoIds[0]
+                        val idB = twoIds[1]
+                        selectedNotebookIds = emptySet()
+                        showMultiSelectSplitDialog = false
+                        onOpenSplitScreen(idA, idB, selectedOrientation)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                ) {
+                    Text("Open Split View", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMultiSelectSplitDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
         )
     }
 
@@ -2536,9 +2615,15 @@ private fun Modifier.notebookTapDragModifier(
         var isPointerReleased = false
         var isCanceledForScroll = false
 
+        var anyConsumed = down.isConsumed
+
         while (!isPointerReleased && !isCanceledForScroll) {
             val event = awaitPointerEvent()
             val current = event.changes.firstOrNull { it.id == down.id } ?: break
+
+            if (current.isConsumed) {
+                anyConsumed = true
+            }
 
             if (!current.pressed) {
                 isPointerReleased = true
@@ -2549,7 +2634,7 @@ private fun Modifier.notebookTapDragModifier(
                 } else {
                     val duration = System.currentTimeMillis() - downTime
                     val distance = (current.position - startPos).getDistance()
-                    if (duration < 350 && distance <= touchSlop) {
+                    if (duration < 350 && distance <= touchSlop && !anyConsumed && !current.isConsumed && !down.isConsumed) {
                         current.consume()
                         onClick()
                     }
@@ -2930,13 +3015,19 @@ private fun NotebookThumbnailCard(
                 }
 
                 // Quick Star Icon on bottom-left - High-contrast elevated circular button
-                IconButton(
-                    onClick = onToggleStar,
+                Box(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(4.dp)
-                        .size(28.dp)
-                        .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .pointerInput(notebook.id) {
+                            detectTapGestures {
+                                onToggleStar()
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (notebook.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
@@ -3337,9 +3428,16 @@ private fun NotebookListRow(
             Spacer(modifier = Modifier.width(4.dp))
         }
 
-        IconButton(
-            onClick = onToggleStar,
-            modifier = Modifier.size(36.dp)
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .pointerInput(notebook.id) {
+                    detectTapGestures {
+                        onToggleStar()
+                    }
+                },
+            contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = if (notebook.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
@@ -4253,8 +4351,9 @@ fun SplitScreenDocPickerDialog(
     firstDoc: NotebookItem,
     allNotes: List<NotebookItem>,
     onDismiss: () -> Unit,
-    onSelectSecondDoc: (NotebookItem) -> Unit
+    onSelectSecondDoc: (NotebookItem, SplitLayoutOrientation) -> Unit
 ) {
+    var selectedSplitOrientation by remember { mutableStateOf(SplitLayoutOrientation.VERTICAL_DIVIDER) }
     val candidateNotes = remember(allNotes, firstDoc) {
         allNotes.filter { it.id != firstDoc.id && !it.isDeleted }
     }
@@ -4265,13 +4364,13 @@ fun SplitScreenDocPickerDialog(
         onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
+                Icon(Icons.Default.Splitscreen, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(24.dp))
                 Spacer(modifier = Modifier.width(10.dp))
                 Text("Select Second Document", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
         },
         text = {
-            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 440.dp)) {
                 Text(
                     text = "Doc 1: ${firstDoc.title}",
                     color = GraphiteOrange,
@@ -4279,6 +4378,48 @@ fun SplitScreenDocPickerDialog(
                     fontWeight = FontWeight.Medium
                 )
                 Spacer(modifier = Modifier.height(10.dp))
+                Text("Choose Split Layout:", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val isSideBySide = selectedSplitOrientation == SplitLayoutOrientation.VERTICAL_DIVIDER
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSideBySide) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                            .border(1.5.dp, if (isSideBySide) GraphiteOrange else Color(0xFF333338), RoundedCornerShape(8.dp))
+                            .clickable { selectedSplitOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER }
+                            .padding(vertical = 8.dp, horizontal = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = if (isSideBySide) GraphiteOrange else Color.Gray, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Side-by-Side", color = if (isSideBySide) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                    val isTopBottom = selectedSplitOrientation == SplitLayoutOrientation.HORIZONTAL_DIVIDER
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isTopBottom) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                            .border(1.5.dp, if (isTopBottom) GraphiteOrange else Color(0xFF333338), RoundedCornerShape(8.dp))
+                            .clickable { selectedSplitOrientation = SplitLayoutOrientation.HORIZONTAL_DIVIDER }
+                            .padding(vertical = 8.dp, horizontal = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.HorizontalSplit, contentDescription = null, tint = if (isTopBottom) GraphiteOrange else Color.Gray, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Top & Bottom", color = if (isTopBottom) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
@@ -4311,7 +4452,7 @@ fun SplitScreenDocPickerDialog(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFF222222))
-                                    .clickable { onSelectSecondDoc(doc) }
+                                    .clickable { onSelectSecondDoc(doc, selectedSplitOrientation) }
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {

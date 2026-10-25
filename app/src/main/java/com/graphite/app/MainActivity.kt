@@ -42,14 +42,33 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.graphite.app.feature.workspace.VoiceNotebookScreen
+import com.graphite.app.feature.workspace.model.SplitLayoutOrientation
 
 sealed interface ActiveDestination {
     data class MainTab(val tab: NavigationTab) : ActiveDestination
     data class ReaderView(val bookId: String) : ActiveDestination
     data class CanvasEditor(val notebookId: String) : ActiveDestination
-    data class SplitScreen(val docAId: String, val docBId: String) : ActiveDestination
+    data class SplitScreen(
+        val docAId: String,
+        val docBId: String,
+        val orientation: SplitLayoutOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER
+    ) : ActiveDestination
     data object Diagnostics : ActiveDestination
 }
 
@@ -208,8 +227,8 @@ class MainActivity : ComponentActivity() {
                                                 onOpenNotebook = { notebookId ->
                                                     currentDestination = ActiveDestination.CanvasEditor(notebookId)
                                                 },
-                                                onOpenSplitScreen = { docA, docB ->
-                                                    currentDestination = ActiveDestination.SplitScreen(docA, docB)
+                                                onOpenSplitScreen = { docA, docB, orient ->
+                                                    currentDestination = ActiveDestination.SplitScreen(docA, docB, orient)
                                                 }
                                             )
                                         }
@@ -270,46 +289,198 @@ class MainActivity : ComponentActivity() {
                                 }
                                 is ActiveDestination.SplitScreen -> {
                                     BackHandler {
-                                        currentDestination = ActiveDestination.MainTab(selectedTab)
+                                        // Pressing system back closes secondary document and restores doc A in normal single view
+                                        currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
                                     }
-                                    Row(modifier = Modifier.fillMaxSize()) {
-                                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                                            CanvasEditorScreen(
-                                                notebookId = destination.docAId,
-                                                onNavigateBack = {
-                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+
+                                    var currentOrientation by remember(destination) { mutableStateOf(destination.orientation) }
+                                    var splitRatio by remember(destination) { mutableFloatStateOf(0.5f) }
+                                    var isDraggingDivider by remember { mutableStateOf(false) }
+
+                                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                                        val totalWidth = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                                        val totalHeight = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+
+                                        if (currentOrientation == SplitLayoutOrientation.VERTICAL_DIVIDER) {
+                                            // Side-by-Side (Left & Right panes with draggable vertical divider)
+                                            Row(modifier = Modifier.fillMaxSize()) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(splitRatio.coerceIn(0.15f, 0.85f))
+                                                        .fillMaxHeight()
+                                                ) {
+                                                    SplitPaneDocScreen(
+                                                        notebookId = destination.docAId,
+                                                        isInSplitScreen = true,
+                                                        onNavigateBack = {
+                                                            // Closing doc A opens doc B normally in single view!
+                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docBId)
+                                                        }
+                                                    )
                                                 }
-                                            )
-                                        }
-                                        // 2mm Distinct Split-Screen Separator Gap with Accent Center Line & Handle Pill
-                                        Box(
-                                            modifier = Modifier
-                                                .width(8.dp)
-                                                .fillMaxHeight()
-                                                .background(androidx.compose.ui.graphics.Color(0xFF141416)),
-                                            contentAlignment = androidx.compose.ui.Alignment.Center
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(2.dp)
-                                                    .fillMaxHeight()
-                                                    .background(androidx.compose.ui.graphics.Color(0xFF55555C))
-                                            )
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(4.dp)
-                                                    .height(36.dp)
-                                                    .clip(RoundedCornerShape(2.dp))
-                                                    .background(Color(0xFF888890))
-                                            )
-                                        }
-                                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                                            CanvasEditorScreen(
-                                                notebookId = destination.docBId,
-                                                onNavigateBack = {
-                                                    currentDestination = ActiveDestination.MainTab(selectedTab)
+
+                                                // Resizable Vertical Divider
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(18.dp)
+                                                        .fillMaxHeight()
+                                                        .background(androidx.compose.ui.graphics.Color(0xFF141416))
+                                                        .pointerInput(totalWidth) {
+                                                            detectDragGestures(
+                                                                onDragStart = { isDraggingDivider = true },
+                                                                onDragEnd = { isDraggingDivider = false },
+                                                                onDragCancel = { isDraggingDivider = false }
+                                                            ) { change, dragAmount ->
+                                                                change.consume()
+                                                                val delta = dragAmount.x / totalWidth
+                                                                splitRatio = (splitRatio + delta).coerceIn(0.15f, 0.85f)
+                                                            }
+                                                        },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(2.dp)
+                                                            .fillMaxHeight()
+                                                            .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF44444C))
+                                                    )
+                                                    Column(
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(10.dp))
+                                                            .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFF332218) else androidx.compose.ui.graphics.Color(0xFF222226))
+                                                            .border(1.dp, if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF44444C), RoundedCornerShape(10.dp))
+                                                            .padding(horizontal = 2.dp, vertical = 6.dp),
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .width(4.dp)
+                                                                .height(26.dp)
+                                                                .clip(RoundedCornerShape(2.dp))
+                                                                .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF888890))
+                                                        )
+                                                        IconButton(
+                                                            onClick = {
+                                                                currentOrientation = SplitLayoutOrientation.HORIZONTAL_DIVIDER
+                                                            },
+                                                            modifier = Modifier.size(22.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.SwapVert,
+                                                                contentDescription = "Switch to Top-Bottom Split",
+                                                                tint = androidx.compose.ui.graphics.Color.LightGray,
+                                                                modifier = Modifier.size(14.dp)
+                                                            )
+                                                        }
+                                                    }
                                                 }
-                                            )
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight((1f - splitRatio).coerceIn(0.15f, 0.85f))
+                                                        .fillMaxHeight()
+                                                ) {
+                                                    SplitPaneDocScreen(
+                                                        notebookId = destination.docBId,
+                                                        isInSplitScreen = true,
+                                                        onNavigateBack = {
+                                                            // Closing doc B opens doc A normally in single view!
+                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            // Top & Bottom (Upper & Lower panes with draggable horizontal divider)
+                                            Column(modifier = Modifier.fillMaxSize()) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(splitRatio.coerceIn(0.15f, 0.85f))
+                                                        .fillMaxWidth()
+                                                ) {
+                                                    SplitPaneDocScreen(
+                                                        notebookId = destination.docAId,
+                                                        isInSplitScreen = true,
+                                                        onNavigateBack = {
+                                                            // Closing doc A opens doc B normally in single view!
+                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docBId)
+                                                        }
+                                                    )
+                                                }
+
+                                                // Resizable Horizontal Divider
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(18.dp)
+                                                        .background(androidx.compose.ui.graphics.Color(0xFF141416))
+                                                        .pointerInput(totalHeight) {
+                                                            detectDragGestures(
+                                                                onDragStart = { isDraggingDivider = true },
+                                                                onDragEnd = { isDraggingDivider = false },
+                                                                onDragCancel = { isDraggingDivider = false }
+                                                            ) { change, dragAmount ->
+                                                                change.consume()
+                                                                val delta = dragAmount.y / totalHeight
+                                                                splitRatio = (splitRatio + delta).coerceIn(0.15f, 0.85f)
+                                                            }
+                                                        },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .height(2.dp)
+                                                            .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF44444C))
+                                                    )
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(10.dp))
+                                                            .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFF332218) else androidx.compose.ui.graphics.Color(0xFF222226))
+                                                            .border(1.dp, if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF44444C), RoundedCornerShape(10.dp))
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .width(26.dp)
+                                                                .height(4.dp)
+                                                                .clip(RoundedCornerShape(2.dp))
+                                                                .background(if (isDraggingDivider) androidx.compose.ui.graphics.Color(0xFFFF7A30) else androidx.compose.ui.graphics.Color(0xFF888890))
+                                                        )
+                                                        IconButton(
+                                                            onClick = {
+                                                                currentOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER
+                                                            },
+                                                            modifier = Modifier.size(22.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.SwapHoriz,
+                                                                contentDescription = "Switch to Side-by-Side Split",
+                                                                tint = androidx.compose.ui.graphics.Color.LightGray,
+                                                                modifier = Modifier.size(14.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight((1f - splitRatio).coerceIn(0.15f, 0.85f))
+                                                        .fillMaxWidth()
+                                                ) {
+                                                    SplitPaneDocScreen(
+                                                        notebookId = destination.docBId,
+                                                        isInSplitScreen = true,
+                                                        onNavigateBack = {
+                                                            // Closing doc B opens doc A normally in single view!
+                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
+                                                        }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -364,3 +535,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+@Composable
+private fun SplitPaneDocScreen(
+    notebookId: String,
+    isInSplitScreen: Boolean,
+    onNavigateBack: () -> Unit
+) {
+    val openedNote = remember(notebookId) {
+        GraphiteRepository.getNotebook(notebookId)
+    }
+    when (openedNote?.mimeType) {
+        "text/keep" -> {
+            com.graphite.app.feature.workspace.KeepTextEditorScreen(
+                notebookId = notebookId,
+                onNavigateBack = onNavigateBack
+            )
+        }
+        "application/x-graphite-voice" -> {
+            VoiceNotebookScreen(
+                notebookId = notebookId,
+                onNavigateBack = onNavigateBack
+            )
+        }
+        else -> {
+            CanvasEditorScreen(
+                notebookId = notebookId,
+                isInSplitScreen = isInSplitScreen,
+                onNavigateBack = onNavigateBack
+            )
+        }
+    }
+}
+

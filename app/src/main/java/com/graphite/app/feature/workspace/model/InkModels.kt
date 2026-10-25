@@ -25,6 +25,11 @@ enum class PaperStyle {
 }
 
 
+enum class SplitLayoutOrientation {
+    VERTICAL_DIVIDER,   // Side-by-Side (Left & Right panes with vertical separator)
+    HORIZONTAL_DIVIDER  // Top & Bottom (Upper & Lower panes with horizontal separator)
+}
+
 data class InkPoint(
     val x: Float,
     val y: Float,
@@ -38,19 +43,19 @@ data class InkColorOption(
 )
 
 object WorkspaceColors {
+    val Red = Color(0xFFD50000)
     val White = Color(0xFFF5F5F5)
     val CoralOrange = Color(0xFFFF7A30)
     val Cyan = Color(0xFF00E5FF)
     val Navy = Color(0xFF3D5AFE)
-    val Red = Color(0xFFFF5252)
     val DarkGraphite = Color(0xFF212121)
 
     val All = listOf(
+        InkColorOption("Red", Red),
         InkColorOption("Coral Orange", CoralOrange),
         InkColorOption("White", White),
         InkColorOption("Cyan", Cyan),
         InkColorOption("Navy", Navy),
-        InkColorOption("Red", Red),
         InkColorOption("Graphite", DarkGraphite)
     )
 }
@@ -58,8 +63,8 @@ object WorkspaceColors {
 data class InkStroke(
     val id: String = UUID.randomUUID().toString(),
     val points: List<InkPoint>,
-    val baseWidth: Float = 4f,
-    val color: Color = WorkspaceColors.CoralOrange,
+    val baseWidth: Float = 2.0f,
+    val color: Color = WorkspaceColors.Red,
     val toolType: InkToolType = InkToolType.PEN,
     val pageIndex: Int = 0,
     val isCanonical: Boolean = true

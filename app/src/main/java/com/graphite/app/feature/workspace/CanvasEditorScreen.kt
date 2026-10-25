@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -162,8 +163,9 @@ fun normalizeLegacyStrokeIfNeeded(
 fun CanvasEditorScreen(
     notebookId: String,
     onNavigateBack: () -> Unit,
-    onSplitScreen: ((String, String) -> Unit)? = null,
+    onSplitScreen: ((String, String, SplitLayoutOrientation) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    isInSplitScreen: Boolean = false,
     workspaceViewModel: WorkspaceViewModel = viewModel(key = "canvas_editor_$notebookId")
 ) {
     val allNotebooks by GraphiteRepository.notebooks.collectAsState()
@@ -209,6 +211,7 @@ fun CanvasEditorScreen(
     var showVoiceDialog by remember { mutableStateOf(false) }
     var showSplitScreenPicker by remember { mutableStateOf(false) }
     var showMobilePalette by remember { mutableStateOf(false) }
+    var isSplitPaletteExpanded by remember { mutableStateOf(false) }
 
     // Sub-dialogs
     var showTemplateDialog by remember { mutableStateOf(false) }
@@ -794,6 +797,7 @@ fun CanvasEditorScreen(
                         var lastTime = 0L
                         var totalDragY = 0f
                         var isDragging1Finger = false
+                        var isPinching = false
 
                         do {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -812,6 +816,7 @@ fun CanvasEditorScreen(
                                 lastDist = null
                                 scrollVelocityY = 0f
                                 isDragging1Finger = false
+                                isPinching = false
                                 totalDragY = 0f
                             } else if (pressed.size >= 2) {
                                 // 2 OR MORE FINGERS:
@@ -824,31 +829,35 @@ fun CanvasEditorScreen(
                                 val now = System.currentTimeMillis()
 
                                 if (lastCenter != null && lastDist != null && lastDist > 15f && curDist > 15f) {
-                                    // 1. Smooth simultaneous pinch-to-zoom (centered) - active in both modes
-                                    val factor = curDist / lastDist
-                                    val pinchDiff = kotlin.math.abs(curDist - lastDist)
-                                    if (factor in 0.85f..1.15f && pinchDiff > 0.8f) {
+                                    val factor = (curDist / lastDist).coerceIn(0.75f, 1.35f)
+                                    val distDelta = kotlin.math.abs(curDist - lastDist)
+                                    val dy = curCenter.y - lastCenter.y
+                                    val dx = curCenter.x - lastCenter.x
+
+                                    if (distDelta > 1.2f || isPinching) {
+                                        // Active pinch-to-zoom: fluid continuous scaling without stepped jumps
+                                        isPinching = true
+                                        scrollVelocityY = 0f // Zero fling momentum to prevent sudden scroll jumps on release
                                         val oldZoom = zoomScale
                                         val newZoom = (oldZoom * factor).coerceIn(0.25f, 4.0f)
                                         zoomScale = newZoom
                                         if (newZoom <= 1.0f) panX = 0f
-                                    }
 
-                                    // 2. In HAND_MODE: 2 fingers scroll the pages vertically!
-                                    if (interactionMode == EditorInteractionMode.HAND_MODE) {
-                                        val dy = curCenter.y - lastCenter.y
-                                        if (kotlin.math.abs(dy) > 0.1f) {
+                                        // Pan horizontally only when zoomed in
+                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.15f) {
+                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                        }
+                                    } else if (!isPinching && interactionMode == EditorInteractionMode.HAND_MODE) {
+                                        // Deliberate 2-finger vertical scroll in HAND_MODE (only when NOT pinching)
+                                        if (kotlin.math.abs(dy) > 1.2f) {
                                             listState.dispatchRawDelta(-dy)
                                             val dt = (now - lastTime).coerceAtLeast(1)
                                             val instantV = (-dy / dt) * 1000f
                                             scrollVelocityY = scrollVelocityY * 0.4f + instantV * 0.6f
                                         }
-                                    }
-
-                                    // 3. Pan horizontally only when zoomed in
-                                    val dx = curCenter.x - lastCenter.x
-                                    if (zoomScale > 1f && kotlin.math.abs(dx) > 0.1f) {
-                                        panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.15f) {
+                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                        }
                                     }
                                 }
 
@@ -858,8 +867,8 @@ fun CanvasEditorScreen(
 
                                 // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
-                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE) {
-                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically!
+                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE && !isPinching) {
+                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically (guarded against accidental finger release during pinch)
                                 val curPos = pressed[0].position
                                 val now = System.currentTimeMillis()
 
@@ -886,9 +895,11 @@ fun CanvasEditorScreen(
                                     pressed[0].consume()
                                 }
                             } else {
-                                // Fingers lifted: natural physics-based fling momentum
-                                val shouldFling = (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
-                                        (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
+                                // Fingers lifted: natural physics-based fling momentum only when NOT zooming
+                                val shouldFling = !isPinching && (
+                                    (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
+                                    (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
+                                )
                                 if (shouldFling && kotlin.math.abs(scrollVelocityY) > 80f) {
                                     val initialVel = scrollVelocityY.coerceIn(-5000f, 5000f)
                                     scope.launch {
@@ -913,6 +924,7 @@ fun CanvasEditorScreen(
                                 lastCenter = null
                                 lastDist = null
                                 isDragging1Finger = false
+                                isPinching = false
                                 totalDragY = 0f
                             }
                         } while (pressed.isNotEmpty())
@@ -1434,34 +1446,14 @@ fun CanvasEditorScreen(
                                                 y = (pt.y + effectiveOffset.y) * pageScale
                                             )
                                         }
-                                        val path = if (stroke.toolType == InkToolType.SHAPE) {
-                                            androidx.compose.ui.graphics.Path().apply {
-                                                moveTo(pts[0].x, pts[0].y)
-                                                for (i in 1 until pts.size) {
-                                                    lineTo(pts[i].x, pts[i].y)
-                                                }
-                                            }
-                                        } else {
-                                            BezierSplineInterpolator.createSplinePath(pts)
-                                        }
-                                        val effectiveWidth = if (stroke.toolType == InkToolType.SHAPE) {
-                                            stroke.baseWidth * canonicalScale * d * pageScale
-                                        } else {
-                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
-                                            BezierSplineInterpolator.calculateEffectiveWidth(
-                                                stroke.baseWidth * canonicalScale * d * pageScale,
-                                                avgPressure
+                                        BezierSplineInterpolator.run {
+                                            drawDynamicStroke(
+                                                points = pts,
+                                                baseWidth = stroke.baseWidth * canonicalScale * d * pageScale,
+                                                color = strokeColor,
+                                                toolType = stroke.toolType
                                             )
                                         }
-                                        drawPath(
-                                            path = path,
-                                            color = strokeColor,
-                                            style = Stroke(
-                                                width = effectiveWidth,
-                                                cap = StrokeCap.Round,
-                                                join = StrokeJoin.Round
-                                            )
-                                        )
                                     }
                                 }
 
@@ -1471,34 +1463,14 @@ fun CanvasEditorScreen(
                                         val pts = transientStroke.points.map { pt ->
                                             pt.copy(x = pt.x * pageScale, y = pt.y * pageScale)
                                         }
-                                        val path = if (transientStroke.toolType == InkToolType.SHAPE) {
-                                            androidx.compose.ui.graphics.Path().apply {
-                                                moveTo(pts[0].x, pts[0].y)
-                                                for (i in 1 until pts.size) {
-                                                    lineTo(pts[i].x, pts[i].y)
-                                                }
-                                            }
-                                        } else {
-                                            BezierSplineInterpolator.createSplinePath(pts)
-                                        }
-                                        val effectiveWidth = if (transientStroke.toolType == InkToolType.SHAPE) {
-                                            transientStroke.baseWidth * canonicalScale * d * pageScale
-                                        } else {
-                                            val avgPressure = pts.map { it.pressure }.average().toFloat().coerceIn(0.1f, 1f)
-                                            BezierSplineInterpolator.calculateEffectiveWidth(
-                                                transientStroke.baseWidth * canonicalScale * d * pageScale,
-                                                avgPressure
+                                        BezierSplineInterpolator.run {
+                                            drawDynamicStroke(
+                                                points = pts,
+                                                baseWidth = transientStroke.baseWidth * canonicalScale * d * pageScale,
+                                                color = transientStroke.color,
+                                                toolType = transientStroke.toolType
                                             )
                                         }
-                                        drawPath(
-                                            path = path,
-                                            color = transientStroke.color,
-                                            style = Stroke(
-                                                width = effectiveWidth,
-                                                cap = StrokeCap.Round,
-                                                join = StrokeJoin.Round
-                                            )
-                                        )
                                     }
                                 }
 
@@ -1507,22 +1479,16 @@ fun CanvasEditorScreen(
                                     val activePts = activePoints.map { pt ->
                                         pt.copy(x = pt.x * pageScale, y = pt.y * pageScale)
                                     }
-                                    val activePath = BezierSplineInterpolator.createSplinePath(activePts)
-                                    val currentPressure = activePoints.lastOrNull()?.pressure ?: 0.5f
                                     val baseW = (if (selectedStudioTool == StudioTool.HIGHLIGHTER) highlighterStrokeWidth else brushStrokeWidth) * canonicalScale
-                                    val effectiveWidth = BezierSplineInterpolator.calculateEffectiveWidth(
-                                        baseW * d * pageScale,
-                                        currentPressure
-                                    )
-                                    drawPath(
-                                        path = activePath,
-                                        color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
-                                        style = Stroke(
-                                            width = effectiveWidth,
-                                            cap = StrokeCap.Round,
-                                            join = StrokeJoin.Round
+                                    val strokeTool = if (selectedStudioTool == StudioTool.HIGHLIGHTER) InkToolType.SHAPE else InkToolType.PEN
+                                    BezierSplineInterpolator.run {
+                                        drawDynamicStroke(
+                                            points = activePts,
+                                            baseWidth = baseW * d * pageScale,
+                                            color = if (selectedStudioTool == StudioTool.HIGHLIGHTER) uiState.selectedColor.copy(alpha = 0.35f) else uiState.selectedColor,
+                                            toolType = strokeTool
                                         )
-                                    )
+                                    }
                                 }
 
                                 // Live Shape drag preview (precise straight lines, no spline distortion)
@@ -3118,36 +3084,60 @@ fun CanvasEditorScreen(
                 .align(Alignment.CenterStart)
                 .padding(start = 12.dp)
         ) {
+            val isTransparentSplitPalette = isInSplitScreen && !isSplitPaletteExpanded
+            val splitPaletteAlpha by animateFloatAsState(
+                targetValue = if (isTransparentSplitPalette) 0.20f else 0.95f,
+                label = "splitPaletteAlpha"
+            )
+
             Card(
                 shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = 0.95f)),
-                border = BorderStroke(1.dp, Color(0xFF2C2C2E)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E).copy(alpha = splitPaletteAlpha)),
+                border = BorderStroke(1.dp, Color(0xFF2C2C2E).copy(alpha = if (isTransparentSplitPalette) 0.35f else 1.0f)),
                 modifier = Modifier
-                    .shadow(6.dp, RoundedCornerShape(22.dp))
+                    .shadow(if (isTransparentSplitPalette) 0.dp else 6.dp, RoundedCornerShape(22.dp))
                     .width(44.dp)
+                    .graphicsLayer { alpha = if (isTransparentSplitPalette) 0.22f else 1.0f }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        if (isInSplitScreen) {
+                            isSplitPaletteExpanded = !isSplitPaletteExpanded
+                        }
+                    }
             ) {
                 Column(
                     modifier = Modifier.padding(vertical = 12.dp, horizontal = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // Red Swatch (Default)
+                    PaletteColorDot(
+                        color = Color(0xFFD50000),
+                        isSelected = uiState.selectedColor == Color(0xFFD50000),
+                        onClick = {
+                            workspaceViewModel.selectColor(Color(0xFFD50000))
+                            if (isInSplitScreen) isSplitPaletteExpanded = true
+                        }
+                    )
                     // Blue Swatch
                     PaletteColorDot(
                         color = Color(0xFF2979FF),
                         isSelected = uiState.selectedColor == Color(0xFF2979FF),
-                        onClick = { workspaceViewModel.selectColor(Color(0xFF2979FF)) }
+                        onClick = {
+                            workspaceViewModel.selectColor(Color(0xFF2979FF))
+                            if (isInSplitScreen) isSplitPaletteExpanded = true
+                        }
                     )
                     // Green Swatch
                     PaletteColorDot(
                         color = Color(0xFF00C853),
                         isSelected = uiState.selectedColor == Color(0xFF00C853),
-                        onClick = { workspaceViewModel.selectColor(Color(0xFF00C853)) }
-                    )
-                    // Red Swatch
-                    PaletteColorDot(
-                        color = Color(0xFFD50000),
-                        isSelected = uiState.selectedColor == Color(0xFFD50000),
-                        onClick = { workspaceViewModel.selectColor(Color(0xFFD50000)) }
+                        onClick = {
+                            workspaceViewModel.selectColor(Color(0xFF00C853))
+                            if (isInSplitScreen) isSplitPaletteExpanded = true
+                        }
                     )
                     // Plus (+) Custom Color Palette dialog trigger
                     Box(
@@ -3155,7 +3145,13 @@ fun CanvasEditorScreen(
                             .size(22.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF2A2A2E))
-                            .clickable { showColorPaletteDialog = true },
+                            .clickable {
+                                if (isInSplitScreen && !isSplitPaletteExpanded) {
+                                    isSplitPaletteExpanded = true
+                                } else {
+                                    showColorPaletteDialog = true
+                                }
+                            },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(Icons.Default.Add, contentDescription = "Choose Custom Color", tint = Color.LightGray, modifier = Modifier.size(13.dp))
@@ -3169,7 +3165,13 @@ fun CanvasEditorScreen(
                             .size(24.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF2A2A2E))
-                            .clickable { showStrokeWidthDialog = !showStrokeWidthDialog },
+                            .clickable {
+                                if (isInSplitScreen && !isSplitPaletteExpanded) {
+                                    isSplitPaletteExpanded = true
+                                } else {
+                                    showStrokeWidthDialog = !showStrokeWidthDialog
+                                }
+                            },
                         contentAlignment = Alignment.Center
                     ) {
                         Box(
@@ -4590,33 +4592,88 @@ fun CanvasEditorScreen(
 
         if (showSplitScreenPicker && onSplitScreen != null) {
             val allOtherNotes = GraphiteRepository.notebooks.collectAsState().value.filter { it.id != notebookId && !it.isDeleted }
+            var selectedSplitOrientation by remember { mutableStateOf(SplitLayoutOrientation.VERTICAL_DIVIDER) }
             AlertDialog(
                 onDismissRequest = { showSplitScreenPicker = false },
-                title = { Text("Open in Split Screen", color = Color.White, fontWeight = FontWeight.Bold) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Splitscreen, contentDescription = null, tint = Color(0xFFFF7A30), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Open in Split Screen", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    }
+                },
                 text = {
-                    if (allOtherNotes.isEmpty()) {
-                        Text("No other documents available to view side-by-side.", color = Color.LightGray)
-                    } else {
-                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
-                            items(allOtherNotes) { otherNote ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            showSplitScreenPicker = false
-                                            onSplitScreen(notebookId, otherNote.id)
-                                        }
-                                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = if (otherNote.mimeType?.contains("pdf") == true) Icons.Default.PictureAsPdf else Icons.Default.Book,
-                                        contentDescription = null,
-                                        tint = if (otherNote.mimeType?.contains("pdf") == true) Color(0xFFEF5350) else Color(0xFFFF7A30),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text(otherNote.title, color = Color.White, fontSize = 14.sp, maxLines = 1)
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text("Choose Split Layout:", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val isSideBySide = selectedSplitOrientation == SplitLayoutOrientation.VERTICAL_DIVIDER
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSideBySide) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                                    .border(1.5.dp, if (isSideBySide) Color(0xFFFF7A30) else Color(0xFF333338), RoundedCornerShape(8.dp))
+                                    .clickable { selectedSplitOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER }
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.VerticalSplit, contentDescription = null, tint = if (isSideBySide) Color(0xFFFF7A30) else Color.Gray, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Side-by-Side", color = if (isSideBySide) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
+                            val isTopBottom = selectedSplitOrientation == SplitLayoutOrientation.HORIZONTAL_DIVIDER
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isTopBottom) Color(0xFF2A2016) else Color(0xFF1E1E22))
+                                    .border(1.5.dp, if (isTopBottom) Color(0xFFFF7A30) else Color(0xFF333338), RoundedCornerShape(8.dp))
+                                    .clickable { selectedSplitOrientation = SplitLayoutOrientation.HORIZONTAL_DIVIDER }
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.HorizontalSplit, contentDescription = null, tint = if (isTopBottom) Color(0xFFFF7A30) else Color.Gray, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Top & Bottom", color = if (isTopBottom) Color.White else Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text("Select Second Document:", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (allOtherNotes.isEmpty()) {
+                            Text("No other documents available to view side-by-side.", color = Color.Gray, fontSize = 13.sp)
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                                items(allOtherNotes) { otherNote ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                showSplitScreenPicker = false
+                                                onSplitScreen(notebookId, otherNote.id, selectedSplitOrientation)
+                                            }
+                                            .padding(vertical = 9.dp, horizontal = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = if (otherNote.mimeType?.contains("pdf") == true) Icons.Default.PictureAsPdf else Icons.Default.Book,
+                                            contentDescription = null,
+                                            tint = if (otherNote.mimeType?.contains("pdf") == true) Color(0xFFEF5350) else Color(0xFFFF7A30),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(otherNote.title, color = Color.White, fontSize = 13.sp, maxLines = 1)
+                                    }
                                 }
                             }
                         }
