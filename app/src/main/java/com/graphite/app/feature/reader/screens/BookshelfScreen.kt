@@ -9,6 +9,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import com.google.android.gms.auth.api.identity.Identity
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
+import com.graphite.app.core.sharing.FileSharingHelper
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -362,6 +366,22 @@ fun BookshelfScreen(
                                 imageVector = if (allSelected) Icons.Default.CheckCircle else Icons.Default.SelectAll,
                                 contentDescription = if (allSelected) "Deselect All" else "Select All",
                                 tint = if (allSelected) GraphiteOrange else Color.White
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val toShare = books.filter { it.id in selectedBookIds }
+                                if (toShare.isNotEmpty()) {
+                                    FileSharingHelper.shareBooks(context, toShare)
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share Selected Books",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
                             )
                         }
 
@@ -1879,6 +1899,58 @@ private fun BookshelfDriveSyncDialog(
     }
 }
 
+private fun Modifier.bookshelfTapModifier(
+    key: Any?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+): Modifier = this.pointerInput(key) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val startPos = down.position
+        val touchSlop = viewConfiguration.touchSlop
+        val longPressTimeout = 400L
+
+        var isLongPressed = false
+        val pointerId = down.id
+
+        try {
+            withTimeout(longPressTimeout) {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+
+                    if (!change.pressed) {
+                        val distance = (change.position - startPos).getDistance()
+                        if (distance <= touchSlop && !down.isConsumed && !change.isConsumed) {
+                            change.consume()
+                            onClick()
+                        }
+                        return@withTimeout
+                    }
+
+                    val distance = (change.position - startPos).getDistance()
+                    if (distance > touchSlop) {
+                        return@withTimeout
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            isLongPressed = true
+            down.consume()
+            onLongClick()
+        }
+
+        if (isLongPressed) {
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                if (!change.pressed) break
+                change.consume()
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookshelfItemRow(
@@ -1893,6 +1965,7 @@ private fun BookshelfItemRow(
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Row(
         modifier = Modifier
@@ -1903,7 +1976,8 @@ private fun BookshelfItemRow(
                 if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
                 else Modifier
             )
-            .combinedClickable(
+            .bookshelfTapModifier(
+                key = book.id,
                 onClick = onOpen,
                 onLongClick = onLongClick
             )
@@ -2081,6 +2155,19 @@ private fun BookshelfItemRow(
                     )
                 }
                 DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Share Book", color = Color.White)
+                        }
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        FileSharingHelper.shareBook(context, book)
+                    }
+                )
+                DropdownMenuItem(
                     text = { Text("Delete Book", color = Color(0xFFFF5252)) },
                     onClick = {
                         menuExpanded = false
@@ -2106,6 +2193,7 @@ private fun BookshelfItemGridCard(
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -2116,7 +2204,8 @@ private fun BookshelfItemGridCard(
                 if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp))
                 else Modifier
             )
-            .combinedClickable(
+            .bookshelfTapModifier(
+                key = book.id,
                 onClick = onOpen,
                 onLongClick = onLongClick
             )
@@ -2264,6 +2353,19 @@ private fun BookshelfItemGridCard(
                             }
                         )
                     }
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Share Book", color = Color.White)
+                            }
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            FileSharingHelper.shareBook(context, book)
+                        }
+                    )
                     DropdownMenuItem(
                         text = { Text("Delete Book", color = Color(0xFFFF5252)) },
                         onClick = {

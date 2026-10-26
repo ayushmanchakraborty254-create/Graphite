@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.graphite.app.data.model.NotebookCover
 import com.graphite.app.core.importer.PdfPageThumbnail
+import com.graphite.app.core.sharing.FileSharingHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -700,6 +701,22 @@ fun NoteshelfScreen(
                                 contentDescription = "Move Selected to Folder",
                                 tint = Color(0xFF64B5F6),
                                 modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val toShare = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
+                                if (toShare.isNotEmpty()) {
+                                    FileSharingHelper.shareNotebooks(context, toShare)
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share Selected Notes",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
 
@@ -2607,66 +2624,71 @@ private fun Modifier.notebookTapDragModifier(
 ): Modifier = this.pointerInput(key) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
-        val downTime = System.currentTimeMillis()
         val startPos = down.position
         val touchSlop = viewConfiguration.touchSlop
-        var isDragging = false
+        val longPressTimeout = 400L
+
         var isLongPressActive = false
-        var isPointerReleased = false
-        var isCanceledForScroll = false
+        var isDragging = false
+        val pointerId = down.id
 
-        var anyConsumed = down.isConsumed
+        // Phase 1: Wait for 400ms hold, tap release, or scroll movement
+        try {
+            withTimeout(longPressTimeout) {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
 
-        while (!isPointerReleased && !isCanceledForScroll) {
-            val event = awaitPointerEvent()
-            val current = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if (!change.pressed) {
+                        // Lifted before 400ms -> Tap!
+                        val distance = (change.position - startPos).getDistance()
+                        if (distance <= touchSlop && !down.isConsumed && !change.isConsumed) {
+                            change.consume()
+                            onClick()
+                        }
+                        return@withTimeout
+                    }
 
-            if (current.isConsumed) {
-                anyConsumed = true
-            }
-
-            if (!current.pressed) {
-                isPointerReleased = true
-                if (isDragging) {
-                    onDragEnd?.invoke()
-                } else if (isLongPressActive) {
-                    onLongClick()
-                } else {
-                    val duration = System.currentTimeMillis() - downTime
-                    val distance = (current.position - startPos).getDistance()
-                    if (duration < 350 && distance <= touchSlop && !anyConsumed && !current.isConsumed && !down.isConsumed) {
-                        current.consume()
-                        onClick()
+                    val distance = (change.position - startPos).getDistance()
+                    if (distance > touchSlop) {
+                        // User swiped or moved finger before 400ms -> SCROLL!
+                        // Do NOT consume pointer, yield immediately so list/grid scrolls smoothly.
+                        return@withTimeout
                     }
                 }
-                break
             }
+        } catch (_: Exception) {
+            // Held stationary for 400ms! Trigger long-press immediately while finger is still held down!
+            isLongPressActive = true
+            down.consume()
+            onLongClick()
+        }
 
-            val elapsed = System.currentTimeMillis() - downTime
-            val distance = (current.position - startPos).getDistance()
+        // Phase 2: If long press triggered, handle drag-and-drop or release
+        if (isLongPressActive) {
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
 
-            if (!isLongPressActive) {
-                if (distance > touchSlop) {
-                    // Finger moved before holding for >= 500ms: this is a scroll gesture!
-                    // Do NOT consume pointer, do NOT start dragging. Yield immediately to parent scroll container.
-                    isCanceledForScroll = true
+                if (!change.pressed) {
+                    if (isDragging) {
+                        onDragEnd?.invoke()
+                    }
                     break
-                } else if (elapsed >= 500) {
-                    // User held stationary on note for >= 500ms: activate long-press / drag readiness
-                    isLongPressActive = true
-                    current.consume()
                 }
-            } else {
-                // Long-press hold has already completed: dragging is now unlocked
-                current.consume()
-                if (!isDragging && onDragStart != null && distance > touchSlop) {
-                    isDragging = true
-                    val rootStart = getRootPosition() + current.position
-                    onDragStart.invoke(rootStart)
-                }
-                if (isDragging) {
-                    val dragAmount = current.position - current.previousPosition
-                    onDrag?.invoke(dragAmount)
+
+                change.consume()
+                val moveDist = (change.position - startPos).getDistance()
+                if (onDragStart != null) {
+                    if (!isDragging && moveDist > touchSlop) {
+                        isDragging = true
+                        val rootStart = getRootPosition() + change.position
+                        onDragStart.invoke(rootStart)
+                    }
+                    if (isDragging) {
+                        val dragAmount = change.position - change.previousPosition
+                        onDrag?.invoke(dragAmount)
+                    }
                 }
             }
         }
@@ -2700,6 +2722,7 @@ private fun NotebookThumbnailCard(
     onDragCancel: (() -> Unit)? = null
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val cardPosRef = remember { object { var x = 0f; var y = 0f } }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
@@ -3164,6 +3187,14 @@ private fun NotebookThumbnailCard(
                             onUploadToDrive()
                         }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Share", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange) },
+                        onClick = {
+                            menuExpanded = false
+                            FileSharingHelper.shareNotebook(context, notebook)
+                        }
+                    )
                     HorizontalDivider(color = Color(0xFF333333))
                     if (notebook.isDeleted) {
                         DropdownMenuItem(
@@ -3275,6 +3306,7 @@ private fun NotebookListRow(
             notebook.title.startsWith("Quick Note", ignoreCase = true) ||
             notebook.title.startsWith("Text Note", ignoreCase = true)
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Row(
         modifier = Modifier
@@ -3517,6 +3549,14 @@ private fun NotebookListRow(
                 DropdownMenuItem(
                     text = { Text(if (isUploaded) "Re-upload to Drive" else "Upload to Drive", color = if (isUploaded) Color(0xFF81C784) else GraphiteOrange) },
                     onClick = { menuExpanded = false; onUploadToDrive() }
+                )
+                DropdownMenuItem(
+                    text = { Text("Share", color = Color.White) },
+                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange) },
+                    onClick = {
+                        menuExpanded = false
+                        FileSharingHelper.shareNotebook(context, notebook)
+                    }
                 )
                 HorizontalDivider(color = Color(0xFF333333))
                 if (notebook.isDeleted) {
