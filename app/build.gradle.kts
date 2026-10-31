@@ -16,7 +16,16 @@ android {
         applicationId = "com.graphite.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        val commitCount = (project.findProperty("versionCode") as? String)?.toIntOrNull()
+            ?: try {
+                val isWindows = System.getProperty("os.name").lowercase().contains("win")
+                val cmd = if (isWindows) listOf("cmd.exe", "/c", "git rev-list --count HEAD") else listOf("git", "rev-list", "--count", "HEAD")
+                val proc = ProcessBuilder(cmd).start()
+                proc.inputStream.bufferedReader().readText().trim().toIntOrNull() ?: 1
+            } catch (_: Exception) {
+                1
+            }
+        versionCode = commitCount
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -59,8 +68,10 @@ android {
 
         val gitCommitSha = (project.findProperty("gitCommitSha") as? String)?.trim()?.takeIf { it.isNotBlank() }
             ?: try {
-                val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD").start()
-                proc.inputStream.bufferedReader().readText().trim()
+                val isWindows = System.getProperty("os.name").lowercase().contains("win")
+                val cmd = if (isWindows) listOf("cmd.exe", "/c", "git rev-parse --short HEAD") else listOf("git", "rev-parse", "--short", "HEAD")
+                val proc = ProcessBuilder(cmd).start()
+                proc.inputStream.bufferedReader().readText().trim().takeIf { it.isNotBlank() } ?: "dev"
             } catch (_: Exception) {
                 "dev"
             }

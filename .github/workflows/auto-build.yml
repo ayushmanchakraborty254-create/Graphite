@@ -35,7 +35,8 @@ jobs:
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date +%s%3N)
-          ./gradlew assembleDebug -PgitCommitSha=$SHORT_SHA -PbuildTimeMillis=$BUILD_TIME --no-daemon
+          VERSION_CODE=$(git rev-list --count HEAD)
+          ./gradlew assembleDebug -PgitCommitSha=$SHORT_SHA -PbuildTimeMillis=$BUILD_TIME -PversionCode=$VERSION_CODE --no-daemon
 
       - name: Prepare APK Artifacts
         id: vars
@@ -43,6 +44,7 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           COMMIT_MSG=$(git log -1 --pretty=%s)
           BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          VERSION_CODE=$(git rev-list --count HEAD)
           
           echo "sha=$SHORT_SHA" >> $GITHUB_OUTPUT
           echo "msg=$COMMIT_MSG" >> $GITHUB_OUTPUT
@@ -53,9 +55,22 @@ jobs:
           cp "$APK_PATH" Graphite-v1.0.0.apk
           ls -lh Graphite-v1.0.0.apk
 
+          # Generate lightweight version.json release metadata
+          cat <<EOF > version.json
+          {
+            "versionCode": $VERSION_CODE,
+            "versionName": "1.0.0",
+            "commitSha": "$SHORT_SHA",
+            "commitMessage": "$COMMIT_MSG",
+            "buildDate": "$BUILD_DATE",
+            "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
+          }
+          EOF
+
       - name: Remove Old Release Assets
         run: |
           gh release delete-asset latest Graphite-latest.apk --yes || true
+          gh release delete-asset latest version.json --yes || true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,5 +92,6 @@ jobs:
           make_latest: true
           files: |
             Graphite-v1.0.0.apk
+            version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

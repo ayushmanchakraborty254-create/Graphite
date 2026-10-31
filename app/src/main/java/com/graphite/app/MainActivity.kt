@@ -177,7 +177,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     while (true) {
                         appUpdateManager.checkForUpdates(context)
-                        kotlinx.coroutines.delay(120_000L) // Auto re-check every 2 minutes while active
+                        kotlinx.coroutines.delay(1_800_000L) // Auto re-check every 30 minutes while active
                     }
                 }
                 com.graphite.app.core.updater.AppUpdateModalDialog(updateManager = appUpdateManager, context = context)
