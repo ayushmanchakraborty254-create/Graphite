@@ -100,6 +100,7 @@ import java.io.File
 
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlin.math.min
 
 enum class StudioTool {
@@ -182,9 +183,17 @@ fun CanvasEditorScreen(
     val screenWidth = configuration.screenWidthDp.dp
     val isTablet = configuration.screenWidthDp >= 600
 
-    // Page state
-    var totalPages by remember { mutableIntStateOf(maxOf(1, notebook?.pageCount ?: 1)) }
-    val listState = rememberLazyListState()
+    // Page state & Last opened page memory
+    val pagePrefs = remember { context.getSharedPreferences("graphite_doc_last_page", android.content.Context.MODE_PRIVATE) }
+    val savedInitialPage = remember(notebookId) {
+        val cached = pagePrefs.getInt("last_page_$notebookId", -1)
+        if (cached >= 0) cached else (notebook?.lastOpenedPage ?: 0)
+    }
+
+    var totalPages by remember(notebookId) { mutableIntStateOf(maxOf(1, notebook?.pageCount ?: 1)) }
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = savedInitialPage.coerceAtLeast(0)
+    )
     val currentPageIndex by remember {
         derivedStateOf { listState.firstVisibleItemIndex.coerceIn(0, totalPages - 1) }
     }
@@ -197,6 +206,23 @@ fun CanvasEditorScreen(
     var pdfAspectRatio by remember { mutableFloatStateOf(1.414f) }
     val basePageWidth = (screenWidth - 24.dp).coerceAtLeast(320.dp)
     val basePageHeight = basePageWidth * pdfAspectRatio
+
+    var hasRestoredPage by remember(notebookId) { mutableStateOf(false) }
+    LaunchedEffect(notebookId, totalPages, pdfPageCount) {
+        if (!hasRestoredPage && savedInitialPage > 0 && totalPages > 1) {
+            val target = savedInitialPage.coerceIn(0, totalPages - 1)
+            listState.scrollToItem(target)
+            hasRestoredPage = true
+        }
+    }
+
+    // Automatically persist last opened page whenever user navigates/scrolls
+    LaunchedEffect(currentPageIndex, notebookId) {
+        if (currentPageIndex >= 0) {
+            pagePrefs.edit().putInt("last_page_$notebookId", currentPageIndex).apply()
+            GraphiteRepository.updateNotebookLastOpenedPage(notebookId, currentPageIndex)
+        }
+    }
 
     // Tool & Mode state
     var isReadOnlyMode by remember { mutableStateOf(false) } // ⊘ button
@@ -678,18 +704,30 @@ fun CanvasEditorScreen(
         }
     }
 
-    // Lazy load on-demand PDF page when user scrolls to it
-    LaunchedEffect(currentPageIndex) {
+    // Intelligent multi-page prefetching when user scrolls near any page
+    LaunchedEffect(currentPageIndex, pdfPageCount) {
         val path = notebook?.filePath
         if (!path.isNullOrBlank() && File(path).extension.equals("pdf", ignoreCase = true)) {
             val file = File(path)
-            if (file.exists() && currentPageIndex < pdfPageCount && !pdfBitmaps.containsKey(currentPageIndex)) {
+            if (file.exists() && pdfPageCount > 0) {
                 withContext(Dispatchers.IO) {
                     try {
                         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
                         val renderer = PdfRenderer(pfd)
-                        if (currentPageIndex < renderer.pageCount) {
-                            val page = renderer.openPage(currentPageIndex)
+                        val count = renderer.pageCount
+
+                        // Prioritized page order: current page first, then adjacent pages
+                        val pagesToPrefetch = listOf(
+                            currentPageIndex,
+                            currentPageIndex + 1,
+                            currentPageIndex + 2,
+                            currentPageIndex - 1,
+                            currentPageIndex + 3
+                        ).filter { it in 0 until count && !pdfBitmaps.containsKey(it) }
+
+                        for (p in pagesToPrefetch) {
+                            if (!isActive) break
+                            val page = renderer.openPage(p)
                             val targetScale = (1800f / page.width.toFloat()).coerceIn(2.2f, 3.2f)
                             val w = (page.width * targetScale).toInt()
                             val h = (page.height * targetScale).toInt()
@@ -703,9 +741,10 @@ fun CanvasEditorScreen(
                             page.close()
 
                             withContext(Dispatchers.Main) {
-                                pdfBitmaps[currentPageIndex] = bmp
+                                pdfBitmaps[p] = bmp
                             }
                         }
+
                         renderer.close()
                         pfd.close()
                     } catch (_: Exception) {}
@@ -792,6 +831,7 @@ fun CanvasEditorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(interactionMode, isReadOnlyMode, selectedStudioTool, selectedImageId) {
+                    var activeFlingJob: Job? = null
                     awaitEachGesture {
                         var lastCenter: Offset? = null
                         var lastDist: Float? = null
@@ -804,6 +844,11 @@ fun CanvasEditorScreen(
                         do {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             val pressed = event.changes.filter { it.pressed }
+
+                            if (pressed.isNotEmpty()) {
+                                activeFlingJob?.cancel()
+                                activeFlingJob = null
+                            }
 
                             // If a hardware stylus or eraser is on screen, NEVER intercept or scroll!
                             val hasStylus = pressed.any {
@@ -851,11 +896,11 @@ fun CanvasEditorScreen(
                                         }
                                     } else if (!isPinching && interactionMode == EditorInteractionMode.HAND_MODE) {
                                         // Deliberate 2-finger vertical scroll in HAND_MODE (only when NOT pinching)
-                                        if (kotlin.math.abs(dy) > 1.2f) {
+                                        if (kotlin.math.abs(dy) > 0.5f) {
                                             listState.dispatchRawDelta(-dy)
-                                            val dt = (now - lastTime).coerceAtLeast(1)
-                                            val instantV = (-dy / dt) * 1000f
-                                            scrollVelocityY = scrollVelocityY * 0.4f + instantV * 0.6f
+                                            val dt = (now - lastTime).coerceIn(1L, 100L)
+                                            val instantV = (-dy / dt.toFloat()) * 1000f
+                                            scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
                                         }
                                         if (zoomScale > 1f && kotlin.math.abs(dx) > 0.15f) {
                                             panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
@@ -869,22 +914,22 @@ fun CanvasEditorScreen(
 
                                 // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
-                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE && !isPinching) {
-                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically (guarded against accidental finger release during pinch)
+                            } else if (pressed.size == 1 && (interactionMode == EditorInteractionMode.PEN_MODE || interactionMode == EditorInteractionMode.HAND_MODE) && !isPinching) {
+                                // 1 FINGER IN PEN_MODE or HAND_MODE: smoothly scrolls the pages vertically
                                 val curPos = pressed[0].position
                                 val now = System.currentTimeMillis()
 
                                 if (lastCenter != null) {
                                     val dy = curPos.y - lastCenter.y
                                     totalDragY += kotlin.math.abs(dy)
-                                    if (totalDragY > 4f) {
+                                    if (totalDragY > 1.5f) {
                                         isDragging1Finger = true
                                     }
                                     if (isDragging1Finger && kotlin.math.abs(dy) > 0.05f) {
                                         listState.dispatchRawDelta(-dy)
-                                        val dt = (now - lastTime).coerceAtLeast(1)
-                                        val instantV = (-dy / dt) * 1000f
-                                        scrollVelocityY = scrollVelocityY * 0.5f + instantV * 0.5f
+                                        val dt = (now - lastTime).coerceIn(1L, 100L)
+                                        val instantV = (-dy / dt.toFloat()) * 1000f
+                                        scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
                                     }
                                 }
 
@@ -900,19 +945,19 @@ fun CanvasEditorScreen(
                                 // Fingers lifted: natural physics-based fling momentum only when NOT zooming
                                 val shouldFling = !isPinching && (
                                     (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
-                                    (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
+                                    ((interactionMode == EditorInteractionMode.PEN_MODE || interactionMode == EditorInteractionMode.HAND_MODE) && isDragging1Finger)
                                 )
-                                if (shouldFling && kotlin.math.abs(scrollVelocityY) > 80f) {
-                                    val initialVel = scrollVelocityY.coerceIn(-5000f, 5000f)
-                                    scope.launch {
+                                if (shouldFling && kotlin.math.abs(scrollVelocityY) > 50f) {
+                                    val initialVel = scrollVelocityY.coerceIn(-15000f, 15000f)
+                                    activeFlingJob = scope.launch {
                                         var consumed = 0f
                                         val anim = androidx.compose.animation.core.Animatable(0f)
                                         try {
                                             anim.animateDecay(
                                                 initialVelocity = initialVel,
                                                 animationSpec = androidx.compose.animation.core.exponentialDecay(
-                                                    frictionMultiplier = 1.15f,
-                                                    absVelocityThreshold = 15f
+                                                    frictionMultiplier = 0.75f,
+                                                    absVelocityThreshold = 0.5f
                                                 )
                                             ) {
                                                 val step = value - consumed
@@ -943,7 +988,7 @@ fun CanvasEditorScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
             ) {
-                items(totalPages) { pageIdx ->
+                items(count = totalPages, key = { it }) { pageIdx ->
                     // Centering wrapper row to guarantee page sheet remains centered across full width
                     Box(
                         modifier = Modifier.fillMaxWidth(),

@@ -71,7 +71,8 @@ data class NotebookItem(
     val voiceNotes: List<com.graphite.app.core.voice.VoiceClip> = emptyList(),
     val password: String? = null,
     val driveFileId: String? = null,
-    val isUploadedToDrive: Boolean = false
+    val isUploadedToDrive: Boolean = false,
+    val lastOpenedPage: Int = 0
 )
 
 data class FolderItem(

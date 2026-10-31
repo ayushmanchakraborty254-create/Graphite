@@ -580,6 +580,20 @@ object GraphiteRepository {
         }
     }
 
+    fun updateNotebookLastOpenedPage(id: String, page: Int) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val index = userList.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val existing = userList[index]
+            if (existing.lastOpenedPage != page) {
+                userList[index] = existing.copy(lastOpenedPage = page)
+                _notebooks.value = userList.filter { !it.isDeleted }
+                saveToDisk()
+            }
+        }
+    }
+
     fun deleteNotebook(id: String) {
         val now = System.currentTimeMillis()
         val currentUid = activeUserId ?: "default"
@@ -1218,6 +1232,7 @@ object GraphiteRepository {
             put("password", item.password)
             put("driveFileId", item.driveFileId)
             put("isUploadedToDrive", item.isUploadedToDrive)
+            put("lastOpenedPage", item.lastOpenedPage)
 
             // Cover
             val coverObj = JSONObject().apply {
@@ -1314,7 +1329,8 @@ object GraphiteRepository {
             voiceNotes = voiceNotes,
             password = pwd,
             driveFileId = if (json.has("driveFileId") && !json.isNull("driveFileId")) json.getString("driveFileId") else null,
-            isUploadedToDrive = json.optBoolean("isUploadedToDrive", false)
+            isUploadedToDrive = json.optBoolean("isUploadedToDrive", false),
+            lastOpenedPage = json.optInt("lastOpenedPage", 0)
         )
     }
 
