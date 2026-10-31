@@ -50,13 +50,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import com.graphite.app.feature.workspace.QuickDocumentSwitcherDialog
 import com.graphite.app.feature.workspace.VoiceNotebookScreen
 import com.graphite.app.feature.workspace.model.SplitLayoutOrientation
 
@@ -282,15 +285,24 @@ class MainActivity : ComponentActivity() {
                                                 notebookId = destination.notebookId,
                                                 onNavigateBack = {
                                                     currentDestination = ActiveDestination.MainTab(selectedTab)
+                                                },
+                                                onSplitScreen = { docA, docB, orient ->
+                                                    currentDestination = ActiveDestination.SplitScreen(docA, docB, orient)
+                                                },
+                                                onSwitchDocument = { newDocId ->
+                                                    currentDestination = ActiveDestination.CanvasEditor(newDocId)
                                                 }
                                             )
                                         }
                                     }
                                 }
                                 is ActiveDestination.SplitScreen -> {
+                                    var docAId by remember(destination) { mutableStateOf(destination.docAId) }
+                                    var docBId by remember(destination) { mutableStateOf(destination.docBId) }
+
                                     BackHandler {
                                         // Pressing system back closes secondary document and restores doc A in normal single view
-                                        currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
+                                        currentDestination = ActiveDestination.CanvasEditor(docAId)
                                     }
 
                                     var currentOrientation by remember(destination) { mutableStateOf(destination.orientation) }
@@ -310,11 +322,14 @@ class MainActivity : ComponentActivity() {
                                                         .fillMaxHeight()
                                                 ) {
                                                     SplitPaneDocScreen(
-                                                        notebookId = destination.docAId,
+                                                        notebookId = docAId,
                                                         isInSplitScreen = true,
                                                         onNavigateBack = {
                                                             // Closing doc A opens doc B normally in single view!
-                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docBId)
+                                                            currentDestination = ActiveDestination.CanvasEditor(docBId)
+                                                        },
+                                                        onSwitchDocument = { newId ->
+                                                            docAId = newId
                                                         }
                                                     )
                                                 }
@@ -362,6 +377,21 @@ class MainActivity : ComponentActivity() {
                                                         )
                                                         IconButton(
                                                             onClick = {
+                                                                val temp = docAId
+                                                                docAId = docBId
+                                                                docBId = temp
+                                                            },
+                                                            modifier = Modifier.size(22.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.AutoMirrored.Filled.CompareArrows,
+                                                                contentDescription = "Swap Left and Right Panes",
+                                                                tint = androidx.compose.ui.graphics.Color.LightGray,
+                                                                modifier = Modifier.size(15.dp)
+                                                            )
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
                                                                 currentOrientation = SplitLayoutOrientation.HORIZONTAL_DIVIDER
                                                             },
                                                             modifier = Modifier.size(22.dp)
@@ -382,11 +412,14 @@ class MainActivity : ComponentActivity() {
                                                         .fillMaxHeight()
                                                 ) {
                                                     SplitPaneDocScreen(
-                                                        notebookId = destination.docBId,
+                                                        notebookId = docBId,
                                                         isInSplitScreen = true,
                                                         onNavigateBack = {
                                                             // Closing doc B opens doc A normally in single view!
-                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
+                                                            currentDestination = ActiveDestination.CanvasEditor(docAId)
+                                                        },
+                                                        onSwitchDocument = { newId ->
+                                                            docBId = newId
                                                         }
                                                     )
                                                 }
@@ -400,11 +433,14 @@ class MainActivity : ComponentActivity() {
                                                         .fillMaxWidth()
                                                 ) {
                                                     SplitPaneDocScreen(
-                                                        notebookId = destination.docAId,
+                                                        notebookId = docAId,
                                                         isInSplitScreen = true,
                                                         onNavigateBack = {
                                                             // Closing doc A opens doc B normally in single view!
-                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docBId)
+                                                            currentDestination = ActiveDestination.CanvasEditor(docBId)
+                                                        },
+                                                        onSwitchDocument = { newId ->
+                                                            docAId = newId
                                                         }
                                                     )
                                                 }
@@ -452,6 +488,21 @@ class MainActivity : ComponentActivity() {
                                                         )
                                                         IconButton(
                                                             onClick = {
+                                                                val temp = docAId
+                                                                docAId = docBId
+                                                                docBId = temp
+                                                            },
+                                                            modifier = Modifier.size(22.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.AutoMirrored.Filled.CompareArrows,
+                                                                contentDescription = "Swap Top and Bottom Panes",
+                                                                tint = androidx.compose.ui.graphics.Color.LightGray,
+                                                                modifier = Modifier.size(15.dp)
+                                                            )
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
                                                                 currentOrientation = SplitLayoutOrientation.VERTICAL_DIVIDER
                                                             },
                                                             modifier = Modifier.size(22.dp)
@@ -472,11 +523,14 @@ class MainActivity : ComponentActivity() {
                                                         .fillMaxWidth()
                                                 ) {
                                                     SplitPaneDocScreen(
-                                                        notebookId = destination.docBId,
+                                                        notebookId = docBId,
                                                         isInSplitScreen = true,
                                                         onNavigateBack = {
                                                             // Closing doc B opens doc A normally in single view!
-                                                            currentDestination = ActiveDestination.CanvasEditor(destination.docAId)
+                                                            currentDestination = ActiveDestination.CanvasEditor(docAId)
+                                                        },
+                                                        onSwitchDocument = { newId ->
+                                                            docBId = newId
                                                         }
                                                     )
                                                 }
@@ -540,30 +594,34 @@ class MainActivity : ComponentActivity() {
 private fun SplitPaneDocScreen(
     notebookId: String,
     isInSplitScreen: Boolean,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onSwitchDocument: ((String) -> Unit)? = null
 ) {
-    val openedNote = remember(notebookId) {
-        GraphiteRepository.getNotebook(notebookId)
-    }
-    when (openedNote?.mimeType) {
-        "text/keep" -> {
-            com.graphite.app.feature.workspace.KeepTextEditorScreen(
-                notebookId = notebookId,
-                onNavigateBack = onNavigateBack
-            )
+    key(notebookId) {
+        val openedNote = remember(notebookId) {
+            GraphiteRepository.getNotebook(notebookId)
         }
-        "application/x-graphite-voice" -> {
-            VoiceNotebookScreen(
-                notebookId = notebookId,
-                onNavigateBack = onNavigateBack
-            )
-        }
-        else -> {
-            CanvasEditorScreen(
-                notebookId = notebookId,
-                isInSplitScreen = isInSplitScreen,
-                onNavigateBack = onNavigateBack
-            )
+        when (openedNote?.mimeType) {
+            "text/keep" -> {
+                com.graphite.app.feature.workspace.KeepTextEditorScreen(
+                    notebookId = notebookId,
+                    onNavigateBack = onNavigateBack
+                )
+            }
+            "application/x-graphite-voice" -> {
+                VoiceNotebookScreen(
+                    notebookId = notebookId,
+                    onNavigateBack = onNavigateBack
+                )
+            }
+            else -> {
+                CanvasEditorScreen(
+                    notebookId = notebookId,
+                    isInSplitScreen = isInSplitScreen,
+                    onNavigateBack = onNavigateBack,
+                    onSwitchDocument = onSwitchDocument
+                )
+            }
         }
     }
 }

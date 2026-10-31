@@ -164,6 +164,7 @@ fun CanvasEditorScreen(
     notebookId: String,
     onNavigateBack: () -> Unit,
     onSplitScreen: ((String, String, SplitLayoutOrientation) -> Unit)? = null,
+    onSwitchDocument: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
     isInSplitScreen: Boolean = false,
     workspaceViewModel: WorkspaceViewModel = viewModel(key = "canvas_editor_$notebookId")
@@ -210,6 +211,7 @@ fun CanvasEditorScreen(
     var showStrokeWidthDialog by remember { mutableStateOf(false) } // Left palette size slider
     var showVoiceDialog by remember { mutableStateOf(false) }
     var showSplitScreenPicker by remember { mutableStateOf(false) }
+    var showQuickDocSwitcher by remember { mutableStateOf(false) }
     var showMobilePalette by remember { mutableStateOf(false) }
     var isSplitPaletteExpanded by remember { mutableStateOf(false) }
 
@@ -1969,6 +1971,19 @@ fun CanvasEditorScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
+                            if (onSwitchDocument != null) {
+                                IconButton(
+                                    onClick = { showQuickDocSwitcher = true },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = "Switch Note or PDF",
+                                        tint = if (showQuickDocSwitcher) Color(0xFF29B6F6) else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                             IconButton(
                                 onClick = { workspaceViewModel.undo() },
                                 enabled = uiState.canUndo,
@@ -2680,6 +2695,11 @@ fun CanvasEditorScreen(
                         }
                         IconButton(onClick = { showPageDrawer = !showPageDrawer }, modifier = Modifier.size(32.dp)) {
                             Icon(Icons.Default.GridView, contentDescription = "Page Drawer", tint = if (showPageDrawer) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(17.dp))
+                        }
+                        if (onSwitchDocument != null) {
+                            IconButton(onClick = { showQuickDocSwitcher = true }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = "Switch Note or PDF", tint = if (showQuickDocSwitcher) Color(0xFF29B6F6) else Color.White, modifier = Modifier.size(17.dp))
+                            }
                         }
                         Text(
                             text = "${currentPageIndex + 1}/$totalPages",
@@ -4678,6 +4698,22 @@ fun CanvasEditorScreen(
                     selectedStudioTool = StudioTool.TEXT
                     editingTextBoxId = newBox.id
                     Toast.makeText(context, "Inserted onto Page ${pIdx + 1}!", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
+
+        if (showQuickDocSwitcher && onSwitchDocument != null) {
+            val allNotes = GraphiteRepository.notebooks.collectAsState().value.filter { !it.isDeleted }
+            QuickDocumentSwitcherDialog(
+                currentNotebookId = notebookId,
+                allNotes = allNotes,
+                isInSplitScreen = isInSplitScreen,
+                onDismiss = { showQuickDocSwitcher = false },
+                onSelectDocument = { selectedDoc ->
+                    showQuickDocSwitcher = false
+                    if (selectedDoc.id != notebookId) {
+                        onSwitchDocument(selectedDoc.id)
+                    }
                 }
             )
         }
