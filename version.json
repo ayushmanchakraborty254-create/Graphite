@@ -1,8 +1,8 @@
 {
-  "versionCode": 84,
+  "versionCode": 86,
   "versionName": "1.0.0",
-  "commitSha": "f3d9a0c",
-  "commitMessage": "fix(drive): prevent duplicate uploads and upload only missing or newly added notes in folder",
-  "buildDate": "2026-11-07 13:55 UTC",
+  "commitSha": "d9fb065",
+  "commitMessage": "fix(sync): synchronize folders with cloud and optimize update detection",
+  "buildDate": "2026-11-07 15:12 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
