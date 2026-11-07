@@ -1,8 +1,8 @@
 {
-  "versionCode": 82,
+  "versionCode": 84,
   "versionName": "1.0.0",
-  "commitSha": "7bfb1e8",
-  "commitMessage": "style(library): unify folder thumbnail into a single whole vector shape with no inner rectangles",
-  "buildDate": "2026-11-07 13:31 UTC",
+  "commitSha": "f3d9a0c",
+  "commitMessage": "fix(drive): prevent duplicate uploads and upload only missing or newly added notes in folder",
+  "buildDate": "2026-11-07 13:55 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
