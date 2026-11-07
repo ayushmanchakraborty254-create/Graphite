@@ -1,8 +1,8 @@
 {
-  "versionCode": 78,
+  "versionCode": 80,
   "versionName": "1.0.0",
-  "commitSha": "00e7ab1",
-  "commitMessage": "fix(updater): fix update discovery using release version.json and API, add Android system notification, in-app banner, and POST_NOTIFICATIONS permission",
-  "buildDate": "2026-11-07 13:09 UTC",
+  "commitSha": "5c66831",
+  "commitMessage": "style(library): remove outer circles from folder icons and reposition star button to lower-left",
+  "buildDate": "2026-11-07 13:22 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
