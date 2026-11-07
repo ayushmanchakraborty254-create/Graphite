@@ -1,8 +1,8 @@
 {
-  "versionCode": 76,
+  "versionCode": 78,
   "versionName": "1.0.0",
-  "commitSha": "0244122",
-  "commitMessage": "Remember last opened page for notes and PDFs, add PDF prefetching and smooth scrolling momentum",
-  "buildDate": "2026-10-31 04:21 UTC",
+  "commitSha": "3d0f950",
+  "commitMessage": "feat(library): revamp folder icons, uniform yellow colors, star & cloud sync badges, drag-and-drop duplicate warning, and redesigned templates section",
+  "buildDate": "2026-11-07 12:35 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }

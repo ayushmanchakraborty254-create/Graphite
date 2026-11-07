@@ -162,6 +162,29 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
+                val notificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+                ) { /* Notification permission result handled */ }
+
+                LaunchedEffect(Unit) {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                context,
+                                android.Manifest.permission.POST_NOTIFICATIONS
+                            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+
+                DisposableEffect(Unit) {
+                    if (intent?.action == com.graphite.app.core.updater.AppUpdateManager.ACTION_SHOW_UPDATE) {
+                        appUpdateManager.checkForUpdates(context, isManualCheck = true)
+                    }
+                    onDispose {}
+                }
+
                 val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner) {
                     val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -558,8 +581,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleDeepLinkIntent(intent)
         handleShareIntent(intent)
+        if (intent.action == com.graphite.app.core.updater.AppUpdateManager.ACTION_SHOW_UPDATE) {
+            GraphiteApplication.instance.appUpdateManager.checkForUpdates(this, isManualCheck = true)
+        }
     }
 
     private fun handleDeepLinkIntent(intent: Intent?) {

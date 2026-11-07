@@ -69,6 +69,7 @@ jobs:
 
       - name: Remove Old Release Assets
         run: |
+          gh release delete-asset latest Graphite-v1.0.0.apk --yes || true
           gh release delete-asset latest Graphite-latest.apk --yes || true
           gh release delete-asset latest version.json --yes || true
         env:
@@ -95,3 +96,11 @@ jobs:
             version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync version.json on repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: sync version.json to ${{ steps.vars.outputs.sha }} [skip ci]" || echo "No changes to commit"
+          git push origin main || echo "Git push skipped"

@@ -119,6 +119,9 @@ fun NoteshelfScreen(
     val syncManager = remember { GraphiteApplication.instance.supabaseSyncManager }
     var isSyncingNotes by remember { mutableStateOf(false) }
 
+    val appUpdateManager = remember { GraphiteApplication.instance.appUpdateManager }
+    val latestAvailableUpdate by appUpdateManager.latestAvailableUpdate.collectAsState()
+
     val googleAccountManager = remember { GraphiteApplication.instance.googleAccountManager }
     val googleUser by googleAccountManager.currentUser.collectAsState()
     val isGuestMode by googleAccountManager.isGuestMode.collectAsState()
@@ -1038,6 +1041,65 @@ fun NoteshelfScreen(
                         unfocusedTextColor = Color.White
                     )
                 )
+            }
+
+            // In-app Update Notification Banner
+            if (latestAvailableUpdate != null && selectedCategory != "Templates" && selectedCategory != "Trash") {
+                val update = latestAvailableUpdate!!
+                val shortSha = if (update.commitSha.length >= 7) update.commitSha.take(7) else update.commitSha
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { appUpdateManager.checkForUpdates(context, isManualCheck = true) },
+                    color = Color(0xFF26190B),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.8f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(GraphiteOrange.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.SystemUpdate,
+                                contentDescription = null,
+                                tint = GraphiteOrange,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🚀 Graphite Update Available ($shortSha)",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = update.releaseNotes.ifBlank { "Tap to download and install the latest build." },
+                                color = Color.LightGray,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                        }
+                        Button(
+                            onClick = { appUpdateManager.checkForUpdates(context, isManualCheck = true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Update", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
 
             // Quick Creation Action Cards Row (Quick Note, Notebook, Voice Note)

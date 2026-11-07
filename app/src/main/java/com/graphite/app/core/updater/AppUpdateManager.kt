@@ -1,5 +1,8 @@
 package com.graphite.app.core.updater
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -22,6 +25,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.graphite.app.BuildConfig
 import com.graphite.app.core.theme.GraphiteOrange
@@ -80,6 +86,13 @@ class AppUpdateManager(
         .retryOnConnectionFailure(true)
         .build()
 ) {
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "graphite_app_updates"
+        const val NOTIFICATION_ID = 8842
+        const val ACTION_SHOW_UPDATE = "com.graphite.app.ACTION_SHOW_UPDATE"
+        const val EXTRA_UPDATE_SHA = "EXTRA_UPDATE_SHA"
+    }
+
     var lastDownloadUrl: String? = null
         private set
 
@@ -90,15 +103,179 @@ class AppUpdateManager(
     val latestAvailableUpdate: StateFlow<UpdateInfo?> = _latestAvailableUpdate.asStateFlow()
 
     private val githubRepo = "ayushmanchakraborty254-create/Graphite"
-    private val rawVersionUrl = "https://raw.githubusercontent.com/$githubRepo/main/version.json"
+    // Direct GitHub Releases latest download URL for version.json (always matches latest published release)
+    private val releaseVersionUrl = "https://github.com/$githubRepo/releases/latest/download/version.json"
+    private val releaseVersionAltUrl = "https://github.com/$githubRepo/releases/download/latest/version.json"
+    // GitHub API for latest release
+    private val apiLatestUrl = "https://api.github.com/repos/$githubRepo/releases/latest"
     private val apiUrl = "https://api.github.com/repos/$githubRepo/releases"
+    private val rawVersionUrl = "https://raw.githubusercontent.com/$githubRepo/main/version.json"
 
     private var downloadJob: kotlinx.coroutines.Job? = null
 
+    private fun ensureNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (notificationManager?.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "Graphite Updates",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Notifications for newly published Graphite updates and download progress"
+                    enableVibration(true)
+                    setShowBadge(true)
+                }
+                notificationManager?.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    fun showUpdateAvailableNotification(context: Context, info: UpdateInfo) {
+        try {
+            ensureNotificationChannel(context)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        android.Manifest.permission.POST_NOTIFICATIONS
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+
+            val intent = Intent(context, com.graphite.app.MainActivity::class.java).apply {
+                action = ACTION_SHOW_UPDATE
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_UPDATE_SHA, info.commitSha)
+            }
+            val flag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE else PendingIntent.FLAG_UPDATE_CURRENT
+            val pendingIntent = PendingIntent.getActivity(context, 0, intent, flag)
+
+            val shortSha = if (info.commitSha.length >= 7) info.commitSha.take(7) else info.commitSha
+            val notes = info.releaseNotes.takeIf { it.isNotBlank() } ?: "New performance enhancements and bug fixes."
+
+            val builder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("🚀 Graphite Update Available ($shortSha)")
+                .setContentText(notes)
+                .setStyle(NotificationCompat.BigTextStyle().bigText("$notes\n\nTap to download and install."))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .addAction(android.R.drawable.stat_sys_download, "Update Now", pendingIntent)
+
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, builder.build())
+        } catch (_: Exception) {}
+    }
+
+    fun showDownloadProgressNotification(context: Context, progress: Int, speedKbps: Long) {
+        try {
+            ensureNotificationChannel(context)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        android.Manifest.permission.POST_NOTIFICATIONS
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+
+            val speedText = if (speedKbps > 0) " (${speedKbps} KB/s)" else ""
+            val builder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("Downloading Graphite Update")
+                .setContentText("$progress%$speedText")
+                .setProgress(100, progress, progress == 0)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, builder.build())
+        } catch (_: Exception) {}
+    }
+
+    fun showReadyToInstallNotification(context: Context, apkFile: File) {
+        try {
+            ensureNotificationChannel(context)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        android.Manifest.permission.POST_NOTIFICATIONS
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+
+            val contentUri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                apkFile
+            )
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(contentUri, "application/vnd.android.package-archive")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+            }
+            val flag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE else PendingIntent.FLAG_UPDATE_CURRENT
+            val pendingIntent = PendingIntent.getActivity(context, 1, installIntent, flag)
+
+            val builder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Graphite Update Ready to Install")
+                .setContentText("Download complete. Tap to install the latest build.")
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pendingIntent)
+                .addAction(android.R.drawable.stat_sys_download_done, "Install Now", pendingIntent)
+
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, builder.build())
+        } catch (_: Exception) {}
+    }
+
+    fun clearNotification(context: Context) {
+        try {
+            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+        } catch (_: Exception) {}
+    }
+
+    private fun parseVersionJson(body: String): UpdateInfo? {
+        if (body.isBlank()) return null
+        return try {
+            val json = JSONObject(body)
+            val releaseSha = json.optString("commitSha", "").trim()
+            val vCode = json.optInt("versionCode", 0)
+            val vName = json.optString("versionName", "1.0.0")
+            val dlUrl = json.optString(
+                "downloadUrl",
+                "https://github.com/$githubRepo/releases/download/latest/Graphite-v1.0.0.apk"
+            )
+            val notes = json.optString("commitMessage", "Latest updates and enhancements.")
+            val buildDate = json.optString("buildDate", "")
+            if (releaseSha.isBlank() && vCode == 0) null
+            else UpdateInfo(
+                versionName = if (releaseSha.isNotBlank()) "Graphite Auto-Build ($releaseSha)" else "Graphite v$vName",
+                commitSha = releaseSha,
+                releaseNotes = notes,
+                downloadUrl = dlUrl,
+                publishedAt = buildDate,
+                isNewer = false,
+                versionCode = vCode
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /**
      * Checks for newly published APK builds using a multi-layer strategy:
-     * 1. Ultra-fast, rate-limit-free raw metadata via GitHub CDN (`version.json`)
-     * 2. Full GitHub Releases API fallback if CDN is not reachable
+     * 1. Direct GitHub Releases latest download URL for version.json (always matches latest published release)
+     * 2. Direct GitHub Releases latest download URL alternative
+     * 3. Full GitHub Releases API for latest release
+     * 4. Full GitHub Releases list API fallback
+     * 5. Raw git CDN metadata fallback
      */
     fun checkForUpdates(
         context: Context? = null,
@@ -134,92 +311,159 @@ class AppUpdateManager(
             try {
                 var updateInfo: UpdateInfo? = null
 
-                // Strategy 1: Fetch version.json from raw CDN (Unlimited rate limits, instant)
+                // Strategy 1: Fetch version.json from GitHub Releases latest download
                 try {
-                    val rawRequest = Request.Builder()
-                        .url(rawVersionUrl)
+                    val req = Request.Builder()
+                        .url(releaseVersionUrl)
                         .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
                         .addHeader("Cache-Control", "no-cache")
                         .build()
-                    val rawResponse = httpClient.newCall(rawRequest).execute()
-                    if (rawResponse.isSuccessful) {
-                        val body = rawResponse.body?.string() ?: ""
-                        if (body.isNotBlank()) {
-                            val json = JSONObject(body)
-                            val releaseSha = json.optString("commitSha", "").trim()
-                            val vCode = json.optInt("versionCode", 0)
-                            val vName = json.optString("versionName", "1.0.0")
-                            val dlUrl = json.optString("downloadUrl", "https://github.com/$githubRepo/releases/download/latest/Graphite-v1.0.0.apk")
-                            val notes = json.optString("commitMessage", "Latest updates and enhancements.")
-                            val buildDate = json.optString("buildDate", "")
+                    val resp = httpClient.newCall(req).execute()
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: ""
+                        updateInfo = parseVersionJson(body)
+                    }
+                } catch (_: Exception) {}
 
-                            if (releaseSha.isNotBlank()) {
+                // Strategy 2: If strategy 1 failed, try releaseVersionAltUrl
+                if (updateInfo == null) {
+                    try {
+                        val req = Request.Builder()
+                            .url(releaseVersionAltUrl)
+                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .addHeader("Cache-Control", "no-cache")
+                            .build()
+                        val resp = httpClient.newCall(req).execute()
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string() ?: ""
+                            updateInfo = parseVersionJson(body)
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Strategy 3: Query GitHub Releases API for latest release
+                if (updateInfo == null) {
+                    try {
+                        val apiReq = Request.Builder()
+                            .url(apiLatestUrl)
+                            .addHeader("Accept", "application/vnd.github.v3+json")
+                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .build()
+                        val apiResp = httpClient.newCall(apiReq).execute()
+                        if (apiResp.isSuccessful) {
+                            val body = apiResp.body?.string() ?: ""
+                            if (body.isNotBlank()) {
+                                val latest = JSONObject(body)
+                                val tagName = latest.optString("tag_name", "latest")
+                                val releaseName = latest.optString("name", "New Graphite Build")
+                                val notes = latest.optString("body", "Bug fixes and improvements.")
+                                val publishedAt = latest.optString("published_at", "")
+
+                                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
+                                var apkSize = 0L
+                                val assets = latest.optJSONArray("assets")
+                                if (assets != null) {
+                                    for (i in 0 until assets.length()) {
+                                        val asset = assets.getJSONObject(i)
+                                        val name = asset.optString("name", "")
+                                        if (name.endsWith(".apk", ignoreCase = true)) {
+                                            apkUrl = asset.optString("browser_download_url", apkUrl)
+                                            apkSize = asset.optLong("size", 0L)
+                                            break
+                                        }
+                                    }
+                                }
+
+                                val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
+                                val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
+                                val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
+                                    ?: commitRegex.find(notes)?.groupValues?.get(1)
+                                    ?: shaRegex.find(notes)?.groupValues?.get(1)
+                                    ?: tagName
+
                                 updateInfo = UpdateInfo(
-                                    versionName = "Graphite Auto-Build ($releaseSha)",
+                                    versionName = releaseName,
                                     commitSha = releaseSha,
                                     releaseNotes = notes,
-                                    downloadUrl = dlUrl,
-                                    publishedAt = buildDate,
-                                    isNewer = false, // evaluated below
-                                    versionCode = vCode
+                                    downloadUrl = apkUrl,
+                                    publishedAt = publishedAt,
+                                    isNewer = false,
+                                    apkSize = apkSize
                                 )
                             }
                         }
-                    }
-                } catch (_: Exception) {
-                    // Fall back to GitHub Releases API below
+                    } catch (_: Exception) {}
                 }
 
-                // Strategy 2: Query GitHub Releases API if Strategy 1 was empty
+                // Strategy 4: Fall back to all releases API
                 if (updateInfo == null) {
-                    val apiRequest = Request.Builder()
-                        .url(apiUrl)
-                        .addHeader("Accept", "application/vnd.github.v3+json")
-                        .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                        .build()
+                    try {
+                        val apiReq = Request.Builder()
+                            .url(apiUrl)
+                            .addHeader("Accept", "application/vnd.github.v3+json")
+                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .build()
+                        val apiResp = httpClient.newCall(apiReq).execute()
+                        if (apiResp.isSuccessful) {
+                            val body = apiResp.body?.string() ?: ""
+                            val releases = JSONArray(body)
+                            if (releases.length() > 0) {
+                                val latest = releases.getJSONObject(0)
+                                val tagName = latest.optString("tag_name", "latest")
+                                val releaseName = latest.optString("name", "New Graphite Build")
+                                val notes = latest.optString("body", "Bug fixes and improvements.")
+                                val publishedAt = latest.optString("published_at", "")
 
-                    val apiResponse = httpClient.newCall(apiRequest).execute()
-                    if (apiResponse.isSuccessful) {
-                        val responseBody = apiResponse.body?.string() ?: ""
-                        val releases = JSONArray(responseBody)
-                        if (releases.length() > 0) {
-                            val latest = releases.getJSONObject(0)
-                            val tagName = latest.optString("tag_name", "latest")
-                            val releaseName = latest.optString("name", "New Graphite Build")
-                            val body = latest.optString("body", "Bug fixes and improvements.")
-                            val publishedAt = latest.optString("published_at", "")
-
-                            var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
-                            var apkSize = 0L
-                            val assets = latest.optJSONArray("assets")
-                            if (assets != null) {
-                                for (i in 0 until assets.length()) {
-                                    val asset = assets.getJSONObject(i)
-                                    val name = asset.optString("name", "")
-                                    if (name.endsWith(".apk", ignoreCase = true)) {
-                                        apkUrl = asset.optString("browser_download_url", apkUrl)
-                                        apkSize = asset.optLong("size", 0L)
-                                        break
+                                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
+                                var apkSize = 0L
+                                val assets = latest.optJSONArray("assets")
+                                if (assets != null) {
+                                    for (i in 0 until assets.length()) {
+                                        val asset = assets.getJSONObject(i)
+                                        val name = asset.optString("name", "")
+                                        if (name.endsWith(".apk", ignoreCase = true)) {
+                                            apkUrl = asset.optString("browser_download_url", apkUrl)
+                                            apkSize = asset.optLong("size", 0L)
+                                            break
+                                        }
                                     }
                                 }
+
+                                val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
+                                val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
+                                val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
+                                    ?: commitRegex.find(notes)?.groupValues?.get(1)
+                                    ?: shaRegex.find(notes)?.groupValues?.get(1)
+                                    ?: tagName
+
+                                updateInfo = UpdateInfo(
+                                    versionName = releaseName,
+                                    commitSha = releaseSha,
+                                    releaseNotes = notes,
+                                    downloadUrl = apkUrl,
+                                    publishedAt = publishedAt,
+                                    isNewer = false,
+                                    apkSize = apkSize
+                                )
                             }
-
-                            val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
-                            val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
-                                ?: shaRegex.find(body)?.groupValues?.get(1)
-                                ?: tagName
-
-                            updateInfo = UpdateInfo(
-                                versionName = releaseName,
-                                commitSha = releaseSha,
-                                releaseNotes = body,
-                                downloadUrl = apkUrl,
-                                publishedAt = publishedAt,
-                                isNewer = false,
-                                apkSize = apkSize
-                            )
                         }
-                    }
+                    } catch (_: Exception) {}
+                }
+
+                // Strategy 5: Fall back to raw version.json on main
+                if (updateInfo == null) {
+                    try {
+                        val rawReq = Request.Builder()
+                            .url(rawVersionUrl)
+                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .addHeader("Cache-Control", "no-cache")
+                            .build()
+                        val rawResp = httpClient.newCall(rawReq).execute()
+                        if (rawResp.isSuccessful) {
+                            val body = rawResp.body?.string() ?: ""
+                            updateInfo = parseVersionJson(body)
+                        }
+                    } catch (_: Exception) {}
                 }
 
                 if (updateInfo == null) {
@@ -233,35 +477,35 @@ class AppUpdateManager(
                 val localVersionCode = BuildConfig.VERSION_CODE
                 val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
 
-                // Check whether this release was already installed on this device
+                // Check whether installer is actively pending
                 val prefs = context?.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
                 val lastInstalledSha = prefs?.getString("last_installed_sha", "") ?: ""
                 val lastInstalledTime = prefs?.getLong("last_installed_time", 0L) ?: 0L
-                val wasRecentlyInstalled = lastInstalledSha.isNotBlank() &&
+                val isCurrentlyInstalling = !isManualCheck &&
+                        lastInstalledSha.isNotBlank() &&
                         (lastInstalledSha.equals(releaseSha, ignoreCase = true) ||
                                 (releaseSha.length >= 7 && lastInstalledSha.startsWith(releaseSha, ignoreCase = true))) &&
-                        (System.currentTimeMillis() - lastInstalledTime < 24 * 3600 * 1000L)
+                        (System.currentTimeMillis() - lastInstalledTime < 180_000L) // 3 min debounce
 
                 var isNewer = false
-                if (wasRecentlyInstalled) {
+                if (isCurrentlyInstalling) {
                     isNewer = false
-                } else if (isDevBuild) {
-                    // Dev builds should never pop up automatically; only show on explicit manual check
-                    isNewer = isManualCheck && !releaseSha.equals("latest", ignoreCase = true)
-                } else if (updateInfo.versionCode > 0 && localVersionCode > 0) {
-                    // Strictly monotonic version code comparison
-                    isNewer = updateInfo.versionCode > localVersionCode
+                } else if (updateInfo.versionCode > 0 && localVersionCode > 0 && updateInfo.versionCode > localVersionCode) {
+                    isNewer = true
+                } else if (isDevBuild && releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
+                    isNewer = true
                 } else if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
                     val isSameCommit = releaseSha.equals(localSha, ignoreCase = true) ||
                             (releaseSha.length >= 7 && localSha.length >= 7 &&
                                     (releaseSha.startsWith(localSha, ignoreCase = true) || localSha.startsWith(releaseSha, ignoreCase = true)))
                     isNewer = !isSameCommit
-                } else if (updateInfo.publishedAt.isNotBlank()) {
+                } else if (updateInfo.publishedAt.isNotBlank() && BuildConfig.BUILD_TIME_MILLIS > 0L) {
                     try {
-                        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
-                        sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                            timeZone = java.util.TimeZone.getTimeZone("UTC")
+                        }
                         val remoteTime = sdf.parse(updateInfo.publishedAt)?.time ?: 0L
-                        if (remoteTime > BuildConfig.BUILD_TIME_MILLIS + 120_000L) {
+                        if (remoteTime > BuildConfig.BUILD_TIME_MILLIS + 60_000L) {
                             isNewer = true
                         }
                     } catch (_: Exception) {}
@@ -271,18 +515,19 @@ class AppUpdateManager(
                     val finalInfo = updateInfo.copy(isNewer = true)
                     _latestAvailableUpdate.value = finalInfo
 
-                    // Check snooze duration only on automatic checks, never on manual checks
+                    if (context != null) {
+                        showUpdateAvailableNotification(context, finalInfo)
+                    }
+
                     val snoozedUntil = if (!isManualCheck && prefs != null) {
                         prefs.getLong("snoozed_until_${releaseSha}", 0L)
                     } else 0L
 
-                    if (System.currentTimeMillis() < snoozedUntil) {
+                    if (System.currentTimeMillis() >= snoozedUntil) {
+                        _updateState.value = UpdateState.Available(finalInfo)
+                    } else {
                         _updateState.value = UpdateState.Idle
-                        withContext(Dispatchers.Main) { onComplete(true) }
-                        return@launch
                     }
-
-                    _updateState.value = UpdateState.Available(finalInfo)
                     withContext(Dispatchers.Main) { onComplete(true) }
                 } else {
                     _latestAvailableUpdate.value = null
@@ -398,6 +643,7 @@ class AppUpdateManager(
                                     totalBytes = totalExpectedBytes,
                                     speedKbps = smoothedSpeedKbps
                                 )
+                                showDownloadProgressNotification(context, progress, smoothedSpeedKbps)
                             }
                         }
 
@@ -434,6 +680,7 @@ class AppUpdateManager(
                 }
 
                 _updateState.value = UpdateState.ReadyToInstall(apkFile)
+                showReadyToInstallNotification(context, apkFile)
                 withContext(Dispatchers.Main) {
                     installApk(context, apkFile)
                 }
@@ -449,6 +696,7 @@ class AppUpdateManager(
         downloadJob?.cancel()
         downloadJob = null
         if (context != null) {
+            clearNotification(context)
             try {
                 val updateDir = File(context.cacheDir, "updates")
                 if (updateDir.exists()) updateDir.listFiles()?.forEach { it.delete() }
@@ -470,6 +718,7 @@ class AppUpdateManager(
 
     fun installApk(context: Context, apkFile: File) {
         try {
+            clearNotification(context)
             if (!apkFile.exists() || apkFile.length() == 0L) {
                 _updateState.value = UpdateState.Error("APK file not found or empty.")
                 return
