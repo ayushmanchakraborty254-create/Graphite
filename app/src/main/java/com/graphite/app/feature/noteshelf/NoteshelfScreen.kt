@@ -2562,43 +2562,35 @@ private fun FolderThumbnailCard(
                         .background(Color.White.copy(alpha = 0.12f))
                 )
 
-                // Star Toggle Button in Top-Left of Folder
+                // Star Toggle Button in Lower-Left of Folder (borderless, no outer circle)
                 IconButton(
                     onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(5.dp)
-                        .size(26.dp)
-                        .background(
-                            if (folder.isStarred) Color.Black.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.22f),
-                            CircleShape
-                        )
+                        .align(Alignment.BottomStart)
+                        .padding(start = 4.dp, bottom = 4.dp)
+                        .size(28.dp)
                 ) {
                     Icon(
                         imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
                         contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
-                        tint = if (folder.isStarred) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(15.dp)
+                        tint = if (folder.isStarred) Color(0xFFFFB300) else Color.White,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
-                // Cloud Upload Badge Icon in Top-Right of Folder (differentiates Backed up vs Local)
+                // Cloud Upload Badge Icon in Top-Right of Folder (borderless, no outer circle)
                 IconButton(
                     onClick = onUploadFolder,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(5.dp)
-                        .size(26.dp)
-                        .background(
-                            if (isFolderUploaded) Color(0xCC1B5E20) else Color.Black.copy(alpha = 0.35f),
-                            CircleShape
-                        )
+                        .padding(top = 4.dp, end = 4.dp)
+                        .size(28.dp)
                 ) {
                     Icon(
                         imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
                         contentDescription = if (isFolderUploaded) "Folder backed up to Drive" else "Upload Folder to Google Drive",
-                        tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color.White,
-                        modifier = Modifier.size(15.dp)
+                        tint = if (isFolderUploaded) Color(0xFF2E7D32) else Color.White,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
