@@ -35,6 +35,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -2487,6 +2488,40 @@ private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
     return base to Color(0x77000000)
 }
 
+// Single continuous folder vector shape with top-left tab and rounded corners (no seams, no inner rectangles)
+private val ModernFolderShape = GenericShape { size, _ ->
+    val w = size.width
+    val h = size.height
+    val r = h * 0.12f
+    val tabH = h * 0.16f
+    val tabW = w * 0.44f
+    val slope = w * 0.07f
+
+    reset()
+    // Start at bottom-left corner
+    moveTo(r, h)
+    // Bottom edge to bottom-right corner
+    lineTo(w - r, h)
+    quadraticTo(w, h, w, h - r)
+    // Right edge up to shoulder corner
+    lineTo(w, tabH + r)
+    quadraticTo(w, tabH, w - r, tabH)
+    // Shoulder to tab slope
+    lineTo(tabW + slope, tabH)
+    cubicTo(
+        tabW + (slope * 0.5f), tabH,
+        tabW + (slope * 0.2f), 0f,
+        tabW, 0f
+    )
+    // Tab top edge to top-left corner
+    lineTo(r, 0f)
+    quadraticTo(0f, 0f, 0f, r)
+    // Left edge down to bottom-left corner
+    lineTo(0f, h - r)
+    quadraticTo(0f, h, r, h)
+    close()
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderThumbnailCard(
@@ -2522,104 +2557,83 @@ private fun FolderThumbnailCard(
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Folder Visual Representation
+        // Folder Visual Representation - Single whole shape with no rectangles inside
         Box(
             modifier = Modifier
                 .width(130.dp)
-                .height(115.dp)
+                .height(105.dp)
                 .graphicsLayer {
                     if (isHoveredForDrop) {
                         scaleX = 1.05f
                         scaleY = 1.05f
                     }
                 }
+                .shadow(elevation = if (isHoveredForDrop) 6.dp else 2.dp, shape = ModernFolderShape)
+                .clip(ModernFolderShape)
+                .background(folderColor, ModernFolderShape)
+                .border(
+                    width = if (isHoveredForDrop) 2.5.dp else 1.dp,
+                    color = if (isHoveredForDrop) GraphiteOrange else Color.Black.copy(alpha = 0.12f),
+                    shape = ModernFolderShape
+                )
         ) {
-            // Folder Tab at Top-Left
-            Box(
+            // Star Toggle Button in Lower-Left of Folder (borderless, no outer circle)
+            IconButton(
+                onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
                 modifier = Modifier
-                    .width(56.dp)
-                    .height(20.dp)
-                    .clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp))
-                    .background(folderColor.copy(alpha = 0.88f))
-            )
-            // Folder Main Body
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(folderColor)
-                    .shadow(4.dp, RoundedCornerShape(14.dp))
+                    .align(Alignment.BottomStart)
+                    .padding(start = 4.dp, bottom = 4.dp)
+                    .size(28.dp)
             ) {
-                // Subtle interior folder pocket curve at bottom
+                Icon(
+                    imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
+                    tint = if (folder.isStarred) Color(0xFFFFB300) else Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            // Cloud Upload Badge Icon in Top-Right Shoulder of Folder (borderless, no outer circle)
+            IconButton(
+                onClick = onUploadFolder,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 12.dp, end = 4.dp)
+                    .size(28.dp)
+            ) {
+                Icon(
+                    imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                    contentDescription = if (isFolderUploaded) "Folder backed up to Drive" else "Upload Folder to Google Drive",
+                    tint = if (isFolderUploaded) Color(0xFF2E7D32) else Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            // Drop Hover Indicator Overlay
+            if (isHoveredForDrop) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(0.60f)
-                        .align(Alignment.BottomCenter)
-                        .clip(RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                )
-
-                // Star Toggle Button in Lower-Left of Folder (borderless, no outer circle)
-                IconButton(
-                    onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = 4.dp, bottom = 4.dp)
-                        .size(28.dp)
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.45f)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
-                        contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
-                        tint = if (folder.isStarred) Color(0xFFFFB300) else Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Cloud Upload Badge Icon in Top-Right of Folder (borderless, no outer circle)
-                IconButton(
-                    onClick = onUploadFolder,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 4.dp, end = 4.dp)
-                        .size(28.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
-                        contentDescription = if (isFolderUploaded) "Folder backed up to Drive" else "Upload Folder to Google Drive",
-                        tint = if (isFolderUploaded) Color(0xFF2E7D32) else Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Drop Hover Indicator Overlay
-                if (isHoveredForDrop) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.45f)),
-                        contentAlignment = Alignment.Center
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.MoveToInbox,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(26.dp)
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Drop Here",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.MoveToInbox,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Drop Here",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
