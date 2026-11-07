@@ -1193,4 +1193,91 @@ class GoogleDriveManagerTest {
         assertNull(manager.activeBookshelfFolder.value)
         assertTrue(manager.linkedCloudFolders.value.isEmpty())
     }
+
+    @Test
+    fun testUploadEntireFolder_PreventsDuplicateUploadWhenFilesAlreadyExistInDrive() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "ayush@gmail.com")
+        var uploadCalls = 0
+        val mockUploader = object : DriveApiV3Uploader {
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.success(
+                    listOf(
+                        DriveRemoteFile(id = "remote_1", name = "Maths_Note_1.pdf", mimeType = "application/pdf"),
+                        DriveRemoteFile(id = "remote_2", name = "Maths_Note_2.pdf", mimeType = "application/pdf")
+                    )
+                )
+            }
+            override suspend fun listFolders(accountEmail: String): Result<List<DriveFolder>> {
+                return Result.success(listOf(DriveFolder("maths_drive_folder_id", "Maths")))
+            }
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult {
+                uploadCalls++
+                return DriveUploadResult.Success("new_file_id", fileName, folderId)
+            }
+        }
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { mockUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val dummyContext = android.app.Application()
+        val folder = com.graphite.app.data.model.FolderItem(id = "folder_1", name = "Maths", noteCount = 2)
+        val note1 = NotebookItem(id = "n1", title = "Maths Note 1", folderId = "folder_1")
+        val note2 = NotebookItem(id = "n2", title = "Maths Note 2", folderId = "folder_1")
+
+        val result = manager.uploadEntireFolder(dummyContext, folder, listOf(note1, note2))
+
+        assertTrue("Upload must succeed", result.isSuccess)
+        assertEquals("0 new files must be uploaded since all exist in Drive", 0, result.getOrNull())
+        assertEquals("uploader.upload must not be called when files already exist in Drive", 0, uploadCalls)
+    }
+
+    @Test
+    fun testUploadEntireFolder_UploadsOnlyNewFilesWhenSomeFilesAlreadyExist() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "ayush@gmail.com")
+        val uploadedFileNames = mutableListOf<String>()
+        val mockUploader = object : DriveApiV3Uploader {
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.success(
+                    listOf(
+                        DriveRemoteFile(id = "remote_1", name = "Physics_Note_1.pdf", mimeType = "application/pdf")
+                    )
+                )
+            }
+            override suspend fun listFolders(accountEmail: String): Result<List<DriveFolder>> {
+                return Result.success(listOf(DriveFolder("physics_drive_folder_id", "Physics")))
+            }
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult {
+                uploadedFileNames.add(fileName)
+                return DriveUploadResult.Success("new_id_${uploadedFileNames.size}", fileName, folderId)
+            }
+        }
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { mockUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val dummyContext = android.app.Application()
+        val folder = com.graphite.app.data.model.FolderItem(id = "folder_2", name = "Physics", noteCount = 2)
+        val note1 = NotebookItem(id = "p1", title = "Physics Note 1", folderId = "folder_2")
+        val note2 = NotebookItem(id = "p2", title = "Physics Note 2 (New)", folderId = "folder_2")
+
+        val result = manager.uploadEntireFolder(dummyContext, folder, listOf(note1, note2))
+
+        assertTrue("Upload must succeed", result.isSuccess)
+        assertEquals("Exactly 1 new file must be uploaded", 1, result.getOrNull())
+        assertEquals("Only new file must be uploaded", listOf("Physics_Note_2__New_.pdf"), uploadedFileNames)
+    }
 }

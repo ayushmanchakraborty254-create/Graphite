@@ -314,7 +314,12 @@ fun NoteshelfScreen(
                 uploadingFolderInfo = null
                 if (result.isSuccess) {
                     val count = result.getOrNull() ?: 0
-                    Toast.makeText(context, "Uploaded folder \"${folder.name}\" ($count notes) to Google Drive!", Toast.LENGTH_LONG).show()
+                    if (count > 0) {
+                        val noteLabel = if (count == 1) "1 new note" else "$count new notes"
+                        Toast.makeText(context, "Uploaded $noteLabel in \"${folder.name}\" to Google Drive!", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "Folder \"${folder.name}\" is already up to date in Google Drive!", Toast.LENGTH_LONG).show()
+                    }
                     syncManager.syncNotes()
                 } else {
                     Toast.makeText(context, "Folder upload failed: ${result.exceptionOrNull()?.message ?: "Check connection"}", Toast.LENGTH_LONG).show()

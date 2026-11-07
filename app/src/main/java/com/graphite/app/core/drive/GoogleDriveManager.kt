@@ -1010,8 +1010,53 @@ class GoogleDriveManager(
     }
 
     /**
+     * Finds any matching remote file already present in the Google Drive destination folder:
+     * - Checks by Google Drive file ID
+     * - Checks by exact safeFileName (e.g. "DSA_ASS.pdf")
+     * - Checks by note title (e.g. "DSA ASS" or "DSA ASS.pdf")
+     * - Checks by normalized alphanumeric title (ignoring case, punctuation, and extensions)
+     */
+    private fun findMatchingRemoteFile(
+        item: NotebookItem,
+        safeFileName: String,
+        remoteFiles: List<DriveRemoteFile>
+    ): DriveRemoteFile? {
+        // 1. Direct driveFileId match
+        if (!item.driveFileId.isNullOrBlank()) {
+            val idMatch = remoteFiles.find { it.id == item.driveFileId }
+            if (idMatch != null) return idMatch
+        }
+
+        // 2. Exact safeFileName match (case-insensitive)
+        val exactNameMatch = remoteFiles.find { it.name.equals(safeFileName, ignoreCase = true) }
+        if (exactNameMatch != null) return exactNameMatch
+
+        // 3. Exact title or title + .pdf match (case-insensitive)
+        val trimmedTitle = item.title.trim()
+        val titleMatch = remoteFiles.find {
+            it.name.equals(trimmedTitle, ignoreCase = true) ||
+            it.name.equals("$trimmedTitle.pdf", ignoreCase = true)
+        }
+        if (titleMatch != null) return titleMatch
+
+        // 4. Normalized name match (removing extension, punctuation, case-insensitive)
+        val cleanItem = trimmedTitle.lowercase().removeSuffix(".pdf").replace("[^a-z0-9]".toRegex(), "")
+        if (cleanItem.isNotBlank()) {
+            val normMatch = remoteFiles.find { remote ->
+                val cleanRemote = remote.name.lowercase().removeSuffix(".pdf").replace("[^a-z0-9]".toRegex(), "")
+                cleanRemote == cleanItem
+            }
+            if (normMatch != null) return normMatch
+        }
+
+        return null
+    }
+
+    /**
      * Directly uploads an entire folder and all its contents (notebooks, PDFs, text files) to Google Drive.
-     * Automatically creates or targets a Google Drive folder matching the folder's name.
+     * Prevents duplicate files by inspecting existing files in the target Google Drive folder:
+     * - Files already in Google Drive are skipped and have their local Drive sync status preserved.
+     * - Only files not present in the Google Drive folder or newly added to the Graphite folder are uploaded.
      */
     suspend fun uploadEntireFolder(
         context: Context,
@@ -1029,22 +1074,48 @@ class GoogleDriveManager(
 
         // 1. Target or create matching folder in Google Drive
         val sanitizedFolderName = folder.name.trim().takeIf { it.isNotBlank() } ?: "Folder"
-        val existingFolders = uploader.listFolders(accountEmail).getOrDefault(emptyList())
-        val targetDriveFolder = existingFolders.find { it.name.equals(sanitizedFolderName, ignoreCase = true) }
-            ?: uploader.createFolder(accountEmail, sanitizedFolderName, "root").getOrNull()
-            ?: DriveFolder("root", "My Drive")
+        val targetDriveFolder: DriveFolder = run {
+            if (!folder.driveFolderId.isNullOrBlank()) {
+                uploader.getFolder(accountEmail, folder.driveFolderId).getOrNull()
+            } else null
+        } ?: uploader.findFolderByName(accountEmail, sanitizedFolderName).getOrNull()
+          ?: uploader.listFolders(accountEmail).getOrDefault(emptyList()).find { it.name.equals(sanitizedFolderName, ignoreCase = true) }
+          ?: uploader.createFolder(accountEmail, sanitizedFolderName, "root").getOrNull()
+          ?: DriveFolder("root", "My Drive")
+
+        // Ensure folder status reflects the Drive target folder
+        GraphiteRepository.updateFolderDriveStatus(folder.id, targetDriveFolder.id, true)
 
         if (items.isEmpty()) {
             return@withContext Result.success(0)
         }
 
+        // 2. Fetch existing files in target Google Drive folder to prevent duplicate uploads
+        val remoteFilesResult = uploader.listFiles(accountEmail, targetDriveFolder.id)
+        val existingRemoteFiles = remoteFilesResult.getOrDefault(emptyList()).toMutableList()
+
         var uploadedCount = 0
         for (i in items.indices) {
             val item = items[i]
+            val rawName = item.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            val safeFileName = if (rawName.endsWith(".pdf", ignoreCase = true)) rawName else "$rawName.pdf"
+
+            // Check if file already exists in this Google Drive folder
+            val matchedRemoteFile = findMatchingRemoteFile(item, safeFileName, existingRemoteFiles)
+
+            if (matchedRemoteFile != null || (remoteFilesResult.isFailure && item.isUploadedToDrive && !item.driveFileId.isNullOrBlank())) {
+                // File already exists in Google Drive folder: skip upload, ensure local status is recorded
+                val remoteId = matchedRemoteFile?.id ?: item.driveFileId
+                if (!remoteId.isNullOrBlank()) {
+                    GraphiteRepository.updateNotebookDriveStatus(item.id, remoteId, true)
+                }
+                onProgress(i + 1, items.size, item.title)
+                continue
+            }
+
+            // File is NOT in the Drive folder or is newly added to Graphite: upload it
             onProgress(i + 1, items.size, item.title)
             try {
-                val rawName = item.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
-                val safeFileName = if (rawName.endsWith(".pdf", ignoreCase = true)) rawName else "$rawName.pdf"
                 val pdfBytes = NotePdfGenerator.generatePdf(item)
                 val res = uploader.upload(
                     accountEmail = accountEmail,
@@ -1056,12 +1127,20 @@ class GoogleDriveManager(
                 if (res is DriveUploadResult.Success) {
                     uploadedCount++
                     GraphiteRepository.updateNotebookDriveStatus(item.id, res.fileId, true)
+                    existingRemoteFiles.add(
+                        DriveRemoteFile(
+                            id = res.fileId,
+                            name = safeFileName,
+                            mimeType = "application/pdf",
+                            size = pdfBytes.size.toLong(),
+                            parentFolderId = targetDriveFolder.id,
+                            parentFolderName = targetDriveFolder.name
+                        )
+                    )
                 }
-            } catch (_: Exception) {}
-        }
-
-        if (uploadedCount > 0) {
-            GraphiteRepository.updateFolderDriveStatus(folder.id, targetDriveFolder.id, true)
+            } catch (e: Exception) {
+                SafeLogger.e("GoogleDriveManager", "Failed to upload note '${item.title}' in folder '${folder.name}': ${e.message}", e)
+            }
         }
 
         Result.success(uploadedCount)
