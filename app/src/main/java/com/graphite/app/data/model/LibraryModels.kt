@@ -80,8 +80,11 @@ data class FolderItem(
     val name: String,
     val noteCount: Int,
     val parentId: String? = null,
-    val colorHex: Long? = null,
-    val userId: String? = null
+    val colorHex: Long? = 0xFFFFD54FL,
+    val userId: String? = null,
+    val isStarred: Boolean = false,
+    val isUploadedToDrive: Boolean = false,
+    val driveFolderId: String? = null
 )
 
 

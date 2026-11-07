@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -25,6 +26,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -45,7 +48,10 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -80,6 +86,13 @@ import com.graphite.app.data.repository.GraphiteRepository
 import com.graphite.app.feature.workspace.model.PaperStyle
 import com.graphite.app.feature.workspace.model.SplitLayoutOrientation
 import kotlinx.coroutines.launch
+
+data class DuplicateFileWarningInfo(
+    val targetFolder: FolderItem,
+    val duplicateTitle: String,
+    val noteToMove: NotebookItem,
+    val otherNoteIdsToMove: Set<String> = emptySet()
+)
 
 @Composable
 fun NoteshelfScreen(
@@ -173,6 +186,7 @@ fun NoteshelfScreen(
     // Drag and Drop state
     var isDraggingNote by remember { mutableStateOf(false) }
     var draggedNotebook by remember { mutableStateOf<NotebookItem?>(null) }
+    var duplicateWarningDialogInfo by remember { mutableStateOf<DuplicateFileWarningInfo?>(null) }
     var dragTouchPositionInRoot by remember { mutableStateOf(Offset.Zero) }
     var totalDragDistance by remember { mutableFloatStateOf(0f) }
     var hoveredFolderId by remember { mutableStateOf<String?>(null) }
@@ -193,6 +207,7 @@ fun NoteshelfScreen(
         isDraggingNote = false
         draggedNotebook = null
         hoveredFolderId = null
+        duplicateWarningDialogInfo = null
     }
 
     val fileImportLauncher = rememberLauncherForActivityResult(
@@ -304,6 +319,39 @@ fun NoteshelfScreen(
         }
     }
 
+    val handleDropOnFolder: (String) -> Unit = { targetFolderId ->
+        val target = folders.find { it.id == targetFolderId }
+        val note = draggedNotebook
+        if (target != null && note != null) {
+            val toMove = if (note.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
+                selectedNotebookIds
+            } else {
+                setOf(note.id)
+            }
+            val notesToMoveList = notebooks.filter { it.id in toMove }
+            val existingNotesInTarget = notebooks.filter { it.folderId == target.id && !it.isDeleted }
+            val duplicateNote = notesToMoveList.find { n ->
+                existingNotesInTarget.any { existing ->
+                    existing.id != n.id && existing.title.trim().equals(n.title.trim(), ignoreCase = true)
+                }
+            }
+            if (duplicateNote != null) {
+                duplicateWarningDialogInfo = DuplicateFileWarningInfo(
+                    targetFolder = target,
+                    duplicateTitle = duplicateNote.title,
+                    noteToMove = duplicateNote,
+                    otherNoteIdsToMove = toMove - duplicateNote.id
+                )
+            } else {
+                GraphiteRepository.moveNotebooksToFolder(toMove, target.id)
+                val msg = if (toMove.size == 1) "Moved \"${note.title}\" to ${target.name}"
+                          else "Moved ${toMove.size} notes to ${target.name}"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                selectedNotebookIds = emptySet()
+            }
+        }
+    }
+
     // Filter notes according to category and search query
     val allNotesWithDeleted = GraphiteRepository.getAllNotesIncludingDeleted()
     val baseNotes = if (selectedCategory == "Trash") {
@@ -313,7 +361,13 @@ fun NoteshelfScreen(
     }
 
     val categoryFiltered = when (selectedCategory) {
-        "All Notes" -> baseNotes
+        "All Notes" -> {
+            if (hasActiveSession && showFoldersOnNotesScreen && folders.any { it.parentId == null }) {
+                baseNotes.filter { it.folderId.isBlank() || it.folderId == "unfiled" }
+            } else {
+                baseNotes
+            }
+        }
         "Starred" -> baseNotes.filter { it.isStarred }
         "Unfiled" -> baseNotes.filter { it.folderId.isBlank() || it.folderId == "unfiled" }
         "Trash" -> baseNotes
@@ -423,7 +477,7 @@ fun NoteshelfScreen(
             SidebarItem(
                 title = "Starred",
                 icon = Icons.Default.Star,
-                count = notebooks.count { it.isStarred && !it.isDeleted }.takeIf { it > 0 },
+                count = (notebooks.count { it.isStarred && !it.isDeleted } + folders.count { it.isStarred }).takeIf { it > 0 },
                 isSelected = selectedCategory == "Starred",
                 onClick = {
                     selectedCategory = "Starred"
@@ -757,10 +811,10 @@ fun NoteshelfScreen(
                     Spacer(modifier = Modifier.width(6.dp))
                     val headerTitle = when (selectedCategory) {
                         "All Notes" -> "All Notes"
-                        "Starred" -> "Starred Notes"
+                        "Starred" -> "Favorites & Starred"
                         "Unfiled" -> "Unfiled Notes"
                         "Trash" -> "Trash"
-                        "Templates" -> "Paper Templates"
+                        "Templates" -> "Templates"
                         "Photos" -> "Photos & Media Notes"
                         "Recordings" -> "Voice Recordings"
                         "Bookmarks" -> "Bookmarked Notes"
@@ -1056,17 +1110,30 @@ fun NoteshelfScreen(
                 }
             }
 
-            // View: Templates Grid OR Notebooks (Grid/List)
+            // View: Templates Section OR Notebooks (Grid/List)
             if (selectedCategory == "Templates") {
-                TemplatesGrid(
-                    onCreateFromTemplate = { title, paperStyle ->
+                TemplatesSection(
+                    onCreateFromTemplate = { title, paperStyle, cover ->
                         if (!hasActiveSession) {
                             pendingAccountAction = "create a notebook from template"
                             showAccountRequiredDialog = true
                         } else {
-                            val newNote = GraphiteRepository.createNotebook(title, paperStyle = paperStyle)
+                            val newNote = GraphiteRepository.createNotebook(
+                                title = title,
+                                paperStyle = paperStyle,
+                                cover = cover ?: NotebookCover()
+                            )
                             onOpenNotebook(newNote.id)
                         }
+                    },
+                    onImportCustomTemplate = {
+                        fileImportLauncher.launch(
+                            arrayOf(
+                                "application/pdf",
+                                "image/*",
+                                "*/*"
+                            )
+                        )
                     }
                 )
             } else {
@@ -1081,8 +1148,14 @@ fun NoteshelfScreen(
 
                 val activeFolder = folders.find { it.id == selectedCategory }
                 val isInsideFolder = activeFolder != null
-                val hasFoldersToShow = hasActiveSession && showFoldersOnNotesScreen && selectedCategory == "All Notes" && searchQuery.isBlank() && folders.isNotEmpty()
-                val rootFoldersToShow = if (hasFoldersToShow) folders.filter { it.parentId == null } else emptyList()
+                val hasFoldersToShow = hasActiveSession && showFoldersOnNotesScreen && (selectedCategory == "All Notes" || selectedCategory == "Starred") && searchQuery.isBlank() && folders.isNotEmpty()
+                val rootFoldersToShow = if (hasFoldersToShow) {
+                    if (selectedCategory == "Starred") {
+                        folders.filter { it.isStarred }
+                    } else {
+                        folders.filter { it.parentId == null }
+                    }
+                } else emptyList()
 
                 // Filter / Category Chips Row matching Image 1
                 if (selectedCategory != "Trash") {
@@ -1369,17 +1442,7 @@ fun NoteshelfScreen(
                                 },
                                 onDragEnd = {
                                     if (hoveredFolderId != null && draggedNotebook != null) {
-                                        val target = folders.find { it.id == hoveredFolderId }
-                                        val toMove = if (draggedNotebook!!.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
-                                            selectedNotebookIds
-                                        } else {
-                                            setOf(draggedNotebook!!.id)
-                                        }
-                                        GraphiteRepository.moveNotebooksToFolder(toMove, hoveredFolderId!!)
-                                        val msg = if (toMove.size == 1) "Moved \"${draggedNotebook!!.title}\" to ${target?.name ?: "folder"}"
-                                                  else "Moved ${toMove.size} notes to ${target?.name ?: "folder"}"
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        selectedNotebookIds = emptySet()
+                                        handleDropOnFolder(hoveredFolderId!!)
                                     } else if (totalDragDistance < 15f) {
                                         toggleNoteSelection(notebook.id)
                                     }
@@ -1480,17 +1543,7 @@ fun NoteshelfScreen(
                                 },
                                 onDragEnd = {
                                     if (hoveredFolderId != null && draggedNotebook != null) {
-                                        val target = folders.find { it.id == hoveredFolderId }
-                                        val toMove = if (draggedNotebook!!.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
-                                            selectedNotebookIds
-                                        } else {
-                                            setOf(draggedNotebook!!.id)
-                                        }
-                                        GraphiteRepository.moveNotebooksToFolder(toMove, hoveredFolderId!!)
-                                        val msg = if (toMove.size == 1) "Moved \"${draggedNotebook!!.title}\" to ${target?.name ?: "folder"}"
-                                                  else "Moved ${toMove.size} notes to ${target?.name ?: "folder"}"
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        selectedNotebookIds = emptySet()
+                                        handleDropOnFolder(hoveredFolderId!!)
                                     } else if (totalDragDistance < 15f) {
                                         toggleNoteSelection(notebook.id)
                                     }
@@ -1826,7 +1879,7 @@ fun NoteshelfScreen(
                 selectedParentFolderForSubfolder = null
             },
             onCreate = { name ->
-                GraphiteRepository.addFolder(name, selectedParentFolderForSubfolder?.id)
+                GraphiteRepository.addFolder(name, selectedParentFolderForSubfolder?.id, colorHex = 0xFFFFD54FL)
                 showNewFolderDialog = false
                 selectedParentFolderForSubfolder = null
             }
@@ -1862,11 +1915,29 @@ fun NoteshelfScreen(
             currentFolderId = "",
             onDismiss = { showMoveMultiFolderDialog = false },
             onSelectFolder = { folderId ->
-                val count = selectedNotebookIds.size
-                GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
-                selectedNotebookIds = emptySet()
+                val target = folders.find { it.id == folderId }
+                val targetName = target?.name ?: "folder"
+                val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
+                val notesToMoveList = notebooks.filter { it.id in selectedNotebookIds }
+                val duplicate = notesToMoveList.find { n ->
+                    existingInTarget.any { existing ->
+                        existing.id != n.id && existing.title.trim().equals(n.title.trim(), ignoreCase = true)
+                    }
+                }
+                if (duplicate != null && target != null) {
+                    duplicateWarningDialogInfo = DuplicateFileWarningInfo(
+                        targetFolder = target,
+                        duplicateTitle = duplicate.title,
+                        noteToMove = duplicate,
+                        otherNoteIdsToMove = selectedNotebookIds - duplicate.id
+                    )
+                } else {
+                    val count = selectedNotebookIds.size
+                    GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
+                    Toast.makeText(context, "Moved $count notes to $targetName", Toast.LENGTH_SHORT).show()
+                    selectedNotebookIds = emptySet()
+                }
                 showMoveMultiFolderDialog = false
-                Toast.makeText(context, "Moved $count notes to folder", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -2024,9 +2095,108 @@ fun NoteshelfScreen(
             currentFolderId = note.folderId,
             onDismiss = { showMoveFolderDialogForNote = null },
             onSelectFolder = { folderId ->
-                GraphiteRepository.moveNotebookToFolder(note.id, folderId)
+                val target = folders.find { it.id == folderId }
+                val targetName = target?.name ?: "folder"
+                val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
+                val duplicate = existingInTarget.find { existing ->
+                    existing.id != note.id && existing.title.trim().equals(note.title.trim(), ignoreCase = true)
+                }
+                if (duplicate != null && target != null) {
+                    duplicateWarningDialogInfo = DuplicateFileWarningInfo(
+                        targetFolder = target,
+                        duplicateTitle = note.title,
+                        noteToMove = note,
+                        otherNoteIdsToMove = emptySet()
+                    )
+                } else {
+                    GraphiteRepository.moveNotebookToFolder(note.id, folderId)
+                    Toast.makeText(context, "Moved \"${note.title}\" to $targetName", Toast.LENGTH_SHORT).show()
+                }
                 showMoveFolderDialogForNote = null
             }
+        )
+    }
+
+    if (duplicateWarningDialogInfo != null) {
+        val info = duplicateWarningDialogInfo!!
+        AlertDialog(
+            onDismissRequest = { duplicateWarningDialogInfo = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.WarningAmber, contentDescription = null, tint = Color(0xFFFFB74D))
+                    Text("File Already Exists", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "A note named \"${info.duplicateTitle}\" already exists in folder \"${info.targetFolder.name}\".",
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = "Do you want to replace the existing file, keep both with an updated name, or cancel?",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        GraphiteRepository.replaceNoteInFolder(
+                            folderId = info.targetFolder.id,
+                            noteToMoveId = info.noteToMove.id,
+                            existingNoteTitle = info.duplicateTitle
+                        )
+                        if (info.otherNoteIdsToMove.isNotEmpty()) {
+                            GraphiteRepository.moveNotebooksToFolder(info.otherNoteIdsToMove, info.targetFolder.id)
+                        }
+                        Toast.makeText(context, "Replaced \"${info.duplicateTitle}\" in ${info.targetFolder.name}", Toast.LENGTH_SHORT).show()
+                        selectedNotebookIds = emptySet()
+                        duplicateWarningDialogInfo = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange)
+                ) {
+                    Text("Replace", color = Color.White)
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            val baseTitle = info.duplicateTitle.trim()
+                            val existingTitles = notebooks.filter { it.folderId == info.targetFolder.id && !it.isDeleted }.map { it.title.trim().lowercase() }
+                            var counter = 1
+                            var newTitle = "$baseTitle ($counter)"
+                            while (existingTitles.contains(newTitle.lowercase())) {
+                                counter++
+                                newTitle = "$baseTitle ($counter)"
+                            }
+                            GraphiteRepository.moveAndRenameNoteToFolder(
+                                folderId = info.targetFolder.id,
+                                noteToMoveId = info.noteToMove.id,
+                                newTitle = newTitle
+                            )
+                            if (info.otherNoteIdsToMove.isNotEmpty()) {
+                                GraphiteRepository.moveNotebooksToFolder(info.otherNoteIdsToMove, info.targetFolder.id)
+                            }
+                            Toast.makeText(context, "Moved as \"$newTitle\" to ${info.targetFolder.name}", Toast.LENGTH_SHORT).show()
+                            selectedNotebookIds = emptySet()
+                            duplicateWarningDialogInfo = null
+                        },
+                        border = BorderStroke(1.dp, Color(0xFF555555))
+                    ) {
+                        Text("Keep Both", color = Color.White)
+                    }
+                    TextButton(
+                        onClick = { duplicateWarningDialogInfo = null }
+                    ) {
+                        Text("Cancel", color = Color.Gray)
+                    }
+                }
+            },
+            containerColor = GraphiteSurfaceVariant
         )
     }
 
@@ -2251,28 +2421,8 @@ private fun PdfThumbnailImage(filePath: String, modifier: Modifier = Modifier) {
 }
 
 private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
-    if (folder.colorHex != null) {
-        val base = Color(folder.colorHex)
-        return base to Color(0x77000000)
-    }
-    val nameLower = folder.name.lowercase()
-    return when {
-        nameLower.contains("music") -> Color(0xFF5C93F8) to Color(0xFF1E53B0)
-        nameLower.contains("clg") || nameLower.contains("sem") -> Color(0xFF64B5F6) to Color(0xFF1565C0)
-        nameLower.contains("college") || nameLower.contains("school") -> Color(0xFF81C784) to Color(0xFF2E7D32)
-        nameLower.contains("other") -> Color(0xFFFFB74D) to Color(0xFFD84315)
-        nameLower.contains("project") -> Color(0xFFBA68C8) to Color(0xFF6A1B9A)
-        nameLower.contains("lecture") -> Color(0xFF4DB6AC) to Color(0xFF00695C)
-        else -> {
-            val index = Math.abs(folder.id.hashCode()) % 4
-            when (index) {
-                0 -> Color(0xFF5C93F8) to Color(0xFF1E53B0)
-                1 -> Color(0xFF64B5F6) to Color(0xFF1565C0)
-                2 -> Color(0xFF81C784) to Color(0xFF2E7D32)
-                else -> Color(0xFFFFB74D) to Color(0xFFD84315)
-            }
-        }
-    }
+    val base = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54FL)
+    return base to Color(0x77000000)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -2289,10 +2439,10 @@ private fun FolderThumbnailCard(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val (folderColor, letterColor) = remember(folder.colorHex, folder.id, folder.name) {
+    val (folderColor, _) = remember(folder.colorHex, folder.id) {
         getFolderColors(folder)
     }
-    val firstLetter = folder.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
+    val isFolderUploaded = folder.isUploadedToDrive || !folder.driveFolderId.isNullOrBlank()
 
     Column(
         modifier = modifier
@@ -2310,7 +2460,7 @@ private fun FolderThumbnailCard(
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Folder Visual Representation matching Image 1
+        // Folder Visual Representation
         Box(
             modifier = Modifier
                 .width(130.dp)
@@ -2338,16 +2488,57 @@ private fun FolderThumbnailCard(
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(14.dp))
                     .background(folderColor)
-                    .shadow(4.dp, RoundedCornerShape(14.dp)),
-                contentAlignment = Alignment.Center
+                    .shadow(4.dp, RoundedCornerShape(14.dp))
             ) {
-                // Large initial letter in center matching Image 1
-                Text(
-                    text = firstLetter,
-                    color = letterColor,
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold
+                // Subtle interior folder pocket curve at bottom
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.60f)
+                        .align(Alignment.BottomCenter)
+                        .clip(RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp))
+                        .background(Color.White.copy(alpha = 0.12f))
                 )
+
+                // Star Toggle Button in Top-Left of Folder
+                IconButton(
+                    onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(5.dp)
+                        .size(26.dp)
+                        .background(
+                            if (folder.isStarred) Color.Black.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.22f),
+                            CircleShape
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
+                        tint = if (folder.isStarred) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+
+                // Cloud Upload Badge Icon in Top-Right of Folder (differentiates Backed up vs Local)
+                IconButton(
+                    onClick = onUploadFolder,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(5.dp)
+                        .size(26.dp)
+                        .background(
+                            if (isFolderUploaded) Color(0xCC1B5E20) else Color.Black.copy(alpha = 0.35f),
+                            CircleShape
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                        contentDescription = if (isFolderUploaded) "Folder backed up to Drive" else "Upload Folder to Google Drive",
+                        tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
 
                 // Drop Hover Indicator Overlay
                 if (isHoveredForDrop) {
@@ -2382,7 +2573,7 @@ private fun FolderThumbnailCard(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Title Row with Down Chevron matching Image 1
+        // Title Row with Down Chevron
         Box(contentAlignment = Alignment.Center) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -2424,8 +2615,22 @@ private fun FolderThumbnailCard(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Upload Whole Folder to Drive", color = Color.White) },
-                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
+                    text = { Text(if (folder.isStarred) "Unstar Folder" else "Star Folder", color = Color.White) },
+                    leadingIcon = {
+                        Icon(
+                            if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = null,
+                            tint = Color(0xFFFFD54F)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        GraphiteRepository.toggleStarFolder(folder.id)
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text(if (isFolderUploaded) "Re-upload to Drive" else "Upload Whole Folder to Drive", color = Color.White) },
+                    leadingIcon = { Icon(if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
                     onClick = {
                         menuExpanded = false
                         onUploadFolder()
@@ -2451,11 +2656,23 @@ private fun FolderThumbnailCard(
             }
         }
 
-        Text(
-            text = "$noteCount ${if (noteCount == 1) "item" else "items"}",
-            color = Color.Gray,
-            fontSize = 10.sp
-        )
+        // Subtitle row with item count and cloud upload status
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Icon(
+                imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                contentDescription = null,
+                tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color(0xFF757575),
+                modifier = Modifier.size(10.dp)
+            )
+            Text(
+                text = "$noteCount ${if (noteCount == 1) "item" else "items"} • ${if (isFolderUploaded) "Backed up" else "Local"}",
+                color = if (isFolderUploaded) Color(0xFF81C784) else Color.Gray,
+                fontSize = 10.sp
+            )
+        }
     }
 }
 
@@ -2473,10 +2690,10 @@ private fun FolderListRow(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val (folderColor, letterColor) = remember(folder.colorHex, folder.id, folder.name) {
+    val (folderColor, _) = remember(folder.colorHex, folder.id) {
         getFolderColors(folder)
     }
-    val firstLetter = folder.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
+    val isFolderUploaded = folder.isUploadedToDrive || !folder.driveFolderId.isNullOrBlank()
 
     Row(
         modifier = modifier
@@ -2494,19 +2711,19 @@ private fun FolderListRow(
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Folder Visual Representation
+        // Folder Icon with soft tinted container (showing proper folder icon!)
         Box(
             modifier = Modifier
-                .size(46.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(folderColor),
+                .size(44.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(folderColor.copy(alpha = 0.2f)),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = firstLetter,
-                color = letterColor,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                tint = folderColor,
+                modifier = Modifier.size(28.dp)
             )
         }
 
@@ -2522,6 +2739,15 @@ private fun FolderListRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (folder.isStarred) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Starred",
+                        tint = Color(0xFFFFD54F),
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
                 Spacer(modifier = Modifier.width(4.dp))
                 Icon(
                     imageVector = Icons.Default.KeyboardArrowDown,
@@ -2531,25 +2757,51 @@ private fun FolderListRow(
                 )
             }
             Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "$noteCount ${if (noteCount == 1) "item" else "items"}",
-                color = Color.Gray,
-                fontSize = 11.sp
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudQueue,
+                    contentDescription = null,
+                    tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color.Gray,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = "$noteCount ${if (noteCount == 1) "item" else "items"} • ${if (isFolderUploaded) "Backed up" else "Local"}",
+                    color = if (isFolderUploaded) Color(0xFF81C784) else Color.Gray,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        // Star Marking Button
+        IconButton(
+            onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
+                tint = if (folder.isStarred) Color(0xFFFFD54F) else Color.Gray,
+                modifier = Modifier.size(18.dp)
             )
         }
 
+        // Cloud Status & Upload Button
         IconButton(
             onClick = onUploadFolder,
             modifier = Modifier.size(32.dp)
         ) {
             Icon(
-                imageVector = Icons.Default.CloudUpload,
-                contentDescription = "Upload Folder",
-                tint = Color(0xFF4CAF50),
+                imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                contentDescription = if (isFolderUploaded) "Folder backed up" else "Upload Folder to Drive",
+                tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color.Gray,
                 modifier = Modifier.size(18.dp)
             )
         }
 
+        // 3-dots Menu Button
         Box {
             IconButton(
                 onClick = { menuExpanded = true },
@@ -2577,8 +2829,22 @@ private fun FolderListRow(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Upload Whole Folder to Drive", color = Color.White) },
-                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
+                    text = { Text(if (folder.isStarred) "Unstar Folder" else "Star Folder", color = Color.White) },
+                    leadingIcon = {
+                        Icon(
+                            if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = null,
+                            tint = Color(0xFFFFD54F)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        GraphiteRepository.toggleStarFolder(folder.id)
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text(if (isFolderUploaded) "Re-upload to Drive" else "Upload Whole Folder to Drive", color = Color.White) },
+                    leadingIcon = { Icon(if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF4CAF50)) },
                     onClick = {
                         menuExpanded = false
                         onUploadFolder()
@@ -3682,67 +3948,773 @@ private fun DeleteNoteChoiceDialog(
     )
 }
 
-@Composable
-private fun TemplatesGrid(
-    onCreateFromTemplate: (String, PaperStyle) -> Unit
-) {
-    val templates = listOf(
-        Triple("Ruled Paper", PaperStyle.RULED, "Classic horizontal lined note"),
-        Triple("Grid Paper", PaperStyle.GRID, "Math, science & architectural grid"),
-        Triple("Dot Grid", PaperStyle.DOTTED, "Bullet journaling & wireframes"),
-        Triple("Blank Canvas", PaperStyle.BLANK, "Freeform drawing & sketching"),
-        Triple("Cornell Notes", PaperStyle.RULED, "Lecture review & key points"),
-        Triple("Weekly Planner", PaperStyle.GRID, "Daily schedule & priority tasks")
-    )
+data class TemplateModel(
+    val id: String,
+    val title: String,
+    val description: String,
+    val category: String,
+    val style: PaperStyle,
+    val badge: String? = null,
+    val cover: NotebookCover? = null
+)
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 140.dp),
-        modifier = Modifier.fillMaxSize(),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        contentPadding = PaddingValues(bottom = 24.dp)
-    ) {
-        items(templates) { (title, style, desc) ->
-            Card(
+@Composable
+private fun TemplatePaperPreview(
+    item: TemplateModel,
+    modifier: Modifier = Modifier
+) {
+    if (item.cover != null) {
+        // Tabbed Notebook Preview
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(item.cover.colorHex))
+                .shadow(3.dp, RoundedCornerShape(6.dp))
+        ) {
+            // Book spine line on left
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onCreateFromTemplate(title, style) },
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF191919)),
-                shape = RoundedCornerShape(10.dp)
+                    .fillMaxHeight()
+                    .width(8.dp)
+                    .background(Color.Black.copy(alpha = 0.25f))
+            )
+            // Tab dividers on right edge
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.SpaceEvenly
             ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                val tabColors = listOf(Color(0xFFFFB74D), Color(0xFF64B5F6), Color(0xFF81C784), Color(0xFFBA68C8))
+                tabColors.forEach { c ->
+                    Box(
+                        modifier = Modifier
+                            .width(6.dp)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, bottomStart = 2.dp))
+                            .background(c)
+                    )
+                }
+            }
+            // Centered title badge on cover
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = item.title.take(12),
+                    color = Color.White,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
+        }
+        return
+    }
+
+    val isLegal = item.style == PaperStyle.LEGAL
+    val isEng = item.style == PaperStyle.ENGINEERING_GRID
+    val sheetBg = when {
+        isLegal -> Color(0xFFFFF9C4) // Legal yellow
+        isEng -> Color(0xFF1E2D3D)  // Blueprint dark cyan
+        else -> Color(0xFFFAFAFA)   // Clean white
+    }
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(sheetBg)
+            .shadow(3.dp, RoundedCornerShape(6.dp))
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val lineColor = if (isEng) Color(0xFF4FC3F7).copy(alpha = 0.35f) else Color(0xFFD0D7DE)
+            val marginColor = Color(0xFFE57373)
+
+            when (item.style) {
+                PaperStyle.RULED, PaperStyle.LEGAL -> {
+                    val marginX = w * 0.18f
+                    drawLine(
+                        color = marginColor,
+                        start = Offset(marginX, 0f),
+                        end = Offset(marginX, h),
+                        strokeWidth = 1.2f
+                    )
+                    val stepY = h / 9f
+                    for (i in 1..8) {
+                        val y = i * stepY
+                        drawLine(
+                            color = lineColor,
+                            start = Offset(0f, y),
+                            end = Offset(w, y),
+                            strokeWidth = 1f
+                        )
+                    }
+                }
+                PaperStyle.GRID, PaperStyle.ENGINEERING_GRID -> {
+                    val step = w / 8f
+                    var x = step
+                    while (x < w) {
+                        drawLine(lineColor, Offset(x, 0f), Offset(x, h), 0.8f)
+                        x += step
+                    }
+                    var y = step
+                    while (y < h) {
+                        drawLine(lineColor, Offset(0f, y), Offset(w, y), 0.8f)
+                        y += step
+                    }
+                    if (isEng) {
+                        drawRect(
+                            color = Color(0xFF4FC3F7).copy(alpha = 0.2f),
+                            topLeft = Offset(0f, 0f),
+                            size = androidx.compose.ui.geometry.Size(w, h * 0.16f)
+                        )
+                    }
+                }
+                PaperStyle.DOTTED -> {
+                    val step = w / 7f
+                    var x = step
+                    while (x < w) {
+                        var y = step
+                        while (y < h) {
+                            drawCircle(lineColor, radius = 1.2f, center = Offset(x, y))
+                            y += step
+                        }
+                        x += step
+                    }
+                }
+                PaperStyle.CORNELL_A, PaperStyle.CORNELL_B -> {
+                    val headerY = h * 0.14f
+                    drawLine(lineColor, Offset(0f, headerY), Offset(w, headerY), 1.2f)
+                    val summaryY = h * 0.78f
+                    drawLine(lineColor, Offset(0f, summaryY), Offset(w, summaryY), 1.2f)
+                    val cueX = w * 0.32f
+                    drawLine(marginColor, Offset(cueX, headerY), Offset(cueX, summaryY), 1.2f)
+                    val stepY = (summaryY - headerY) / 5f
+                    for (i in 1..4) {
+                        val y = headerY + i * stepY
+                        drawLine(lineColor, Offset(cueX, y), Offset(w, y), 0.8f)
+                    }
+                }
+                PaperStyle.HEXAGONAL_GRID -> {
+                    val step = w / 5f
+                    var x = step / 2
+                    while (x < w) {
+                        var y = step / 2
+                        while (y < h) {
+                            drawCircle(lineColor, radius = 2f, center = Offset(x, y))
+                            y += step
+                        }
+                        x += step
+                    }
+                }
+                PaperStyle.MUSIC_SCORE -> {
+                    val staves = listOf(h * 0.25f, h * 0.65f)
+                    staves.forEach { startY ->
+                        val lineGap = 4f
+                        for (i in 0 until 5) {
+                            val y = startY + (i * lineGap)
+                            drawLine(Color(0xFF424242), Offset(w * 0.1f, y), Offset(w * 0.9f, y), 1f)
+                        }
+                    }
+                }
+                PaperStyle.GUITAR_TABLATURE, PaperStyle.GUITAR_SCORE -> {
+                    val startY = h * 0.35f
+                    val lineGap = 4.5f
+                    for (i in 0 until 6) {
+                        val y = startY + (i * lineGap)
+                        drawLine(Color(0xFF424242), Offset(w * 0.12f, y), Offset(w * 0.9f, y), 0.9f)
+                    }
+                }
+                PaperStyle.BLANK -> {
+                    drawLine(lineColor, Offset(w * 0.15f, h * 0.15f), Offset(w * 0.25f, h * 0.15f), 1.2f)
+                    drawLine(lineColor, Offset(w * 0.15f, h * 0.15f), Offset(w * 0.15f, h * 0.25f), 1.2f)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateFeaturedCard(
+    title: String,
+    subtitle: String,
+    badge: String,
+    gradient: Brush,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .width(260.dp)
+            .height(115.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(gradient)
+                .padding(14.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(GraphiteOrange.copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.Black.copy(alpha = 0.35f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Icon(
-                            imageVector = when (style) {
-                                PaperStyle.GRID -> Icons.Default.GridOn
-                                PaperStyle.DOTTED -> Icons.Default.Grain
-                                PaperStyle.BLANK -> Icons.Default.CropPortrait
-                                else -> Icons.Default.MenuBook
-                            },
-                            contentDescription = null,
-                            tint = GraphiteOrange,
-                            modifier = Modifier.size(28.dp)
+                        Text(badge, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ArrowForward,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = subtitle,
+                        color = Color.White.copy(alpha = 0.8f),
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateItemCard(
+    item: TemplateModel,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF19191C)),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, Color(0xFF28282E))
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(105.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                TemplatePaperPreview(item = item, modifier = Modifier.fillMaxSize())
+
+                if (item.badge != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(GraphiteOrange)
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Text(item.badge, color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            Column {
+                Text(
+                    text = item.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = item.description,
+                    color = Color.Gray,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                    lineHeight = 12.sp
+                )
+            }
+
+            Button(
+                onClick = onClick,
+                colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(28.dp),
+                contentPadding = PaddingValues(0.dp),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Text("Use Template", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplatesSection(
+    onCreateFromTemplate: (String, PaperStyle, NotebookCover?) -> Unit,
+    onImportCustomTemplate: () -> Unit
+) {
+    var selectedTopTab by remember { mutableIntStateOf(0) } // 0: Discover, 1: Library, 2: Custom
+    var selectedCategoryChip by remember { mutableStateOf("All") }
+
+    val templateCatalog = remember {
+        listOf(
+            // Paper Essentials
+            TemplateModel("ruled", "Ruled Paper", "Classic horizontal lines with margin", "Paper Essentials", PaperStyle.RULED, badge = "CLASSIC"),
+            TemplateModel("grid", "Grid Paper", "Precision 5mm math & architectural grid", "Paper Essentials", PaperStyle.GRID, badge = "MATH"),
+            TemplateModel("dot", "Dot Grid", "Matrix dot grid for bullet journaling", "Paper Essentials", PaperStyle.DOTTED, badge = "BUJO"),
+            TemplateModel("blank", "Blank Canvas", "Unconstrained drawing & sketching", "Paper Essentials", PaperStyle.BLANK),
+            TemplateModel("legal", "Legal Pad", "Canary yellow note with vertical margin rule", "Paper Essentials", PaperStyle.LEGAL, badge = "POPULAR"),
+            TemplateModel("eng", "Engineering Grid", "Dense engineering computation grid", "Paper Essentials", PaperStyle.ENGINEERING_GRID, badge = "PRO"),
+            TemplateModel("hex", "Hexagonal Grid", "Organic chemistry & isometric design", "Paper Essentials", PaperStyle.HEXAGONAL_GRID),
+
+            // Study & Academic
+            TemplateModel("cornell_a", "Cornell Notes", "Cue column, lecture body & summary block", "Study & Academic", PaperStyle.CORNELL_A, badge = "RECOMMENDED"),
+            TemplateModel("cornell_b", "Cornell Review", "Wide lecture margin with chapter recap", "Study & Academic", PaperStyle.CORNELL_B),
+            TemplateModel("study_session", "Study Session Tracker", "Subject goals, equations & pomodoro blocks", "Study & Academic", PaperStyle.RULED, badge = "EXAM"),
+            TemplateModel("reading_log", "Reading & Research Log", "Citations, takeaways, key quotes & ratings", "Study & Academic", PaperStyle.RULED),
+
+            // Planners & Bujo
+            TemplateModel("daily_planner", "Daily Time-Block", "6am-10pm schedule with priority checkpoints", "Planners & Bujo", PaperStyle.GRID, badge = "DAILY"),
+            TemplateModel("weekly_sprint", "Weekly Goal Sprint", "7-day column overview & weekly goals", "Planners & Bujo", PaperStyle.GRID, badge = "WEEKLY"),
+            TemplateModel("monthly_overview", "Monthly Calendar & Habits", "Month calendar view with habit streaks", "Planners & Bujo", PaperStyle.GRID),
+            TemplateModel("mind_map", "Mind Map Canvas", "Central topic node with radiating branches", "Planners & Bujo", PaperStyle.BLANK, badge = "IDEAS"),
+
+            // Tabbed Notebooks
+            TemplateModel("tabbed_cognac", "Tabbed Cognac Leather", "Rich leather portfolio with 5 divider tabs", "Tabbed Notebooks", PaperStyle.RULED, badge = "PREMIUM", cover = NotebookCover(category = "PALETTE", colorHex = 0xFF8D6E63, name = "Cognac")),
+            TemplateModel("tabbed_teal", "Scandinavian Teal", "Minimalist journal with colored index tabs", "Tabbed Notebooks", PaperStyle.DOTTED, badge = "DESIGN", cover = NotebookCover(category = "PLAIN", colorHex = 0xFF45A5B5, name = "Teal")),
+            TemplateModel("tabbed_slate", "Midnight Slate Folio", "Matte charcoal cover with tab dividers", "Tabbed Notebooks", PaperStyle.GRID, cover = NotebookCover(category = "PLAIN", colorHex = 0xFF37474F, name = "Slate")),
+
+            // Music & Creative
+            TemplateModel("music_staff", "Music Staff Score", "Standard 5-line musical staves for composing", "Music & Creative", PaperStyle.MUSIC_SCORE, badge = "MUSIC"),
+            TemplateModel("guitar_tab", "Guitar Tablature", "6-line guitar tabs with chord diagrams", "Music & Creative", PaperStyle.GUITAR_TABLATURE, badge = "TABS"),
+            TemplateModel("guitar_score", "Guitar Grand Score", "Standard notation paired with guitar tabs", "Music & Creative", PaperStyle.GUITAR_SCORE)
+        )
+    }
+
+    val categories = listOf("All", "Paper Essentials", "Study & Academic", "Planners & Bujo", "Tabbed Notebooks", "Music & Creative")
+    val filteredTemplates = if (selectedCategoryChip == "All") templateCatalog else templateCatalog.filter { it.category == selectedCategoryChip }
+
+    // Custom Paper Studio state
+    var customTitle by remember { mutableStateOf("Custom Paper Note") }
+    var customColorIndex by remember { mutableIntStateOf(0) }
+    var customStyle by remember { mutableStateOf(PaperStyle.RULED) }
+
+    val customTints = listOf(
+        Pair("Ivory", Color(0xFFFAFAFA)),
+        Pair("Cream", Color(0xFFFFFDF5)),
+        Pair("Sepia", Color(0xFFF4ECD8)),
+        Pair("Night", Color(0xFF22242B)),
+        Pair("Canary", Color(0xFFFFF9C4))
+    )
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Top Tab Navigation Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF19191C))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val tabs = listOf(
+                Triple(0, "DISCOVER", Icons.Default.Explore),
+                Triple(1, "MY LIBRARY", Icons.Default.Bookmarks),
+                Triple(2, "CUSTOM", Icons.Default.AddCircleOutline)
+            )
+            tabs.forEach { (idx, label, icon) ->
+                val isSelected = selectedTopTab == idx
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) GraphiteOrange else Color.Transparent)
+                        .clickable { selectedTopTab = idx }
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = if (isSelected) Color.White else Color.Gray,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color.White else Color.Gray,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+
+        when (selectedTopTab) {
+            0 -> { // DISCOVER
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(bottom = 28.dp)
+                ) {
+                    // Highlights Carousel
+                    item {
+                        Text(
+                            text = "Featured Highlights",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            TemplateFeaturedCard(
+                                title = "2026 Digital Diaries",
+                                subtitle = "Organize, Plan & Reflect with structured annual layout",
+                                badge = "FEATURED",
+                                gradient = Brush.horizontalGradient(listOf(Color(0xFF4A148C), Color(0xFF7B1FA2))),
+                                onClick = { onCreateFromTemplate("Digital Diary 2026", PaperStyle.GRID, null) }
+                            )
+                            TemplateFeaturedCard(
+                                title = "Cornell Lecture System",
+                                subtitle = "Systematic cue column, notes & recap layout",
+                                badge = "ACADEMIC",
+                                gradient = Brush.horizontalGradient(listOf(Color(0xFFE65100), Color(0xFFFF8F00))),
+                                onClick = { onCreateFromTemplate("Cornell Lecture Notes", PaperStyle.CORNELL_A, null) }
+                            )
+                            TemplateFeaturedCard(
+                                title = "Artist Freeform Canvas",
+                                subtitle = "Boundless canvas designed for fluid stylus art",
+                                badge = "CREATIVE",
+                                gradient = Brush.horizontalGradient(listOf(Color(0xFF004D40), Color(0xFF00897B))),
+                                onClick = { onCreateFromTemplate("Artist Sketchpad", PaperStyle.BLANK, null) }
+                            )
+                            TemplateFeaturedCard(
+                                title = "Daily Time-Block Planner",
+                                subtitle = "6am-10pm schedule with priority checkpoints",
+                                badge = "PRODUCTIVITY",
+                                gradient = Brush.horizontalGradient(listOf(Color(0xFF0D47A1), Color(0xFF1976D2))),
+                                onClick = { onCreateFromTemplate("Daily Planner", PaperStyle.GRID, null) }
+                            )
+                        }
+                    }
+
+                    // Category Filter Pills
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            categories.forEach { cat ->
+                                val isSelected = selectedCategoryChip == cat
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { selectedCategoryChip = cat },
+                                    label = { Text(cat, fontSize = 11.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = GraphiteOrange,
+                                        selectedLabelColor = Color.White,
+                                        containerColor = Color(0xFF1E1E22),
+                                        labelColor = Color.LightGray
+                                    ),
+                                    border = null,
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Template Grid
+                    item {
+                        val chunked = filteredTemplates.chunked(3)
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            chunked.forEach { rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    rowItems.forEach { item ->
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            TemplateItemCard(
+                                                item = item,
+                                                onClick = { onCreateFromTemplate(item.title, item.style, item.cover) }
+                                            )
+                                        }
+                                    }
+                                    if (rowItems.size < 3) {
+                                        repeat(3 - rowItems.size) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            1 -> { // MY LIBRARY
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    contentPadding = PaddingValues(bottom = 28.dp)
+                ) {
+                    item {
+                        Text(
+                            text = "Saved & Frequently Used Presets",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "One-tap quick access to your most popular paper styles.",
+                            color = Color.Gray,
+                            fontSize = 12.sp
                         )
                     }
-                    Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text(desc, color = Color.Gray, fontSize = 11.sp, maxLines = 2)
-                    Button(
-                        onClick = { onCreateFromTemplate(title, style) },
-                        colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
-                        modifier = Modifier.fillMaxWidth().height(32.dp),
-                        contentPadding = PaddingValues(0.dp)
-                    ) {
-                        Text("Use Template", fontSize = 11.sp, color = Color.White)
+
+                    val libraryPresets = templateCatalog.take(6)
+                    val chunked = libraryPresets.chunked(3)
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            chunked.forEach { rowItems ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    rowItems.forEach { item ->
+                                        Box(modifier = Modifier.weight(1f)) {
+                                            TemplateItemCard(
+                                                item = item,
+                                                onClick = { onCreateFromTemplate(item.title, item.style, item.cover) }
+                                            )
+                                        }
+                                    }
+                                    if (rowItems.size < 3) {
+                                        repeat(3 - rowItems.size) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            2 -> { // CUSTOM
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(bottom = 28.dp)
+                ) {
+                    // Import Custom Template Card (matching PDF Page 3)
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1E)),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Color(0xFF2A2A30))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(60.dp)
+                                        .clip(CircleShape)
+                                        .background(GraphiteOrange.copy(alpha = 0.15f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudDownload,
+                                        contentDescription = null,
+                                        tint = GraphiteOrange,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                }
+
+                                Text(
+                                    text = "Import Custom Templates",
+                                    color = Color.White,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                Text(
+                                    text = "Import PDFs or images from your tablet storage to use as your own reusable custom paper.",
+                                    color = Color.Gray,
+                                    fontSize = 13.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                )
+
+                                Button(
+                                    onClick = onImportCustomTemplate,
+                                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                    shape = RoundedCornerShape(20.dp),
+                                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
+                                ) {
+                                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Import Now", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // Custom Paper Studio Card
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1E)),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Color(0xFF2A2A30))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Tune, contentDescription = null, tint = GraphiteOrange, modifier = Modifier.size(20.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Design Custom Paper", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                }
+
+                                OutlinedTextField(
+                                    value = customTitle,
+                                    onValueChange = { customTitle = it },
+                                    label = { Text("Template Note Title", color = Color.Gray) },
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Text("Paper Color Tint", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    customTints.forEachIndexed { idx, (label, color) ->
+                                        val isSelected = customColorIndex == idx
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .clickable { customColorIndex = idx }
+                                                .padding(4.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .background(color)
+                                                    .then(
+                                                        if (isSelected) Modifier.border(2.dp, GraphiteOrange, CircleShape)
+                                                        else Modifier.border(1.dp, Color.Gray, CircleShape)
+                                                    )
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(label, color = if (isSelected) Color.White else Color.Gray, fontSize = 10.sp)
+                                        }
+                                    }
+                                }
+
+                                Text("Paper Ruling Style", color = Color.LightGray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                val styles = listOf(
+                                    Pair("Ruled", PaperStyle.RULED),
+                                    Pair("Grid", PaperStyle.GRID),
+                                    Pair("Dot Grid", PaperStyle.DOTTED),
+                                    Pair("Cornell", PaperStyle.CORNELL_A),
+                                    Pair("Blank", PaperStyle.BLANK)
+                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    styles.forEach { (label, st) ->
+                                        val isSelected = customStyle == st
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = { customStyle = st },
+                                            label = { Text(label, fontSize = 11.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = GraphiteOrange,
+                                                selectedLabelColor = Color.White,
+                                                containerColor = Color(0xFF222226),
+                                                labelColor = Color.LightGray
+                                            ),
+                                            border = null,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        if (customTitle.isNotBlank()) {
+                                            onCreateFromTemplate(customTitle.trim(), customStyle, null)
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
+                                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Create Notebook with Custom Style", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
+                        }
                     }
                 }
             }

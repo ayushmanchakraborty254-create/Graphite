@@ -1060,6 +1060,10 @@ class GoogleDriveManager(
             } catch (_: Exception) {}
         }
 
+        if (uploadedCount > 0) {
+            GraphiteRepository.updateFolderDriveStatus(folder.id, targetDriveFolder.id, true)
+        }
+
         Result.success(uploadedCount)
     }
 

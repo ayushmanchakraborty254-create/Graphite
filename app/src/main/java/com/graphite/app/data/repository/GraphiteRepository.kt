@@ -795,14 +795,82 @@ object GraphiteRepository {
         saveToDisk()
     }
 
-    fun addFolder(name: String, parentId: String? = null, colorHex: Long? = null) {
+    fun addFolder(name: String, parentId: String? = null, colorHex: Long? = 0xFFFFD54FL) {
         val currentUid = activeUserId ?: "default"
         val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
-        val newFolder = FolderItem(UUID.randomUUID().toString(), name.trim(), 0, parentId = parentId, colorHex = colorHex, userId = currentUid)
+        val resolvedColorHex = colorHex ?: 0xFFFFD54FL
+        val newFolder = FolderItem(
+            id = UUID.randomUUID().toString(),
+            name = name.trim(),
+            noteCount = 0,
+            parentId = parentId,
+            colorHex = resolvedColorHex,
+            userId = currentUid,
+            isStarred = false,
+            isUploadedToDrive = false,
+            driveFolderId = null
+        )
         userList.add(newFolder)
         if (activeUserId != null) {
             _folders.value = userList.toList()
         }
+        saveToDisk()
+    }
+
+    fun toggleStarFolder(folderId: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == folderId }
+        if (idx != -1) {
+            val f = userList[idx]
+            userList[idx] = f.copy(isStarred = !f.isStarred)
+            if (activeUserId != null) {
+                _folders.value = userList.toList()
+            }
+            saveToDisk()
+        }
+    }
+
+    fun updateFolderDriveStatus(folderId: String, driveFolderId: String?, isUploaded: Boolean) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        val idx = userList.indexOfFirst { it.id == folderId }
+        if (idx != -1) {
+            val f = userList[idx]
+            userList[idx] = f.copy(
+                isUploadedToDrive = isUploaded,
+                driveFolderId = driveFolderId ?: f.driveFolderId
+            )
+            if (activeUserId != null) {
+                _folders.value = userList.toList()
+            }
+            saveToDisk()
+        }
+    }
+
+    fun replaceNoteInFolder(folderId: String, noteToMoveId: String, existingNoteTitle: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val existingIdx = userList.indexOfFirst { it.folderId == folderId && !it.isDeleted && it.title.trim().equals(existingNoteTitle.trim(), ignoreCase = true) }
+        if (existingIdx != -1) {
+            userList[existingIdx] = userList[existingIdx].copy(isDeleted = true, updatedAtMillis = System.currentTimeMillis())
+        }
+        val moveIdx = userList.indexOfFirst { it.id == noteToMoveId }
+        if (moveIdx != -1) {
+            userList[moveIdx] = userList[moveIdx].copy(folderId = folderId, updatedAtMillis = System.currentTimeMillis())
+        }
+        _notebooks.value = userList.filter { !it.isDeleted }
+        saveToDisk()
+    }
+
+    fun moveAndRenameNoteToFolder(folderId: String, noteToMoveId: String, newTitle: String) {
+        val currentUid = activeUserId ?: "default"
+        val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        val moveIdx = userList.indexOfFirst { it.id == noteToMoveId }
+        if (moveIdx != -1) {
+            userList[moveIdx] = userList[moveIdx].copy(folderId = folderId, title = newTitle, updatedAtMillis = System.currentTimeMillis())
+        }
+        _notebooks.value = userList.filter { !it.isDeleted }
         saveToDisk()
     }
 
@@ -1089,8 +1157,11 @@ object GraphiteRepository {
                                         name = obj.getString("name"),
                                         noteCount = obj.optInt("noteCount", 0),
                                         parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
-                                        colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null,
-                                        userId = if (obj.has("userId") && !obj.isNull("userId")) obj.getString("userId") else uid
+                                        colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else 0xFFFFD54FL,
+                                        userId = if (obj.has("userId") && !obj.isNull("userId")) obj.getString("userId") else uid,
+                                        isStarred = obj.optBoolean("isStarred", false),
+                                        isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
+                                        driveFolderId = if (obj.has("driveFolderId") && !obj.isNull("driveFolderId")) obj.getString("driveFolderId") else null
                                     )
                                 )
                             }
@@ -1109,7 +1180,10 @@ object GraphiteRepository {
                                     name = obj.getString("name"),
                                     noteCount = obj.optInt("noteCount", 0),
                                     parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
-                                    colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else null
+                                    colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else 0xFFFFD54FL,
+                                    isStarred = obj.optBoolean("isStarred", false),
+                                    isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
+                                    driveFolderId = if (obj.has("driveFolderId") && !obj.isNull("driveFolderId")) obj.getString("driveFolderId") else null
                                 )
                             )
                         }
@@ -1163,8 +1237,11 @@ object GraphiteRepository {
                         put("name", f.name)
                         put("noteCount", f.noteCount)
                         if (f.parentId != null) put("parentId", f.parentId)
-                        if (f.colorHex != null) put("colorHex", f.colorHex)
+                        put("colorHex", f.colorHex ?: 0xFFFFD54FL)
                         if (f.userId != null) put("userId", f.userId)
+                        put("isStarred", f.isStarred)
+                        put("isUploadedToDrive", f.isUploadedToDrive)
+                        if (f.driveFolderId != null) put("driveFolderId", f.driveFolderId)
                     })
                 }
                 foldersRootObj.put(uid, arr)
