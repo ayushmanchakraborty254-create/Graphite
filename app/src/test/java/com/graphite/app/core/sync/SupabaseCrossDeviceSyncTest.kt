@@ -362,4 +362,47 @@ class SupabaseCrossDeviceSyncTest {
         assertEquals(1, GraphiteRepository.notebooks.value.size)
         assertEquals("Alice Private Journal", GraphiteRepository.notebooks.value[0].title)
     }
+
+    @Test
+    fun testFoldersSynchronizeAcrossDevicesViaSupabase() = runBlocking {
+        val userId = "alice_folders_test"
+
+        // Device A: Alice creates a folder and a note inside that folder
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.addFolder(name = "Communication Engineering", colorHex = 0xFFFFD54FL)
+        val aliceFolders = GraphiteRepository.folders.value
+        assertEquals(1, aliceFolders.size)
+        val folder = aliceFolders[0]
+        assertEquals("Communication Engineering", folder.name)
+
+        val note = GraphiteRepository.createNotebook("Lecture 1 - Antenna Theory")
+        GraphiteRepository.moveNotebooksToFolder(setOf(note.id), folder.id)
+
+        // Device A syncs with Supabase
+        val syncManagerDeviceA = createSyncManagerForUser(userId)
+        val resultA = syncManagerDeviceA.syncNotes()
+        assertTrue("Sync on Device A must succeed", resultA.isSuccess)
+
+        // Simulate Device B: same user, clean repository with no local folders
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        assertEquals(0, GraphiteRepository.folders.value.size)
+        assertEquals(0, GraphiteRepository.notebooks.value.size)
+
+        // Device B syncs with Supabase
+        val syncManagerDeviceB = createSyncManagerForUser(userId)
+        val resultB = syncManagerDeviceB.syncNotes()
+        assertTrue("Sync on Device B must succeed", resultB.isSuccess)
+
+        // Device B must receive both the folder and the note
+        val syncedFolders = GraphiteRepository.folders.value
+        assertEquals("Device B must receive the folder from Supabase", 1, syncedFolders.size)
+        assertEquals("Communication Engineering", syncedFolders[0].name)
+        assertEquals(folder.id, syncedFolders[0].id)
+
+        val syncedNotes = GraphiteRepository.notebooks.value
+        assertEquals(1, syncedNotes.size)
+        assertEquals("Lecture 1 - Antenna Theory", syncedNotes[0].title)
+        assertEquals(folder.id, syncedNotes[0].folderId)
+    }
 }

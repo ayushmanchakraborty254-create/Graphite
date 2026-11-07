@@ -855,22 +855,35 @@ fun NoteshelfScreen(
                             } else {
                                 isSyncingNotes = true
                                 scope.launch {
+                                    // 1. Authenticate & sync notes and folders with Supabase
                                     googleAccountManager.ensureAuthenticatedWithSupabase(context)
                                     val sResult = syncManager.syncNotes()
+
+                                    // 2. Sync notes and folders with Google Drive if authorized
+                                    val dResult = if (driveManager.hasDrivePermission(context)) {
+                                        driveManager.syncNotesWithDrive(context)
+                                    } else null
+
+                                    // 3. Trigger fast background check for app updates
+                                    appUpdateManager.checkForUpdates(context, isManualCheck = false)
+
                                     isSyncingNotes = false
-                                    if (sResult.isSuccess) {
-                                        Toast.makeText(context, "Synced ${sResult.getOrNull()} notes with Supabase", Toast.LENGTH_SHORT).show()
+                                    val activeNotes = notebooks.filter { !it.isDeleted }.size
+                                    val activeFolders = folders.size
+                                    if (sResult.isSuccess || (dResult != null && dResult.isSuccess)) {
+                                        val count = sResult.getOrNull() ?: dResult?.getOrNull() ?: activeNotes
+                                        Toast.makeText(context, "Synced $count notes and $activeFolders folders", Toast.LENGTH_SHORT).show()
                                     } else {
-                                        val err = sResult.exceptionOrNull()?.message ?: ""
+                                        val err = sResult.exceptionOrNull()?.message ?: dResult?.exceptionOrNull()?.message ?: ""
                                         val userFriendlyMsg = when {
                                             err.contains("42501") || err.contains("row-level security", ignoreCase = true) ->
-                                                "Notes saved locally. Sign in with Google to sync across devices."
+                                                "Notes and folders saved locally. Sign in with Google to sync across devices."
                                             err.contains("401") || err.contains("unauthorized", ignoreCase = true) ->
                                                 "Sync session expired. Please tap your avatar to refresh."
                                             err.contains("Unable to resolve host") || err.contains("timeout", ignoreCase = true) ->
-                                                "Network offline. Notes saved safely on device."
+                                                "Network offline. Notes and folders saved safely on device."
                                             else ->
-                                                "Notes saved locally on device."
+                                                "Notes and folders saved locally on device."
                                         }
                                         Toast.makeText(context, userFriendlyMsg, Toast.LENGTH_SHORT).show()
                                     }
@@ -1058,7 +1071,7 @@ fun NoteshelfScreen(
                         .fillMaxWidth()
                         .padding(bottom = 16.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable { appUpdateManager.checkForUpdates(context, isManualCheck = true) },
+                        .clickable { appUpdateManager.openUpdate(context, update) },
                     color = Color(0xFF26190B),
                     border = androidx.compose.foundation.BorderStroke(1.dp, GraphiteOrange.copy(alpha = 0.8f))
                 ) {
@@ -1097,7 +1110,7 @@ fun NoteshelfScreen(
                             )
                         }
                         Button(
-                            onClick = { appUpdateManager.checkForUpdates(context, isManualCheck = true) },
+                            onClick = { appUpdateManager.openUpdate(context, update) },
                             colors = ButtonDefaults.buttonColors(containerColor = GraphiteOrange),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             shape = RoundedCornerShape(8.dp)

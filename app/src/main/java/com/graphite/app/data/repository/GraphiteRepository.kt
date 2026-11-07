@@ -848,6 +848,42 @@ object GraphiteRepository {
         }
     }
 
+    fun getAllFoldersForActiveUser(): List<FolderItem> {
+        val currentUid = activeUserId ?: "default"
+        return userFoldersMap[currentUid]?.toList() ?: emptyList()
+    }
+
+    fun reconcileRemoteFolders(remoteFolders: List<FolderItem>, targetUserId: String? = null) {
+        val currentUid = targetUserId ?: activeUserId ?: "default"
+        val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
+        val localMap = userList.associateBy { it.id }.toMutableMap()
+
+        for (remote in remoteFolders) {
+            val local = localMap[remote.id]
+                ?: localMap.values.find { it.name.trim().equals(remote.name.trim(), ignoreCase = true) }
+
+            if (local == null) {
+                localMap[remote.id] = remote.copy(userId = currentUid)
+            } else {
+                val merged = local.copy(
+                    name = remote.name.takeIf { it.isNotBlank() } ?: local.name,
+                    colorHex = remote.colorHex ?: local.colorHex,
+                    isStarred = local.isStarred || remote.isStarred,
+                    isUploadedToDrive = local.isUploadedToDrive || remote.isUploadedToDrive,
+                    driveFolderId = remote.driveFolderId ?: local.driveFolderId
+                )
+                localMap[local.id] = merged
+            }
+        }
+
+        userList.clear()
+        userList.addAll(localMap.values)
+        if (activeUserId != null) {
+            _folders.value = userList.toList()
+        }
+        saveToDisk()
+    }
+
     fun replaceNoteInFolder(folderId: String, noteToMoveId: String, existingNoteTitle: String) {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
@@ -1256,26 +1292,85 @@ object GraphiteRepository {
         return userNotebooksMap[userId]?.filter { !it.isDeleted } ?: emptyList()
     }
 
+    fun folderToJson(folder: FolderItem): JSONObject {
+        return JSONObject().apply {
+            put("id", folder.id)
+            put("name", folder.name)
+            put("noteCount", folder.noteCount)
+            if (folder.parentId != null) put("parentId", folder.parentId)
+            put("colorHex", folder.colorHex ?: 0xFFFFD54FL)
+            if (folder.userId != null) put("userId", folder.userId)
+            put("isStarred", folder.isStarred)
+            put("isUploadedToDrive", folder.isUploadedToDrive)
+            if (folder.driveFolderId != null) put("driveFolderId", folder.driveFolderId)
+        }
+    }
+
+    fun folderFromJson(obj: JSONObject): FolderItem {
+        return FolderItem(
+            id = obj.optString("id", UUID.randomUUID().toString()),
+            name = obj.optString("name", "Folder"),
+            noteCount = obj.optInt("noteCount", 0),
+            parentId = if (obj.has("parentId")) obj.optString("parentId") else null,
+            colorHex = if (obj.has("colorHex")) obj.optLong("colorHex", 0xFFFFD54FL) else 0xFFFFD54FL,
+            userId = if (obj.has("userId")) obj.optString("userId") else null,
+            isStarred = obj.optBoolean("isStarred", false),
+            isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
+            driveFolderId = if (obj.has("driveFolderId")) obj.optString("driveFolderId") else null
+        )
+    }
+
     fun exportNotesAsJson(userId: String? = null): String {
-        val uid = userId ?: activeUserId ?: return "[]"
+        val uid = userId ?: activeUserId ?: return "{}"
         val userNotes = userNotebooksMap[uid] ?: emptyList()
-        val arr = JSONArray()
-        for (item in userNotes) {
-            arr.put(notebookToJson(item))
+        val userFolders = userFoldersMap[uid] ?: emptyList()
+
+        val root = JSONObject().apply {
+            put("version", 2)
+            val fArr = JSONArray()
+            for (f in userFolders) {
+                fArr.put(folderToJson(f))
+            }
+            put("folders", fArr)
+
+            val nArr = JSONArray()
+            for (item in userNotes) {
+                nArr.put(notebookToJson(item))
+            }
+            put("notes", nArr)
         }
         return try {
-            arr.toString(2) ?: arr.toString() ?: "[]"
+            root.toString(2) ?: root.toString() ?: "{}"
         } catch (_: Throwable) {
-            "[]"
+            "{}"
         }
     }
 
     fun importNotesFromJson(jsonString: String, userId: String? = null): Int {
         val uid = userId ?: activeUserId ?: return 0
-        val arr = JSONArray(jsonString)
+        val trimmed = jsonString.trim()
         val importedList = mutableListOf<NotebookItem>()
-        for (i in 0 until arr.length()) {
-            importedList.add(notebookFromJson(arr.getJSONObject(i)))
+        if (trimmed.startsWith("{")) {
+            val root = JSONObject(trimmed)
+            if (root.has("folders")) {
+                val fArr = root.getJSONArray("folders")
+                val importedFolders = mutableListOf<FolderItem>()
+                for (i in 0 until fArr.length()) {
+                    importedFolders.add(folderFromJson(fArr.getJSONObject(i)))
+                }
+                reconcileRemoteFolders(importedFolders, targetUserId = uid)
+            }
+            if (root.has("notes")) {
+                val nArr = root.getJSONArray("notes")
+                for (i in 0 until nArr.length()) {
+                    importedList.add(notebookFromJson(nArr.getJSONObject(i)))
+                }
+            }
+        } else if (trimmed.startsWith("[")) {
+            val arr = JSONArray(trimmed)
+            for (i in 0 until arr.length()) {
+                importedList.add(notebookFromJson(arr.getJSONObject(i)))
+            }
         }
         reconcileRemoteNotes(importedList, targetUserId = uid)
         saveToDisk()

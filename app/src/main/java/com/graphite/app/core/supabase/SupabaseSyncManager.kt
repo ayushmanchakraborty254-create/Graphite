@@ -1,11 +1,13 @@
 package com.graphite.app.core.supabase
 
+import com.graphite.app.data.model.FolderItem
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.data.repository.GraphiteRepository
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
 
 sealed interface SupabaseSyncStatus {
     data object Idle : SupabaseSyncStatus
@@ -78,7 +80,27 @@ class SupabaseSyncManager(
                 return@withContext Result.failure(ex ?: Exception("Fetch failed"))
             }
 
-            val remoteNotes = remoteNotesResult.getOrThrow()
+            val rawRemoteNotes = remoteNotesResult.getOrThrow()
+
+            // 1A. Reconcile folders from Supabase registry note
+            val foldersRegistryNote = rawRemoteNotes.find { it.id == "graphite_folders_registry" || it.title == "__GRAPHITE_FOLDERS__" }
+            if (foldersRegistryNote != null) {
+                try {
+                    val line = foldersRegistryNote.previewLines.find { it.contains("[GRAPHITE_FOLDERS_START]") }
+                    val rawJson = line?.substringAfter("[GRAPHITE_FOLDERS_START]")?.substringBefore("[GRAPHITE_FOLDERS_END]")
+                        ?: ""
+                    if (rawJson.isNotBlank()) {
+                        val arr = JSONArray(rawJson)
+                        val remoteFolders = mutableListOf<FolderItem>()
+                        for (i in 0 until arr.length()) {
+                            remoteFolders.add(graphiteRepository.folderFromJson(arr.getJSONObject(i)))
+                        }
+                        graphiteRepository.reconcileRemoteFolders(remoteFolders)
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val remoteNotes = rawRemoteNotes.filter { it.id != "graphite_folders_registry" && it.title != "__GRAPHITE_FOLDERS__" }
 
             // Detect and purge any cloud duplicate ghost notes with identical titles
             val duplicateRemoteIdsToPurge = mutableListOf<String>()
@@ -123,6 +145,25 @@ class SupabaseSyncManager(
             // (Avoids blindly overwriting newer remote edits with stale local versions)
             if (pendingLocalNotesToUpload.isNotEmpty()) {
                 notesRepository.upsertNotes(pendingLocalNotesToUpload).getOrThrow()
+            }
+
+            // 3A. Upload latest local folders registry note to Supabase
+            val localFolders = graphiteRepository.getAllFoldersForActiveUser()
+            if (localFolders.isNotEmpty()) {
+                try {
+                    val fArr = JSONArray()
+                    for (f in localFolders) {
+                        fArr.put(graphiteRepository.folderToJson(f))
+                    }
+                    val registryNote = NotebookItem(
+                        id = "graphite_folders_registry",
+                        title = "__GRAPHITE_FOLDERS__",
+                        folderId = "system",
+                        previewLines = listOf("[GRAPHITE_FOLDERS_START]$fArr[GRAPHITE_FOLDERS_END]"),
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                    notesRepository.upsertNotes(listOf(registryNote))
+                } catch (_: Exception) {}
             }
 
             // 4. Reconcile remote changes into local workspace (Last-Write-Wins and Tombstones)

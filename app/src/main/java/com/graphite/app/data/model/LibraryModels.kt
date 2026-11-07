@@ -2,6 +2,7 @@ package com.graphite.app.data.model
 
 import com.graphite.app.feature.workspace.model.InkStroke
 import com.graphite.app.feature.workspace.model.PaperStyle
+import kotlinx.serialization.Serializable
 import java.util.UUID
 
 data class Book(
@@ -75,10 +76,11 @@ data class NotebookItem(
     val lastOpenedPage: Int = 0
 )
 
+@Serializable
 data class FolderItem(
     val id: String,
     val name: String,
-    val noteCount: Int,
+    val noteCount: Int = 0,
     val parentId: String? = null,
     val colorHex: Long? = 0xFFFFD54FL,
     val userId: String? = null,

@@ -2501,20 +2501,46 @@ class GoogleDriveManager(
                 }
             }
 
-            // 4. Serialize all local notes for this user strictly
+            // 3C. Synchronize folders with Google Drive: ensure matching Drive folders exist and contents are backed up without duplicates
+            val currentFolders = GraphiteRepository.getAllFoldersForActiveUser()
+            for (folder in currentFolders) {
+                try {
+                    val sanitizedName = folder.name.trim().takeIf { it.isNotBlank() } ?: "Folder"
+                    val targetDriveFolder = run {
+                        if (!folder.driveFolderId.isNullOrBlank()) {
+                            uploader.getFolder(accountEmail, folder.driveFolderId).getOrNull()
+                        } else null
+                    } ?: uploader.findFolderByName(accountEmail, sanitizedName).getOrNull()
+                      ?: uploader.listFolders(accountEmail).getOrDefault(emptyList()).find { it.name.equals(sanitizedName, ignoreCase = true) }
+                      ?: uploader.createFolder(accountEmail, sanitizedName, "root").getOrNull()
+
+                    if (targetDriveFolder != null) {
+                        GraphiteRepository.updateFolderDriveStatus(folder.id, targetDriveFolder.id, true)
+                        val folderNotes = currentNotes.filter { it.folderId == folder.id && !it.isDeleted }
+                        if (folderNotes.isNotEmpty()) {
+                            uploadEntireFolder(context, folder, folderNotes)
+                        }
+                    }
+                } catch (e: Exception) {
+                    SafeLogger.e("GoogleDriveManager", "Error syncing folder '${folder.name}' with Drive: ${e.message}", e)
+                }
+            }
+
+            // 4. Serialize all local notes and folders for this user strictly
             val mergedJson = GraphiteRepository.exportNotesAsJson(userId = accountEmail)
             val uploadBytes = mergedJson.toByteArray(Charsets.UTF_8)
 
             if (existingRemote != null) {
-                _notesSyncStatus.value = "Updating notes backup in Google Drive..."
+                _notesSyncStatus.value = "Updating notes and folders backup in Google Drive..."
                 uploader.updateFile(accountEmail, existingRemote.id, mimeType, uploadBytes)
             } else {
-                _notesSyncStatus.value = "Creating notes backup in Google Drive..."
+                _notesSyncStatus.value = "Creating notes and folders backup in Google Drive..."
                 uploader.upload(accountEmail, fileName, mimeType, uploadBytes, notesFolderId)
             }
 
             val totalNotes = GraphiteRepository.getAllNotesForActiveUser().filter { !it.isDeleted }.size
-            _notesSyncStatus.value = "Synced $totalNotes notes to Google Drive"
+            val totalFolders = GraphiteRepository.getAllFoldersForActiveUser().size
+            _notesSyncStatus.value = "Synced $totalNotes notes and $totalFolders folders to Google Drive"
             _isSyncingNotes.value = false
             Result.success(totalNotes)
         } catch (e: Exception) {

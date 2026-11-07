@@ -86,6 +86,12 @@ class AppUpdateManager(
         .retryOnConnectionFailure(true)
         .build()
 ) {
+    // Fast client dedicated for metadata/version queries with aggressive short timeouts
+    private val checkHttpClient: OkHttpClient = httpClient.newBuilder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(12, TimeUnit.SECONDS)
+        .build()
     companion object {
         const val NOTIFICATION_CHANNEL_ID = "graphite_app_updates"
         const val NOTIFICATION_ID = 8842
@@ -112,6 +118,19 @@ class AppUpdateManager(
     private val rawVersionUrl = "https://raw.githubusercontent.com/$githubRepo/main/version.json"
 
     private var downloadJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Immediately surfaces the update modal dialog for an already detected update without waiting
+     * for another network check, or triggers a fresh check if not yet known.
+     */
+    fun openUpdate(context: Context, info: UpdateInfo? = null) {
+        val target = info ?: _latestAvailableUpdate.value
+        if (target != null) {
+            _updateState.value = UpdateState.Available(target)
+        } else {
+            checkForUpdates(context, isManualCheck = true)
+        }
+    }
 
     private fun ensureNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -310,30 +329,35 @@ class AppUpdateManager(
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 var updateInfo: UpdateInfo? = null
+                val timestamp = System.currentTimeMillis()
 
-                // Strategy 1: Fetch version.json from GitHub Releases latest download
+                // Strategy 1: Fetch raw version.json from main (instant, real-time, no API rate limits)
                 try {
+                    val rawUrlWithParam = "$rawVersionUrl?_nocache=$timestamp"
                     val req = Request.Builder()
-                        .url(releaseVersionUrl)
-                        .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                        .addHeader("Cache-Control", "no-cache")
+                        .url(rawUrlWithParam)
+                        .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
+                        .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                        .addHeader("Pragma", "no-cache")
                         .build()
-                    val resp = httpClient.newCall(req).execute()
+                    val resp = checkHttpClient.newCall(req).execute()
                     if (resp.isSuccessful) {
                         val body = resp.body?.string() ?: ""
                         updateInfo = parseVersionJson(body)
                     }
                 } catch (_: Exception) {}
 
-                // Strategy 2: If strategy 1 failed, try releaseVersionAltUrl
+                // Strategy 2: Fetch version.json from GitHub Releases latest download
                 if (updateInfo == null) {
                     try {
+                        val releaseUrlWithParam = "$releaseVersionUrl?_nocache=$timestamp"
                         val req = Request.Builder()
-                            .url(releaseVersionAltUrl)
-                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                            .addHeader("Cache-Control", "no-cache")
+                            .url(releaseUrlWithParam)
+                            .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
+                            .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                            .addHeader("Pragma", "no-cache")
                             .build()
-                        val resp = httpClient.newCall(req).execute()
+                        val resp = checkHttpClient.newCall(req).execute()
                         if (resp.isSuccessful) {
                             val body = resp.body?.string() ?: ""
                             updateInfo = parseVersionJson(body)
@@ -345,11 +369,12 @@ class AppUpdateManager(
                 if (updateInfo == null) {
                     try {
                         val apiReq = Request.Builder()
-                            .url(apiLatestUrl)
+                            .url("$apiLatestUrl?_nocache=$timestamp")
                             .addHeader("Accept", "application/vnd.github.v3+json")
-                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
+                            .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                             .build()
-                        val apiResp = httpClient.newCall(apiReq).execute()
+                        val apiResp = checkHttpClient.newCall(apiReq).execute()
                         if (apiResp.isSuccessful) {
                             val body = apiResp.body?.string() ?: ""
                             if (body.isNotBlank()) {
@@ -399,11 +424,12 @@ class AppUpdateManager(
                 if (updateInfo == null) {
                     try {
                         val apiReq = Request.Builder()
-                            .url(apiUrl)
+                            .url("$apiUrl?_nocache=$timestamp")
                             .addHeader("Accept", "application/vnd.github.v3+json")
-                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                            .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
+                            .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                             .build()
-                        val apiResp = httpClient.newCall(apiReq).execute()
+                        val apiResp = checkHttpClient.newCall(apiReq).execute()
                         if (apiResp.isSuccessful) {
                             val body = apiResp.body?.string() ?: ""
                             val releases = JSONArray(body)
@@ -450,22 +476,6 @@ class AppUpdateManager(
                     } catch (_: Exception) {}
                 }
 
-                // Strategy 5: Fall back to raw version.json on main
-                if (updateInfo == null) {
-                    try {
-                        val rawReq = Request.Builder()
-                            .url(rawVersionUrl)
-                            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                            .addHeader("Cache-Control", "no-cache")
-                            .build()
-                        val rawResp = httpClient.newCall(rawReq).execute()
-                        if (rawResp.isSuccessful) {
-                            val body = rawResp.body?.string() ?: ""
-                            updateInfo = parseVersionJson(body)
-                        }
-                    } catch (_: Exception) {}
-                }
-
                 if (updateInfo == null) {
                     _updateState.value = UpdateState.Idle
                     withContext(Dispatchers.Main) { onComplete(false) }
@@ -477,20 +487,8 @@ class AppUpdateManager(
                 val localVersionCode = BuildConfig.VERSION_CODE
                 val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
 
-                // Check whether installer is actively pending
-                val prefs = context?.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
-                val lastInstalledSha = prefs?.getString("last_installed_sha", "") ?: ""
-                val lastInstalledTime = prefs?.getLong("last_installed_time", 0L) ?: 0L
-                val isCurrentlyInstalling = !isManualCheck &&
-                        lastInstalledSha.isNotBlank() &&
-                        (lastInstalledSha.equals(releaseSha, ignoreCase = true) ||
-                                (releaseSha.length >= 7 && lastInstalledSha.startsWith(releaseSha, ignoreCase = true))) &&
-                        (System.currentTimeMillis() - lastInstalledTime < 180_000L) // 3 min debounce
-
                 var isNewer = false
-                if (isCurrentlyInstalling) {
-                    isNewer = false
-                } else if (updateInfo.versionCode > 0 && localVersionCode > 0 && updateInfo.versionCode > localVersionCode) {
+                if (updateInfo.versionCode > 0 && localVersionCode > 0 && updateInfo.versionCode > localVersionCode) {
                     isNewer = true
                 } else if (isDevBuild && releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
                     isNewer = true
@@ -519,15 +517,7 @@ class AppUpdateManager(
                         showUpdateAvailableNotification(context, finalInfo)
                     }
 
-                    val snoozedUntil = if (!isManualCheck && prefs != null) {
-                        prefs.getLong("snoozed_until_${releaseSha}", 0L)
-                    } else 0L
-
-                    if (System.currentTimeMillis() >= snoozedUntil) {
-                        _updateState.value = UpdateState.Available(finalInfo)
-                    } else {
-                        _updateState.value = UpdateState.Idle
-                    }
+                    _updateState.value = UpdateState.Available(finalInfo)
                     withContext(Dispatchers.Main) { onComplete(true) }
                 } else {
                     _latestAvailableUpdate.value = null
