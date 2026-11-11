@@ -1,8 +1,8 @@
 {
-  "versionCode": 88,
+  "versionCode": 90,
   "versionName": "1.0.0",
-  "commitSha": "02d1ce5",
-  "commitMessage": "fix(notes): fix hand marking touch drawing, folder cloud sync, and selective drive folder updates",
-  "buildDate": "2026-11-11 13:07 UTC",
+  "commitSha": "2140a97",
+  "commitMessage": "fix(sync): ensure deterministic UUID folder registry note and cross-device sync",
+  "buildDate": "2026-11-11 13:59 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
