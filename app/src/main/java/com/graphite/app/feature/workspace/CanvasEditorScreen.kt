@@ -914,8 +914,8 @@ fun CanvasEditorScreen(
 
                                 // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
-                            } else if (pressed.size == 1 && (interactionMode == EditorInteractionMode.PEN_MODE || interactionMode == EditorInteractionMode.HAND_MODE) && !isPinching) {
-                                // 1 FINGER IN PEN_MODE or HAND_MODE: smoothly scrolls the pages vertically
+                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE && !isPinching) {
+                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically (in HAND_MODE, 1 finger draws smoothly)
                                 val curPos = pressed[0].position
                                 val now = System.currentTimeMillis()
 
@@ -945,7 +945,7 @@ fun CanvasEditorScreen(
                                 // Fingers lifted: natural physics-based fling momentum only when NOT zooming
                                 val shouldFling = !isPinching && (
                                     (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
-                                    ((interactionMode == EditorInteractionMode.PEN_MODE || interactionMode == EditorInteractionMode.HAND_MODE) && isDragging1Finger)
+                                    (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
                                 )
                                 if (shouldFling && kotlin.math.abs(scrollVelocityY) > 50f) {
                                     val initialVel = scrollVelocityY.coerceIn(-15000f, 15000f)
@@ -1240,7 +1240,7 @@ fun CanvasEditorScreen(
                                                 activePoints = emptyList()
                                                 lassoPoints = emptyList()
                                                 activeEraserCenter = null
-                                                return@pointerInteropFilter true
+                                                return@pointerInteropFilter false
                                             }
                                         } else {
                                             // 2. IN HAND_MODE: multi-finger touch (>= 2) aborts drawing and delegates to 2-finger scroll/pinch
@@ -1248,7 +1248,7 @@ fun CanvasEditorScreen(
                                                 activePoints = emptyList()
                                                 lassoPoints = emptyList()
                                                 activeEraserCenter = null
-                                                return@pointerInteropFilter true
+                                                return@pointerInteropFilter false
                                             }
                                         }
 
@@ -1267,7 +1267,7 @@ fun CanvasEditorScreen(
                                         )
 
                                         if (!accepted) {
-                                            return@pointerInteropFilter true
+                                            return@pointerInteropFilter false
                                         }
 
                                         val isHardwareEraser = packet.isEraser || packet.isPrimaryButtonPressed

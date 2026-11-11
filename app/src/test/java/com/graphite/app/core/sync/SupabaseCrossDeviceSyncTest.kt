@@ -405,4 +405,51 @@ class SupabaseCrossDeviceSyncTest {
         assertEquals("Lecture 1 - Antenna Theory", syncedNotes[0].title)
         assertEquals(folder.id, syncedNotes[0].folderId)
     }
+
+    @Test
+    fun testFolderDeletionTombstonePropagatesAcrossDevicesViaSupabase() = runBlocking {
+        val userId = "alice_folder_tombstone_test"
+
+        // Device A: Alice creates a folder and a note inside that folder
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.addFolder(name = "Mathematics", colorHex = 0xFFFFD54FL)
+        val folder = GraphiteRepository.folders.value[0]
+        val note = GraphiteRepository.createNotebook("Calculus I")
+        GraphiteRepository.moveNotebooksToFolder(setOf(note.id), folder.id)
+
+        // Device A syncs with Supabase
+        val syncManagerA = createSyncManagerForUser(userId)
+        assertTrue(syncManagerA.syncNotes().isSuccess)
+
+        // Device B: receives the folder and note
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        val syncManagerB = createSyncManagerForUser(userId)
+        assertTrue(syncManagerB.syncNotes().isSuccess)
+        assertEquals(1, GraphiteRepository.folders.value.size)
+        assertEquals(folder.id, GraphiteRepository.notebooks.value[0].folderId)
+        val deviceBFolderSnapshot = GraphiteRepository.getAllFoldersForActiveUser(includeDeleted = true)
+
+        // Device A: deletes the folder
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        // Restore Device A's local state and delete folder
+        GraphiteRepository.reconcileRemoteFolders(deviceBFolderSnapshot)
+        GraphiteRepository.deleteFolder(folder.id)
+        assertEquals(0, GraphiteRepository.folders.value.size)
+        // Device A syncs deletion tombstone to Supabase
+        assertTrue(syncManagerA.syncNotes().isSuccess)
+
+        // Device B: restore Device B's local state before sync
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.reconcileRemoteFolders(deviceBFolderSnapshot)
+        assertEquals(1, GraphiteRepository.folders.value.size)
+
+        // Device B syncs with cloud where tombstone updatedAtMillis is newer
+        assertTrue(syncManagerB.syncNotes().isSuccess)
+
+        // Verify folder is deleted on Device B
+        assertEquals("Deleted folder tombstone must remove folder on Device B", 0, GraphiteRepository.folders.value.size)
+    }
 }

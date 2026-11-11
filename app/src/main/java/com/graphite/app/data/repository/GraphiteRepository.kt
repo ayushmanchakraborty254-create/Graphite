@@ -124,7 +124,7 @@ object GraphiteRepository {
         val userFolders = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
         userFolders.removeAll { it.id == "my_notes" || it.id == "lectures" || it.id == "projects" }
         userFoldersMap["default"]?.removeAll { it.id == "my_notes" || it.id == "lectures" || it.id == "projects" }
-        _folders.value = userFolders.toList()
+        _folders.value = userFolders.filter { !it.isDeleted }
 
         _stats.update {
             it.copy(
@@ -799,6 +799,7 @@ object GraphiteRepository {
         val currentUid = activeUserId ?: "default"
         val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
         val resolvedColorHex = colorHex ?: 0xFFFFD54FL
+        val now = System.currentTimeMillis()
         val newFolder = FolderItem(
             id = UUID.randomUUID().toString(),
             name = name.trim(),
@@ -808,13 +809,16 @@ object GraphiteRepository {
             userId = currentUid,
             isStarred = false,
             isUploadedToDrive = false,
-            driveFolderId = null
+            driveFolderId = null,
+            isDeleted = false,
+            updatedAtMillis = now
         )
         userList.add(newFolder)
-        if (activeUserId != null) {
-            _folders.value = userList.toList()
-        }
+        _folders.value = userList.filter { !it.isDeleted }
         saveToDisk()
+        try {
+            com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+        } catch (_: Exception) {}
     }
 
     fun toggleStarFolder(folderId: String) {
@@ -823,11 +827,12 @@ object GraphiteRepository {
         val idx = userList.indexOfFirst { it.id == folderId }
         if (idx != -1) {
             val f = userList[idx]
-            userList[idx] = f.copy(isStarred = !f.isStarred)
-            if (activeUserId != null) {
-                _folders.value = userList.toList()
-            }
+            userList[idx] = f.copy(isStarred = !f.isStarred, updatedAtMillis = System.currentTimeMillis())
+            _folders.value = userList.filter { !it.isDeleted }
             saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
         }
     }
 
@@ -839,48 +844,100 @@ object GraphiteRepository {
             val f = userList[idx]
             userList[idx] = f.copy(
                 isUploadedToDrive = isUploaded,
-                driveFolderId = driveFolderId ?: f.driveFolderId
+                driveFolderId = driveFolderId ?: f.driveFolderId,
+                updatedAtMillis = System.currentTimeMillis()
             )
-            if (activeUserId != null) {
-                _folders.value = userList.toList()
-            }
+            _folders.value = userList.filter { !it.isDeleted }
             saveToDisk()
         }
     }
 
-    fun getAllFoldersForActiveUser(): List<FolderItem> {
+    fun getAllFoldersForActiveUser(includeDeleted: Boolean = false): List<FolderItem> {
         val currentUid = activeUserId ?: "default"
-        return userFoldersMap[currentUid]?.toList() ?: emptyList()
+        val list = userFoldersMap[currentUid]?.toList() ?: emptyList()
+        return if (includeDeleted) list else list.filter { !it.isDeleted }
     }
 
     fun reconcileRemoteFolders(remoteFolders: List<FolderItem>, targetUserId: String? = null) {
         val currentUid = targetUserId ?: activeUserId ?: "default"
         val userList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
         val localMap = userList.associateBy { it.id }.toMutableMap()
+        val remappedFolderIds = mutableMapOf<String, String>()
 
         for (remote in remoteFolders) {
-            val local = localMap[remote.id]
-                ?: localMap.values.find { it.name.trim().equals(remote.name.trim(), ignoreCase = true) }
+            val localById = localMap[remote.id]
+            val localByName = if (localById == null) {
+                localMap.values.find { it.name.trim().equals(remote.name.trim(), ignoreCase = true) }
+            } else null
+
+            val local = localById ?: localByName
 
             if (local == null) {
                 localMap[remote.id] = remote.copy(userId = currentUid)
             } else {
-                val merged = local.copy(
-                    name = remote.name.takeIf { it.isNotBlank() } ?: local.name,
-                    colorHex = remote.colorHex ?: local.colorHex,
-                    isStarred = local.isStarred || remote.isStarred,
-                    isUploadedToDrive = local.isUploadedToDrive || remote.isUploadedToDrive,
-                    driveFolderId = remote.driveFolderId ?: local.driveFolderId
-                )
-                localMap[local.id] = merged
+                val effectiveId = remote.id
+                if (local.id != remote.id) {
+                    localMap.remove(local.id)
+                    remappedFolderIds[local.id] = remote.id
+                }
+
+                val merged = if (remote.updatedAtMillis >= local.updatedAtMillis) {
+                    remote.copy(
+                        id = effectiveId,
+                        userId = currentUid,
+                        isDeleted = remote.isDeleted,
+                        driveFolderId = remote.driveFolderId ?: local.driveFolderId,
+                        isUploadedToDrive = remote.isUploadedToDrive || local.isUploadedToDrive
+                    )
+                } else {
+                    local.copy(
+                        id = effectiveId,
+                        userId = currentUid,
+                        driveFolderId = local.driveFolderId ?: remote.driveFolderId,
+                        isUploadedToDrive = local.isUploadedToDrive || remote.isUploadedToDrive
+                    )
+                }
+                localMap[effectiveId] = merged
+            }
+        }
+
+        // Remap any local notes if folder ID was unified with remote
+        if (remappedFolderIds.isNotEmpty()) {
+            val userNotes = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+            var notesModified = false
+            for (i in userNotes.indices) {
+                val n = userNotes[i]
+                val newFid = remappedFolderIds[n.folderId]
+                if (newFid != null) {
+                    userNotes[i] = n.copy(folderId = newFid)
+                    notesModified = true
+                }
+            }
+            if (notesModified) {
+                _notebooks.value = userNotes.filter { !it.isDeleted }
+            }
+        }
+
+        // Move notes in deleted folders to "unfiled"
+        val deletedFolderIds = localMap.values.filter { it.isDeleted }.map { it.id }.toSet()
+        if (deletedFolderIds.isNotEmpty()) {
+            val userNotes = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+            var notesModified = false
+            for (i in userNotes.indices) {
+                val n = userNotes[i]
+                if (n.folderId in deletedFolderIds) {
+                    userNotes[i] = n.copy(folderId = "unfiled")
+                    notesModified = true
+                }
+            }
+            if (notesModified) {
+                _notebooks.value = userNotes.filter { !it.isDeleted }
             }
         }
 
         userList.clear()
         userList.addAll(localMap.values)
-        if (activeUserId != null) {
-            _folders.value = userList.toList()
-        }
+        _folders.value = userList.filter { !it.isDeleted }
         saveToDisk()
     }
 
@@ -920,12 +977,14 @@ object GraphiteRepository {
             userList[idx] = f.copy(
                 name = newName?.trim() ?: f.name,
                 colorHex = newColorHex ?: f.colorHex,
-                parentId = resolvedParent
+                parentId = resolvedParent,
+                updatedAtMillis = System.currentTimeMillis()
             )
-            if (activeUserId != null) {
-                _folders.value = userList.toList()
-            }
+            _folders.value = userList.filter { !it.isDeleted }
             saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
         }
     }
 
@@ -933,10 +992,11 @@ object GraphiteRepository {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
         var modified = false
+        val now = System.currentTimeMillis()
         for (i in userList.indices) {
             val note = userList[i]
             if (note.folderId == folderId) {
-                userList[i] = note.copy(folderId = "unfiled", updatedAtMillis = System.currentTimeMillis())
+                userList[i] = note.copy(folderId = "unfiled", updatedAtMillis = now)
                 modified = true
             }
         }
@@ -944,27 +1004,41 @@ object GraphiteRepository {
             _notebooks.value = userList.filter { !it.isDeleted }
         }
         val folderList = userFoldersMap.getOrPut(currentUid) { mutableListOf() }
-        folderList.removeAll { it.id == folderId || it.parentId == folderId }
-        if (activeUserId != null) {
-            _folders.value = folderList.toList()
+        var folderModified = false
+        for (i in folderList.indices) {
+            val f = folderList[i]
+            if (f.id == folderId || f.parentId == folderId) {
+                folderList[i] = f.copy(isDeleted = true, updatedAtMillis = now)
+                folderModified = true
+            }
         }
-        saveToDisk()
+        if (folderModified) {
+            _folders.value = folderList.filter { !it.isDeleted }
+            saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
+        }
     }
 
     fun moveNotebooksToFolder(notebookIds: Set<String>, folderId: String) {
         val currentUid = activeUserId ?: "default"
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
         var modified = false
+        val now = System.currentTimeMillis()
         for (i in userList.indices) {
             val note = userList[i]
             if (note.id in notebookIds) {
-                userList[i] = note.copy(folderId = folderId, updatedAtMillis = System.currentTimeMillis())
+                userList[i] = note.copy(folderId = folderId, updatedAtMillis = now)
                 modified = true
             }
         }
         if (modified) {
             _notebooks.value = userList.filter { !it.isDeleted }
             saveToDisk()
+            try {
+                com.graphite.app.GraphiteApplication.instance.supabaseSyncManager.triggerAutoSync(debounceMs = 500L)
+            } catch (_: Exception) {}
         }
     }
 
@@ -1062,6 +1136,7 @@ object GraphiteRepository {
     fun cleanNotebookDuplicatesAndGhosts(targetUid: String? = null) {
         val currentUid = targetUid ?: activeUserId ?: return
         val userList = userNotebooksMap.getOrPut(currentUid) { mutableListOf() }
+        userList.removeAll { it.id == "graphite_folders_registry" || it.title == "__GRAPHITE_FOLDERS__" }
         val activeNotes = userList.filter { !it.isDeleted }
         val titleGroups = activeNotes.groupBy { it.title.trim().lowercase() }
         val toRemove = mutableSetOf<String>()
@@ -1185,21 +1260,9 @@ object GraphiteRepository {
                             val list = mutableListOf<FolderItem>()
                             for (i in 0 until arr.length()) {
                                 val obj = arr.getJSONObject(i)
-                                val fid = obj.getString("id")
-                                if (fid == "my_notes" || fid == "lectures" || fid == "projects") continue
-                                list.add(
-                                    FolderItem(
-                                        id = fid,
-                                        name = obj.getString("name"),
-                                        noteCount = obj.optInt("noteCount", 0),
-                                        parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
-                                        colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else 0xFFFFD54FL,
-                                        userId = if (obj.has("userId") && !obj.isNull("userId")) obj.getString("userId") else uid,
-                                        isStarred = obj.optBoolean("isStarred", false),
-                                        isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
-                                        driveFolderId = if (obj.has("driveFolderId") && !obj.isNull("driveFolderId")) obj.getString("driveFolderId") else null
-                                    )
-                                )
+                                val item = folderFromJson(obj)
+                                if (item.id == "my_notes" || item.id == "lectures" || item.id == "projects") continue
+                                list.add(item.copy(userId = item.userId ?: uid))
                             }
                             userFoldersMap[uid] = list
                         }
@@ -1208,25 +1271,14 @@ object GraphiteRepository {
                         val loaded = mutableListOf<FolderItem>()
                         for (i in 0 until arr.length()) {
                             val obj = arr.getJSONObject(i)
-                            val fid = obj.getString("id")
-                            if (fid == "my_notes" || fid == "lectures" || fid == "projects") continue
-                            loaded.add(
-                                FolderItem(
-                                    id = fid,
-                                    name = obj.getString("name"),
-                                    noteCount = obj.optInt("noteCount", 0),
-                                    parentId = if (obj.has("parentId") && !obj.isNull("parentId")) obj.getString("parentId") else null,
-                                    colorHex = if (obj.has("colorHex") && !obj.isNull("colorHex")) obj.getLong("colorHex") else 0xFFFFD54FL,
-                                    isStarred = obj.optBoolean("isStarred", false),
-                                    isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
-                                    driveFolderId = if (obj.has("driveFolderId") && !obj.isNull("driveFolderId")) obj.getString("driveFolderId") else null
-                                )
-                            )
+                            val item = folderFromJson(obj)
+                            if (item.id == "my_notes" || item.id == "lectures" || item.id == "projects") continue
+                            loaded.add(item.copy(userId = item.userId ?: "default"))
                         }
                         userFoldersMap["default"] = loaded
                     }
                     if (activeUserId != null) {
-                        _folders.value = userFoldersMap[activeUserId] ?: emptyList()
+                        _folders.value = (userFoldersMap[activeUserId] ?: emptyList()).filter { !it.isDeleted }
                     } else {
                         _folders.value = emptyList()
                     }
@@ -1268,17 +1320,7 @@ object GraphiteRepository {
             for ((uid, list) in userFoldersMap) {
                 val arr = JSONArray()
                 for (f in list) {
-                    arr.put(JSONObject().apply {
-                        put("id", f.id)
-                        put("name", f.name)
-                        put("noteCount", f.noteCount)
-                        if (f.parentId != null) put("parentId", f.parentId)
-                        put("colorHex", f.colorHex ?: 0xFFFFD54FL)
-                        if (f.userId != null) put("userId", f.userId)
-                        put("isStarred", f.isStarred)
-                        put("isUploadedToDrive", f.isUploadedToDrive)
-                        if (f.driveFolderId != null) put("driveFolderId", f.driveFolderId)
-                    })
+                    arr.put(folderToJson(f))
                 }
                 foldersRootObj.put(uid, arr)
             }
@@ -1303,6 +1345,8 @@ object GraphiteRepository {
             put("isStarred", folder.isStarred)
             put("isUploadedToDrive", folder.isUploadedToDrive)
             if (folder.driveFolderId != null) put("driveFolderId", folder.driveFolderId)
+            put("isDeleted", folder.isDeleted)
+            put("updatedAtMillis", folder.updatedAtMillis)
         }
     }
 
@@ -1316,7 +1360,9 @@ object GraphiteRepository {
             userId = if (obj.has("userId")) obj.optString("userId") else null,
             isStarred = obj.optBoolean("isStarred", false),
             isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
-            driveFolderId = if (obj.has("driveFolderId")) obj.optString("driveFolderId") else null
+            driveFolderId = if (obj.has("driveFolderId")) obj.optString("driveFolderId") else null,
+            isDeleted = obj.optBoolean("isDeleted", false),
+            updatedAtMillis = obj.optLong("updatedAtMillis", 0L)
         )
     }
 

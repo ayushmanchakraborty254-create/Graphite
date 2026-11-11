@@ -86,7 +86,9 @@ data class FolderItem(
     val userId: String? = null,
     val isStarred: Boolean = false,
     val isUploadedToDrive: Boolean = false,
-    val driveFolderId: String? = null
+    val driveFolderId: String? = null,
+    val isDeleted: Boolean = false,
+    val updatedAtMillis: Long = 0L
 )
 
 

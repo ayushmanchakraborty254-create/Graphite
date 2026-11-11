@@ -81,7 +81,8 @@ data class DriveRemoteFile(
     val size: Long = 0L,
     val thumbnailLink: String? = null,
     val parentFolderId: String? = null,
-    val parentFolderName: String? = null
+    val parentFolderName: String? = null,
+    val modifiedTimeMillis: Long = 0L
 )
 
 data class CloudFolderScanResult(
@@ -395,7 +396,7 @@ class DefaultDriveApiV3Uploader(
                         .setQ("$parentQuery and mimeType != 'application/vnd.google-apps.folder' and trashed = false")
                         .setSupportsAllDrives(true)
                         .setIncludeItemsFromAllDrives(true)
-                        .setFields("nextPageToken, files(id, name, mimeType, size, thumbnailLink)")
+                        .setFields("nextPageToken, files(id, name, mimeType, size, thumbnailLink, modifiedTime)")
                         .setPageSize(100)
                     if (!pageToken.isNullOrBlank()) {
                         request.pageToken = pageToken
@@ -412,7 +413,8 @@ class DefaultDriveApiV3Uploader(
                                     size = file.getSize() ?: 0L,
                                     thumbnailLink = file.thumbnailLink,
                                     parentFolderId = currentFolderId,
-                                    parentFolderName = currentFolderName
+                                    parentFolderName = currentFolderName,
+                                    modifiedTimeMillis = file.modifiedTime?.value ?: 0L
                                 )
                             )
                         }
@@ -591,12 +593,20 @@ class DefaultDriveApiV3Uploader(
                 .setQ(q)
                 .setSupportsAllDrives(true)
                 .setIncludeItemsFromAllDrives(true)
-                .setFields("files(id, name, mimeType, size)")
+                .setFields("files(id, name, mimeType, size, modifiedTime)")
                 .setPageSize(1)
                 .execute()
             val first = result.files?.firstOrNull()
             if (first != null) {
-                Result.success(DriveRemoteFile(first.id ?: "", first.name ?: fileName, first.mimeType ?: "", first.getSize() ?: 0L))
+                Result.success(
+                    DriveRemoteFile(
+                        id = first.id ?: "",
+                        name = first.name ?: fileName,
+                        mimeType = first.mimeType ?: "",
+                        size = first.getSize() ?: 0L,
+                        modifiedTimeMillis = first.modifiedTime?.value ?: 0L
+                    )
+                )
             } else {
                 Result.success(null)
             }
@@ -724,8 +734,16 @@ class GoogleDriveManager(
      * Checks whether the user has already authorized Drive access on this device.
      */
     fun hasDrivePermission(context: Context): Boolean {
-        val account = GoogleSignIn.getLastSignedInAccount(context)
-        val hasScope = account != null && GoogleSignIn.hasPermissions(account, driveScope)
+        val account = try {
+            GoogleSignIn.getLastSignedInAccount(context)
+        } catch (_: Throwable) {
+            null
+        }
+        val hasScope = account != null && try {
+            GoogleSignIn.hasPermissions(account, driveScope)
+        } catch (_: Throwable) {
+            false
+        }
         val resolvedEmail = (account?.account?.name ?: account?.email)?.takeIf { it.isNotBlank() && it != "authorized_user" && it != "null" }
             ?: getAuthorizedAccountEmail()
 
@@ -733,7 +751,7 @@ class GoogleDriveManager(
             if (_authStatus.value !is DriveAuthStatus.Authorized) {
                 saveAuthorizedAccount(resolvedEmail)
             }
-            return hasScope || account != null
+            return hasScope || account != null || (_authStatus.value is DriveAuthStatus.Authorized)
         }
         return false
     }
@@ -1104,11 +1122,34 @@ class GoogleDriveManager(
             val matchedRemoteFile = findMatchingRemoteFile(item, safeFileName, existingRemoteFiles)
 
             if (matchedRemoteFile != null || (remoteFilesResult.isFailure && item.isUploadedToDrive && !item.driveFileId.isNullOrBlank())) {
-                // File already exists in Google Drive folder: skip upload, ensure local status is recorded
                 val remoteId = matchedRemoteFile?.id ?: item.driveFileId
                 if (!remoteId.isNullOrBlank()) {
                     GraphiteRepository.updateNotebookDriveStatus(item.id, remoteId, true)
                 }
+
+                // Check if the local note has been updated since the remote file was created/modified
+                val isNoteUpdated = matchedRemoteFile != null &&
+                    matchedRemoteFile.modifiedTimeMillis > 0L &&
+                    item.updatedAtMillis > (matchedRemoteFile.modifiedTimeMillis + 2000L)
+
+                if (isNoteUpdated && !remoteId.isNullOrBlank()) {
+                    onProgress(i + 1, items.size, "Updating ${item.title}...")
+                    try {
+                        val pdfBytes = NotePdfGenerator.generatePdf(item)
+                        val updateRes = uploader.updateFile(
+                            accountEmail = accountEmail,
+                            fileId = remoteId,
+                            mimeType = "application/pdf",
+                            bytes = pdfBytes
+                        )
+                        if (updateRes.isSuccess) {
+                            uploadedCount++
+                        }
+                    } catch (e: Exception) {
+                        SafeLogger.e("GoogleDriveManager", "Failed to update note '${item.title}' in folder '${folder.name}': ${e.message}", e)
+                    }
+                }
+
                 onProgress(i + 1, items.size, item.title)
                 continue
             }
@@ -2501,31 +2542,6 @@ class GoogleDriveManager(
                 }
             }
 
-            // 3C. Synchronize folders with Google Drive: ensure matching Drive folders exist and contents are backed up without duplicates
-            val currentFolders = GraphiteRepository.getAllFoldersForActiveUser()
-            for (folder in currentFolders) {
-                try {
-                    val sanitizedName = folder.name.trim().takeIf { it.isNotBlank() } ?: "Folder"
-                    val targetDriveFolder = run {
-                        if (!folder.driveFolderId.isNullOrBlank()) {
-                            uploader.getFolder(accountEmail, folder.driveFolderId).getOrNull()
-                        } else null
-                    } ?: uploader.findFolderByName(accountEmail, sanitizedName).getOrNull()
-                      ?: uploader.listFolders(accountEmail).getOrDefault(emptyList()).find { it.name.equals(sanitizedName, ignoreCase = true) }
-                      ?: uploader.createFolder(accountEmail, sanitizedName, "root").getOrNull()
-
-                    if (targetDriveFolder != null) {
-                        GraphiteRepository.updateFolderDriveStatus(folder.id, targetDriveFolder.id, true)
-                        val folderNotes = currentNotes.filter { it.folderId == folder.id && !it.isDeleted }
-                        if (folderNotes.isNotEmpty()) {
-                            uploadEntireFolder(context, folder, folderNotes)
-                        }
-                    }
-                } catch (e: Exception) {
-                    SafeLogger.e("GoogleDriveManager", "Error syncing folder '${folder.name}' with Drive: ${e.message}", e)
-                }
-            }
-
             // 4. Serialize all local notes and folders for this user strictly
             val mergedJson = GraphiteRepository.exportNotesAsJson(userId = accountEmail)
             val uploadBytes = mergedJson.toByteArray(Charsets.UTF_8)
@@ -2539,8 +2555,7 @@ class GoogleDriveManager(
             }
 
             val totalNotes = GraphiteRepository.getAllNotesForActiveUser().filter { !it.isDeleted }.size
-            val totalFolders = GraphiteRepository.getAllFoldersForActiveUser().size
-            _notesSyncStatus.value = "Synced $totalNotes notes and $totalFolders folders to Google Drive"
+            _notesSyncStatus.value = "Synced $totalNotes notes to Google Drive"
             _isSyncingNotes.value = false
             Result.success(totalNotes)
         } catch (e: Exception) {

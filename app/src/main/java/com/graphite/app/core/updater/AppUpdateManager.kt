@@ -340,29 +340,34 @@ class AppUpdateManager(
                         .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                         .addHeader("Pragma", "no-cache")
                         .build()
-                    val resp = checkHttpClient.newCall(req).execute()
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: ""
-                        updateInfo = parseVersionJson(body)
+                    checkHttpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string() ?: ""
+                            updateInfo = parseVersionJson(body)
+                        }
                     }
                 } catch (_: Exception) {}
 
                 // Strategy 2: Fetch version.json from GitHub Releases latest download
                 if (updateInfo == null) {
-                    try {
-                        val releaseUrlWithParam = "$releaseVersionUrl?_nocache=$timestamp"
-                        val req = Request.Builder()
-                            .url(releaseUrlWithParam)
-                            .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
-                            .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
-                            .addHeader("Pragma", "no-cache")
-                            .build()
-                        val resp = checkHttpClient.newCall(req).execute()
-                        if (resp.isSuccessful) {
-                            val body = resp.body?.string() ?: ""
-                            updateInfo = parseVersionJson(body)
-                        }
-                    } catch (_: Exception) {}
+                    for (targetUrl in listOf(releaseVersionUrl, releaseVersionAltUrl)) {
+                        try {
+                            val releaseUrlWithParam = "$targetUrl?_nocache=$timestamp"
+                            val req = Request.Builder()
+                                .url(releaseUrlWithParam)
+                                .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
+                                .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                                .addHeader("Pragma", "no-cache")
+                                .build()
+                            checkHttpClient.newCall(req).execute().use { resp ->
+                                if (resp.isSuccessful) {
+                                    val body = resp.body?.string() ?: ""
+                                    updateInfo = parseVersionJson(body)
+                                }
+                            }
+                            if (updateInfo != null) break
+                        } catch (_: Exception) {}
+                    }
                 }
 
                 // Strategy 3: Query GitHub Releases API for latest release
@@ -374,47 +379,48 @@ class AppUpdateManager(
                             .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
                             .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                             .build()
-                        val apiResp = checkHttpClient.newCall(apiReq).execute()
-                        if (apiResp.isSuccessful) {
-                            val body = apiResp.body?.string() ?: ""
-                            if (body.isNotBlank()) {
-                                val latest = JSONObject(body)
-                                val tagName = latest.optString("tag_name", "latest")
-                                val releaseName = latest.optString("name", "New Graphite Build")
-                                val notes = latest.optString("body", "Bug fixes and improvements.")
-                                val publishedAt = latest.optString("published_at", "")
+                        checkHttpClient.newCall(apiReq).execute().use { apiResp ->
+                            if (apiResp.isSuccessful) {
+                                val body = apiResp.body?.string() ?: ""
+                                if (body.isNotBlank()) {
+                                    val latest = JSONObject(body)
+                                    val tagName = latest.optString("tag_name", "latest")
+                                    val releaseName = latest.optString("name", "New Graphite Build")
+                                    val notes = latest.optString("body", "Bug fixes and improvements.")
+                                    val publishedAt = latest.optString("published_at", "")
 
-                                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
-                                var apkSize = 0L
-                                val assets = latest.optJSONArray("assets")
-                                if (assets != null) {
-                                    for (i in 0 until assets.length()) {
-                                        val asset = assets.getJSONObject(i)
-                                        val name = asset.optString("name", "")
-                                        if (name.endsWith(".apk", ignoreCase = true)) {
-                                            apkUrl = asset.optString("browser_download_url", apkUrl)
-                                            apkSize = asset.optLong("size", 0L)
-                                            break
+                                    var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
+                                    var apkSize = 0L
+                                    val assets = latest.optJSONArray("assets")
+                                    if (assets != null) {
+                                        for (i in 0 until assets.length()) {
+                                            val asset = assets.getJSONObject(i)
+                                            val name = asset.optString("name", "")
+                                            if (name.endsWith(".apk", ignoreCase = true)) {
+                                                apkUrl = asset.optString("browser_download_url", apkUrl)
+                                                apkSize = asset.optLong("size", 0L)
+                                                break
+                                            }
                                         }
                                     }
+
+                                    val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
+                                    val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
+                                    val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
+                                        ?: commitRegex.find(notes)?.groupValues?.get(1)
+                                        ?: shaRegex.find(notes)?.groupValues?.get(1)
+                                        ?: tagName
+
+                                    updateInfo = UpdateInfo(
+                                        versionName = releaseName,
+                                        commitSha = releaseSha,
+                                        releaseNotes = notes,
+                                        downloadUrl = apkUrl,
+                                        publishedAt = publishedAt,
+                                        isNewer = false,
+                                        apkSize = apkSize
+                                    )
                                 }
-
-                                val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
-                                val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
-                                val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
-                                    ?: commitRegex.find(notes)?.groupValues?.get(1)
-                                    ?: shaRegex.find(notes)?.groupValues?.get(1)
-                                    ?: tagName
-
-                                updateInfo = UpdateInfo(
-                                    versionName = releaseName,
-                                    commitSha = releaseSha,
-                                    releaseNotes = notes,
-                                    downloadUrl = apkUrl,
-                                    publishedAt = publishedAt,
-                                    isNewer = false,
-                                    apkSize = apkSize
-                                )
                             }
                         }
                     } catch (_: Exception) {}
@@ -429,66 +435,67 @@ class AppUpdateManager(
                             .addHeader("User-Agent", "Graphite-Android-App/1.0.0")
                             .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
                             .build()
-                        val apiResp = checkHttpClient.newCall(apiReq).execute()
-                        if (apiResp.isSuccessful) {
-                            val body = apiResp.body?.string() ?: ""
-                            val releases = JSONArray(body)
-                            if (releases.length() > 0) {
-                                val latest = releases.getJSONObject(0)
-                                val tagName = latest.optString("tag_name", "latest")
-                                val releaseName = latest.optString("name", "New Graphite Build")
-                                val notes = latest.optString("body", "Bug fixes and improvements.")
-                                val publishedAt = latest.optString("published_at", "")
+                        checkHttpClient.newCall(apiReq).execute().use { apiResp ->
+                            if (apiResp.isSuccessful) {
+                                val body = apiResp.body?.string() ?: ""
+                                val releases = JSONArray(body)
+                                if (releases.length() > 0) {
+                                    val latest = releases.getJSONObject(0)
+                                    val tagName = latest.optString("tag_name", "latest")
+                                    val releaseName = latest.optString("name", "New Graphite Build")
+                                    val notes = latest.optString("body", "Bug fixes and improvements.")
+                                    val publishedAt = latest.optString("published_at", "")
 
-                                var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
-                                var apkSize = 0L
-                                val assets = latest.optJSONArray("assets")
-                                if (assets != null) {
-                                    for (i in 0 until assets.length()) {
-                                        val asset = assets.getJSONObject(i)
-                                        val name = asset.optString("name", "")
-                                        if (name.endsWith(".apk", ignoreCase = true)) {
-                                            apkUrl = asset.optString("browser_download_url", apkUrl)
-                                            apkSize = asset.optLong("size", 0L)
-                                            break
+                                    var apkUrl = "https://github.com/$githubRepo/releases/latest/download/Graphite-v1.0.0.apk"
+                                    var apkSize = 0L
+                                    val assets = latest.optJSONArray("assets")
+                                    if (assets != null) {
+                                        for (i in 0 until assets.length()) {
+                                            val asset = assets.getJSONObject(i)
+                                            val name = asset.optString("name", "")
+                                            if (name.endsWith(".apk", ignoreCase = true)) {
+                                                apkUrl = asset.optString("browser_download_url", apkUrl)
+                                                apkSize = asset.optLong("size", 0L)
+                                                break
+                                            }
                                         }
                                     }
+
+                                    val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
+                                    val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
+                                    val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
+                                        ?: commitRegex.find(notes)?.groupValues?.get(1)
+                                        ?: shaRegex.find(notes)?.groupValues?.get(1)
+                                        ?: tagName
+
+                                    updateInfo = UpdateInfo(
+                                        versionName = releaseName,
+                                        commitSha = releaseSha,
+                                        releaseNotes = notes,
+                                        downloadUrl = apkUrl,
+                                        publishedAt = publishedAt,
+                                        isNewer = false,
+                                        apkSize = apkSize
+                                    )
                                 }
-
-                                val shaRegex = Regex("\\(([a-f0-9]{7,10})\\)", RegexOption.IGNORE_CASE)
-                                val commitRegex = Regex("Commit:\\s*`?([a-f0-9]{7,10})`?", RegexOption.IGNORE_CASE)
-                                val releaseSha = shaRegex.find(releaseName)?.groupValues?.get(1)
-                                    ?: commitRegex.find(notes)?.groupValues?.get(1)
-                                    ?: shaRegex.find(notes)?.groupValues?.get(1)
-                                    ?: tagName
-
-                                updateInfo = UpdateInfo(
-                                    versionName = releaseName,
-                                    commitSha = releaseSha,
-                                    releaseNotes = notes,
-                                    downloadUrl = apkUrl,
-                                    publishedAt = publishedAt,
-                                    isNewer = false,
-                                    apkSize = apkSize
-                                )
                             }
                         }
                     } catch (_: Exception) {}
                 }
 
-                if (updateInfo == null) {
+                val resolvedInfo = updateInfo ?: run {
                     _updateState.value = UpdateState.Idle
                     withContext(Dispatchers.Main) { onComplete(false) }
                     return@launch
                 }
 
-                val releaseSha = updateInfo.commitSha.trim()
+                val releaseSha = resolvedInfo.commitSha.trim()
                 val localSha = BuildConfig.GIT_COMMIT_SHA.trim()
                 val localVersionCode = BuildConfig.VERSION_CODE
                 val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
 
                 var isNewer = false
-                if (updateInfo.versionCode > 0 && localVersionCode > 0 && updateInfo.versionCode > localVersionCode) {
+                if (resolvedInfo.versionCode > 0 && localVersionCode > 0 && resolvedInfo.versionCode > localVersionCode) {
                     isNewer = true
                 } else if (isDevBuild && releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
                     isNewer = true
@@ -497,12 +504,28 @@ class AppUpdateManager(
                             (releaseSha.length >= 7 && localSha.length >= 7 &&
                                     (releaseSha.startsWith(localSha, ignoreCase = true) || localSha.startsWith(releaseSha, ignoreCase = true)))
                     isNewer = !isSameCommit
-                } else if (updateInfo.publishedAt.isNotBlank() && BuildConfig.BUILD_TIME_MILLIS > 0L) {
+                } else if (resolvedInfo.publishedAt.isNotBlank() && BuildConfig.BUILD_TIME_MILLIS > 0L) {
                     try {
-                        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-                            timeZone = java.util.TimeZone.getTimeZone("UTC")
+                        val patterns = listOf(
+                            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                            "yyyy-MM-dd HH:mm z",
+                            "yyyy-MM-dd HH:mm 'UTC'",
+                            "yyyy-MM-dd HH:mm"
+                        )
+                        var remoteTime = 0L
+                        for (p in patterns) {
+                            try {
+                                val sdf = SimpleDateFormat(p, Locale.US).apply {
+                                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                                }
+                                val parsed = sdf.parse(resolvedInfo.publishedAt.trim())
+                                if (parsed != null) {
+                                    remoteTime = parsed.time
+                                    break
+                                }
+                            } catch (_: Exception) {}
                         }
-                        val remoteTime = sdf.parse(updateInfo.publishedAt)?.time ?: 0L
                         if (remoteTime > BuildConfig.BUILD_TIME_MILLIS + 60_000L) {
                             isNewer = true
                         }
@@ -510,7 +533,7 @@ class AppUpdateManager(
                 }
 
                 if (isNewer) {
-                    val finalInfo = updateInfo.copy(isNewer = true)
+                    val finalInfo = resolvedInfo.copy(isNewer = true)
                     _latestAvailableUpdate.value = finalInfo
 
                     if (context != null) {

@@ -148,7 +148,7 @@ class SupabaseSyncManager(
             }
 
             // 3A. Upload latest local folders registry note to Supabase
-            val localFolders = graphiteRepository.getAllFoldersForActiveUser()
+            val localFolders = graphiteRepository.getAllFoldersForActiveUser(includeDeleted = true)
             if (localFolders.isNotEmpty()) {
                 try {
                     val fArr = JSONArray()

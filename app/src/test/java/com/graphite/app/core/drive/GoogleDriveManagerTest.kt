@@ -1280,4 +1280,120 @@ class GoogleDriveManagerTest {
         assertEquals("Exactly 1 new file must be uploaded", 1, result.getOrNull())
         assertEquals("Only new file must be uploaded", listOf("Physics_Note_2__New_.pdf"), uploadedFileNames)
     }
+
+    @Test
+    fun testUploadEntireFolder_ReplacesUpdatedNoteInDriveWithoutDuplication() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "ayush@gmail.com")
+        var uploadCalls = 0
+        var updateFileCalls = 0
+        var updatedFileId: String? = null
+
+        val mockUploader = object : DriveApiV3Uploader {
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.success(
+                    listOf(
+                        DriveRemoteFile(
+                            id = "remote_note_id_123",
+                            name = "DSA_ASS.pdf",
+                            mimeType = "application/pdf",
+                            modifiedTimeMillis = 100_000L
+                        )
+                    )
+                )
+            }
+            override suspend fun listFolders(accountEmail: String): Result<List<DriveFolder>> {
+                return Result.success(listOf(DriveFolder("dsa_drive_folder_id", "DSA")))
+            }
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult {
+                uploadCalls++
+                return DriveUploadResult.Success("new_id", fileName, folderId)
+            }
+            override suspend fun updateFile(
+                accountEmail: String,
+                fileId: String,
+                mimeType: String,
+                bytes: ByteArray
+            ): Result<Unit> {
+                updateFileCalls++
+                updatedFileId = fileId
+                return Result.success(Unit)
+            }
+        }
+
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { mockUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val dummyContext = android.app.Application()
+        val folder = com.graphite.app.data.model.FolderItem(id = "folder_dsa", name = "DSA", noteCount = 1)
+        // Local note has been updated after remote modifiedTimeMillis (100_000 + 50_000)
+        val note = NotebookItem(
+            id = "dsa_note_1",
+            title = "DSA ASS",
+            folderId = "folder_dsa",
+            driveFileId = "remote_note_id_123",
+            updatedAtMillis = 150_000L
+        )
+
+        val result = manager.uploadEntireFolder(dummyContext, folder, listOf(note))
+
+        assertTrue("Upload must succeed", result.isSuccess)
+        assertEquals("Should report 1 file updated", 1, result.getOrNull())
+        assertEquals("uploader.upload must NOT be called (no duplicates created)", 0, uploadCalls)
+        assertEquals("uploader.updateFile must be called to replace old PDF in place", 1, updateFileCalls)
+        assertEquals("remote_note_id_123", updatedFileId)
+    }
+
+    @Test
+    fun testSyncNotesWithDrive_DoesNotUploadFoldersToDrive() = runBlocking {
+        secureStorage.putString("google_drive_authorized_account_email", "ayush@gmail.com")
+        com.graphite.app.data.repository.GraphiteRepository.setActiveUser("ayush@gmail.com")
+        var folderUploadAttempted = false
+
+        val mockUploader = object : DriveApiV3Uploader {
+            override suspend fun listFiles(accountEmail: String, folderId: String): Result<List<DriveRemoteFile>> {
+                return Result.success(emptyList())
+            }
+            override suspend fun listFolders(accountEmail: String): Result<List<DriveFolder>> {
+                return Result.success(listOf(DriveFolder("app_notes_folder_id", "Graphite_Notes_Backup")))
+            }
+            override suspend fun findFolderByName(accountEmail: String, folderName: String): Result<DriveFolder?> {
+                return Result.success(DriveFolder("app_notes_folder_id", "Graphite_Notes_Backup"))
+            }
+            override suspend fun upload(
+                accountEmail: String,
+                fileName: String,
+                mimeType: String,
+                contentBytes: ByteArray,
+                folderId: String?
+            ): DriveUploadResult {
+                if (fileName != "graphite_notes_backup.json" && !fileName.startsWith("doc_")) {
+                    folderUploadAttempted = true
+                }
+                return DriveUploadResult.Success("file_id_backup", fileName, folderId)
+            }
+            override suspend fun findFileByName(accountEmail: String, fileName: String, parentFolderId: String?): Result<DriveRemoteFile?> {
+                return Result.success(null)
+            }
+        }
+
+        val manager = GoogleDriveManager(
+            secureStorage = secureStorage,
+            uploaderProvider = { mockUploader },
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val dummyContext = android.app.Application()
+
+        val result = manager.syncNotesWithDrive(dummyContext)
+
+        assertTrue(result.isSuccess)
+        assertFalse("syncNotesWithDrive must NOT upload user folders to Google Drive", folderUploadAttempted)
+    }
 }
