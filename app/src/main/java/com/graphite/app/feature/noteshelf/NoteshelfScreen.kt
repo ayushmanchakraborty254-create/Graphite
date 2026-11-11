@@ -137,8 +137,13 @@ fun NoteshelfScreen(
         googleAccountManager.handleSignInResult(result.data)
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(hasActiveSession) {
         GraphiteRepository.cleanNotebookDuplicatesAndGhosts()
+        if (hasActiveSession) {
+            withContext(Dispatchers.IO) {
+                googleAccountManager.ensureAuthenticatedWithSupabase(context)
+            }
+        }
         syncManager.triggerAutoSync(debounceMs = 0L)
     }
 

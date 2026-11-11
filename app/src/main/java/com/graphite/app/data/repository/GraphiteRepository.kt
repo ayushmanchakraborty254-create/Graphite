@@ -1355,12 +1355,12 @@ object GraphiteRepository {
             id = obj.optString("id", UUID.randomUUID().toString()),
             name = obj.optString("name", "Folder"),
             noteCount = obj.optInt("noteCount", 0),
-            parentId = if (obj.has("parentId")) obj.optString("parentId") else null,
+            parentId = if (obj.has("parentId")) obj.optString("parentId").takeIf { it.isNotBlank() && it != "null" } else null,
             colorHex = if (obj.has("colorHex")) obj.optLong("colorHex", 0xFFFFD54FL) else 0xFFFFD54FL,
-            userId = if (obj.has("userId")) obj.optString("userId") else null,
+            userId = if (obj.has("userId")) obj.optString("userId").takeIf { it.isNotBlank() && it != "null" } else null,
             isStarred = obj.optBoolean("isStarred", false),
             isUploadedToDrive = obj.optBoolean("isUploadedToDrive", false),
-            driveFolderId = if (obj.has("driveFolderId")) obj.optString("driveFolderId") else null,
+            driveFolderId = if (obj.has("driveFolderId")) obj.optString("driveFolderId").takeIf { it.isNotBlank() && it != "null" } else null,
             isDeleted = obj.optBoolean("isDeleted", false),
             updatedAtMillis = obj.optLong("updatedAtMillis", 0L)
         )

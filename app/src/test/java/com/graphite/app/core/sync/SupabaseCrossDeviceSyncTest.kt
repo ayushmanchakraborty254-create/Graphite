@@ -452,4 +452,38 @@ class SupabaseCrossDeviceSyncTest {
         // Verify folder is deleted on Device B
         assertEquals("Deleted folder tombstone must remove folder on Device B", 0, GraphiteRepository.folders.value.size)
     }
+
+    @Test
+    fun testEmptyFolderSyncsAcrossDevicesViaSupabase() = runBlocking {
+        val userId = "alice_empty_folder_sync_test"
+
+        // Device A: Alice creates an empty folder "s" (0 notes)
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.addFolder(name = "s", colorHex = 0xFFFFD54FL)
+        assertEquals(1, GraphiteRepository.folders.value.size)
+        val folder = GraphiteRepository.folders.value[0]
+        assertEquals("s", folder.name)
+
+        // Device A syncs with Supabase
+        val syncManagerA = createSyncManagerForUser(userId)
+        val resultA = syncManagerA.syncNotes()
+        assertTrue("Sync on Device A must succeed", resultA.isSuccess)
+
+        // Simulate Device B: clean repository with no local folders
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        assertEquals(0, GraphiteRepository.folders.value.size)
+
+        // Device B syncs with Supabase
+        val syncManagerB = createSyncManagerForUser(userId)
+        val resultB = syncManagerB.syncNotes()
+        assertTrue("Sync on Device B must succeed", resultB.isSuccess)
+
+        // Device B must receive empty folder "s"
+        val syncedFolders = GraphiteRepository.folders.value
+        assertEquals("Device B must receive the empty folder 's' from Supabase", 1, syncedFolders.size)
+        assertEquals("s", syncedFolders[0].name)
+        assertEquals(folder.id, syncedFolders[0].id)
+        assertEquals(0xFFFFD54FL, syncedFolders[0].colorHex)
+    }
 }

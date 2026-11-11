@@ -30,6 +30,10 @@ class SupabaseSyncManager(
     private val _syncStatus = MutableStateFlow<SupabaseSyncStatus>(SupabaseSyncStatus.Idle)
     val syncStatus: StateFlow<SupabaseSyncStatus> = _syncStatus.asStateFlow()
 
+    private fun getFolderRegistryId(userId: String): String {
+        return java.util.UUID.nameUUIDFromBytes("graphite_folders_registry_$userId".toByteArray()).toString()
+    }
+
     /**
      * Silently triggers automatic background synchronization for notes with debouncing.
      * Safe to call on note edits, app startup, tab navigation, or note deletions.
@@ -69,6 +73,10 @@ class SupabaseSyncManager(
             )
         }
 
+        val session = freshSessionResult.getOrNull() ?: authManager.currentSession
+        val activeUid = authManager.currentUserId ?: session?.user?.id ?: graphiteRepository.getActiveUserId() ?: "user"
+        val foldersRegistryId = getFolderRegistryId(activeUid)
+
         _syncStatus.value = SupabaseSyncStatus.Syncing
 
         try {
@@ -83,7 +91,12 @@ class SupabaseSyncManager(
             val rawRemoteNotes = remoteNotesResult.getOrThrow()
 
             // 1A. Reconcile folders from Supabase registry note
-            val foldersRegistryNote = rawRemoteNotes.find { it.id == "graphite_folders_registry" || it.title == "__GRAPHITE_FOLDERS__" }
+            val foldersRegistryCandidates = rawRemoteNotes.filter {
+                it.id == foldersRegistryId ||
+                it.id == "graphite_folders_registry" ||
+                it.title == "__GRAPHITE_FOLDERS__"
+            }
+            val foldersRegistryNote = foldersRegistryCandidates.maxByOrNull { it.updatedAtMillis }
             if (foldersRegistryNote != null) {
                 try {
                     val line = foldersRegistryNote.previewLines.find { it.contains("[GRAPHITE_FOLDERS_START]") }
@@ -95,12 +108,27 @@ class SupabaseSyncManager(
                         for (i in 0 until arr.length()) {
                             remoteFolders.add(graphiteRepository.folderFromJson(arr.getJSONObject(i)))
                         }
-                        graphiteRepository.reconcileRemoteFolders(remoteFolders)
+                        graphiteRepository.reconcileRemoteFolders(remoteFolders, targetUserId = graphiteRepository.getActiveUserId())
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    android.util.Log.e("SupabaseSyncManager", "Failed to deserialize folders registry: ${e.message}", e)
+                }
             }
 
-            val remoteNotes = rawRemoteNotes.filter { it.id != "graphite_folders_registry" && it.title != "__GRAPHITE_FOLDERS__" }
+            // Clean up any old duplicate or non-UUID registry notes from Supabase
+            for (dup in foldersRegistryCandidates) {
+                if (dup.id != foldersRegistryId) {
+                    try {
+                        notesRepository.deleteNote(dup.id)
+                    } catch (_: Exception) {}
+                }
+            }
+
+            val remoteNotes = rawRemoteNotes.filter {
+                it.id != foldersRegistryId &&
+                it.id != "graphite_folders_registry" &&
+                it.title != "__GRAPHITE_FOLDERS__"
+            }
 
             // Detect and purge any cloud duplicate ghost notes with identical titles
             val duplicateRemoteIdsToPurge = mutableListOf<String>()
@@ -150,20 +178,23 @@ class SupabaseSyncManager(
             // 3A. Upload latest local folders registry note to Supabase
             val localFolders = graphiteRepository.getAllFoldersForActiveUser(includeDeleted = true)
             if (localFolders.isNotEmpty()) {
-                try {
-                    val fArr = JSONArray()
-                    for (f in localFolders) {
-                        fArr.put(graphiteRepository.folderToJson(f))
-                    }
-                    val registryNote = NotebookItem(
-                        id = "graphite_folders_registry",
-                        title = "__GRAPHITE_FOLDERS__",
-                        folderId = "system",
-                        previewLines = listOf("[GRAPHITE_FOLDERS_START]$fArr[GRAPHITE_FOLDERS_END]"),
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                    notesRepository.upsertNotes(listOf(registryNote))
-                } catch (_: Exception) {}
+                val fArr = JSONArray()
+                for (f in localFolders) {
+                    fArr.put(graphiteRepository.folderToJson(f))
+                }
+                val registryNote = NotebookItem(
+                    id = foldersRegistryId,
+                    userId = activeUid,
+                    title = "__GRAPHITE_FOLDERS__",
+                    folderId = "system",
+                    previewLines = listOf("[GRAPHITE_FOLDERS_START]$fArr[GRAPHITE_FOLDERS_END]"),
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+                val upsertResult = notesRepository.upsertNotes(listOf(registryNote))
+                if (upsertResult.isFailure) {
+                    val err = upsertResult.exceptionOrNull()
+                    android.util.Log.e("SupabaseSyncManager", "Failed to upsert folder registry note: ${err?.message}", err)
+                }
             }
 
             // 4. Reconcile remote changes into local workspace (Last-Write-Wins and Tombstones)
