@@ -1004,10 +1004,12 @@ fun NoteshelfScreen(
                                     ).show()
                                 }
                             )
+                            val currentActiveFolder = folders.find { it.id == selectedCategory }
                             DropdownMenuItem(
-                                text = { Text("New Folder", color = GraphiteOrange) },
+                                text = { Text(if (currentActiveFolder != null) "New Subfolder" else "New Folder", color = GraphiteOrange) },
                                 onClick = {
                                     moreMenuExpanded = false
+                                    selectedParentFolderForSubfolder = currentActiveFolder
                                     showNewFolderDialog = true
                                 }
                             )
@@ -1234,18 +1236,31 @@ fun NoteshelfScreen(
 
                 val activeFolder = folders.find { it.id == selectedCategory }
                 val isInsideFolder = activeFolder != null
-                val hasFoldersToShow = hasActiveSession && showFoldersOnNotesScreen && (selectedCategory == "All Notes" || selectedCategory == "Starred") && searchQuery.isBlank() && folders.isNotEmpty()
-                val rootFoldersToShow = if (hasFoldersToShow) {
-                    if (selectedCategory == "Starred") {
-                        folders.filter { it.isStarred }
-                    } else {
-                        folders.filter { it.parentId == null }
-                    }
+                val subfoldersInsideCurrentFolder = if (isInsideFolder && activeFolder != null) {
+                    folders.filter { it.parentId == activeFolder.id }
                 } else emptyList()
+
+                val foldersToShow = if (hasActiveSession && showFoldersOnNotesScreen && searchQuery.isBlank()) {
+                    if (isInsideFolder && activeFolder != null) {
+                        subfoldersInsideCurrentFolder
+                    } else if (selectedCategory == "Starred") {
+                        folders.filter { it.isStarred }
+                    } else if (selectedCategory == "All Notes") {
+                        folders.filter { it.parentId == null }
+                    } else emptyList()
+                } else emptyList()
+
+                val hasFoldersToShow = foldersToShow.isNotEmpty()
 
                 // Filter / Category Chips Row matching Image 1
                 if (selectedCategory != "Trash") {
                     if (isInsideFolder && activeFolder != null) {
+                        val parentFolder = if (activeFolder.parentId != null) {
+                            folders.find { it.id == activeFolder.parentId }
+                        } else null
+                        val backTargetCategory = parentFolder?.id ?: "All Notes"
+                        val backButtonLabel = parentFolder?.name ?: "All Notes"
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1260,17 +1275,17 @@ fun NoteshelfScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
-                                    .clickable { selectedCategory = "All Notes" }
+                                    .clickable { selectedCategory = backTargetCategory }
                                     .padding(4.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back to All Notes",
+                                    contentDescription = "Back to $backButtonLabel",
                                     tint = GraphiteOrange,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("All Notes", color = GraphiteOrange, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text(backButtonLabel, color = GraphiteOrange, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1414,7 +1429,7 @@ fun NoteshelfScreen(
                     }
                 }
 
-                if (sortedNotebooks.isEmpty() && rootFoldersToShow.isEmpty()) {
+                if (sortedNotebooks.isEmpty() && foldersToShow.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -1476,7 +1491,7 @@ fun NoteshelfScreen(
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
                         if (hasFoldersToShow) {
-                            items(rootFoldersToShow, key = { "folder_list_${it.id}" }) { folder ->
+                            items(foldersToShow, key = { "folder_list_${it.id}" }) { folder ->
                                 val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
                                 FolderListRow(
                                     folder = folder,
@@ -1576,7 +1591,7 @@ fun NoteshelfScreen(
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
                         if (hasFoldersToShow) {
-                            items(rootFoldersToShow, key = { "folder_${it.id}" }) { folder ->
+                            items(foldersToShow, key = { "folder_${it.id}" }) { folder ->
                                 val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
                                 FolderThumbnailCard(
                                     folder = folder,
@@ -2123,17 +2138,19 @@ fun NoteshelfScreen(
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
                                 showCreationOptionsSheet = false
-                                selectedParentFolderForSubfolder = null
+                                val activeF = folders.find { it.id == selectedCategory }
+                                selectedParentFolderForSubfolder = activeF
                                 showNewFolderDialog = true
                             }
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val activeF = folders.find { it.id == selectedCategory }
                         Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = Color(0xFFFFD54F), modifier = Modifier.size(22.dp))
                         Spacer(modifier = Modifier.width(14.dp))
                         Column {
-                            Text("New Folder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("Create a folder or subfolder for organizing notes", color = Color.Gray, fontSize = 11.sp)
+                            Text(if (activeF != null) "New Subfolder" else "New Folder", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(if (activeF != null) "Create a subfolder inside ${activeF.name}" else "Create a folder or subfolder for organizing notes", color = Color.Gray, fontSize = 11.sp)
                         }
                     }
                 }

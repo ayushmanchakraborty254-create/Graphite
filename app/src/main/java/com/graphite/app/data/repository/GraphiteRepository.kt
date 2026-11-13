@@ -867,7 +867,10 @@ object GraphiteRepository {
         for (remote in remoteFolders) {
             val localById = localMap[remote.id]
             val localByName = if (localById == null) {
-                localMap.values.find { it.name.trim().equals(remote.name.trim(), ignoreCase = true) }
+                localMap.values.find {
+                    it.name.trim().equals(remote.name.trim(), ignoreCase = true) &&
+                    it.parentId == remote.parentId
+                }
             } else null
 
             val local = localById ?: localByName

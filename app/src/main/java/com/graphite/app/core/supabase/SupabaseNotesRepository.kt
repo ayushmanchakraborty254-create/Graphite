@@ -421,7 +421,8 @@ class SupabaseNotesRepository(
 
     suspend fun deleteNote(notebookId: String): Result<Unit> = withContext(ioDispatcher) {
         try {
-            getAuthenticatedSession()
+            val session = getAuthenticatedSession()
+            val userId = authManager.currentUserId ?: session.user.id
             val now = System.currentTimeMillis()
             val patchBody = buildJsonObject {
                 put("is_deleted", true)
@@ -429,48 +430,55 @@ class SupabaseNotesRepository(
                 put("updated_at", "Deleted")
             }.toString()
 
-            // 1. Attempt true HTTP DELETE to permanently purge row from Supabase
-            var isPurged = false
-            try {
-                executeWithRetry { token ->
-                    Request.Builder()
-                        .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
-                        .header("apikey", publishableKey)
-                        .header("Authorization", "Bearer $token")
-                        .header("Prefer", "return=representation")
-                        .delete()
-                        .build()
-                }.use { response ->
-                    val body = response.body?.string()?.trim() ?: ""
-                    if (response.isSuccessful && (response.code == 204 || (body.isNotBlank() && body != "[]"))) {
-                        isPurged = true
-                    }
-                }
-            } catch (_: Exception) {}
-
-            if (isPurged) {
-                return@withContext Result.success(Unit)
-            }
-
-            // 2. If DELETE was not supported by RLS policy, fallback to HTTP PATCH with tombstone
+            // Strict cross-device sync requirement: Always store tombstone (is_deleted = true) in Supabase.
+            // Never execute a raw HTTP DELETE that purges the row, because other offline/paired devices
+            // would see a missing remote row and mistakenly re-upload their local copy back to the cloud.
+            var patched = false
             executeWithRetry { token ->
                 Request.Builder()
                     .url("$baseUrl/rest/v1/notebooks?id=eq.$notebookId")
                     .header("apikey", publishableKey)
                     .header("Authorization", "Bearer $token")
                     .header("Content-Type", "application/json")
-                    .header("Prefer", "return=minimal")
+                    .header("Prefer", "return=representation")
                     .patch(patchBody.toRequestBody("application/json".toMediaType()))
                     .build()
             }.use { response ->
-                if (!response.isSuccessful && response.code != 404) {
-                    val body = response.body?.string() ?: ""
-                    return@withContext Result.failure(
-                        IOException("HTTP ${response.code} deleting note: $body")
-                    )
+                val body = response.body?.string()?.trim() ?: ""
+                if (response.isSuccessful && body.isNotBlank() && body != "[]") {
+                    patched = true
                 }
-                Result.success(Unit)
             }
+
+            if (!patched) {
+                // If row did not exist on Supabase yet, upsert a tombstone record so other devices observe deletion
+                val tombstoneDto = SupabaseNotebookDto(
+                    id = notebookId,
+                    userId = userId,
+                    title = "Deleted",
+                    isDeleted = true,
+                    updatedAtMillis = now,
+                    updatedAt = "Deleted"
+                )
+                val payload = json.encodeToString(listOf(tombstoneDto))
+                executeWithRetry { token ->
+                    Request.Builder()
+                        .url("$baseUrl/rest/v1/notebooks?on_conflict=id")
+                        .header("apikey", publishableKey)
+                        .header("Authorization", "Bearer $token")
+                        .header("Content-Type", "application/json")
+                        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+                        .post(payload.toRequestBody("application/json".toMediaType()))
+                        .build()
+                }.use { response ->
+                    if (!response.isSuccessful && response.code != 404) {
+                        val body = response.body?.string() ?: ""
+                        android.util.Log.e("SupabaseNotesRepository", "HTTP ${response.code} upserting delete tombstone: $body")
+                    }
+                }
+            }
+
+            Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }

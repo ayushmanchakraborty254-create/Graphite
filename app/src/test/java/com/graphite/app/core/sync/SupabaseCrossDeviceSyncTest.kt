@@ -111,6 +111,38 @@ class SupabaseCrossDeviceSyncTest {
                             .body("[{}]".toResponseBody("application/json".toMediaType()))
                             .build()
                     }
+                    "PATCH" -> {
+                        val requestBodyString = request.body?.let { body ->
+                            val buffer = okio.Buffer()
+                            body.writeTo(buffer)
+                            buffer.readUtf8()
+                        } ?: "{}"
+                        val noteId = request.url.queryParameter("id")?.removePrefix("eq.")
+                        val existing = cloudTable[noteId]
+                        if (existing != null) {
+                            val patched = if (requestBodyString.contains("\"is_deleted\":true") || requestBodyString.contains("\"is_deleted\": true")) {
+                                existing.copy(isDeleted = true, updatedAtMillis = System.currentTimeMillis())
+                            } else {
+                                existing
+                            }
+                            cloudTable[existing.id] = patched
+                            Response.Builder()
+                                .request(request)
+                                .protocol(Protocol.HTTP_1_1)
+                                .code(200)
+                                .message("OK")
+                                .body("[{}]".toResponseBody("application/json".toMediaType()))
+                                .build()
+                        } else {
+                            Response.Builder()
+                                .request(request)
+                                .protocol(Protocol.HTTP_1_1)
+                                .code(200)
+                                .message("OK")
+                                .body("[]".toResponseBody("application/json".toMediaType()))
+                                .build()
+                        }
+                    }
                     else -> {
                         Response.Builder()
                             .request(request)
@@ -485,5 +517,98 @@ class SupabaseCrossDeviceSyncTest {
         assertEquals("s", syncedFolders[0].name)
         assertEquals(folder.id, syncedFolders[0].id)
         assertEquals(0xFFFFD54FL, syncedFolders[0].colorHex)
+    }
+
+    @Test
+    fun testSubfoldersSyncAcrossDevicesWithParentIdPreserved() = runBlocking {
+        val userId = "alice_subfolders_sync_test"
+
+        // Device A: Alice creates parent folder "DSA" and subfolders "Practical" & "Theory"
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.addFolder(name = "DSA", colorHex = 0xFFFFD54FL)
+        val dsaFolder = GraphiteRepository.folders.value.first { it.name == "DSA" }
+
+        GraphiteRepository.addFolder(name = "Practical", parentId = dsaFolder.id, colorHex = 0xFFFFD54FL)
+        GraphiteRepository.addFolder(name = "Theory", parentId = dsaFolder.id, colorHex = 0xFFFFD54FL)
+        assertEquals(3, GraphiteRepository.folders.value.size)
+
+        // Device A syncs with Supabase
+        val syncManagerA = createSyncManagerForUser(userId)
+        val resultA = syncManagerA.syncNotes()
+        assertTrue("Device A sync must succeed", resultA.isSuccess)
+
+        // Simulate Device B: clean repository
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        assertEquals(0, GraphiteRepository.folders.value.size)
+
+        // Device B syncs with Supabase
+        val syncManagerB = createSyncManagerForUser(userId)
+        val resultB = syncManagerB.syncNotes()
+        assertTrue("Device B sync must succeed", resultB.isSuccess)
+
+        // Device B must have all 3 folders with correct hierarchy
+        val synced = GraphiteRepository.folders.value
+        assertEquals("Device B must receive 3 folders", 3, synced.size)
+        val bDsa = synced.first { it.name == "DSA" }
+        assertNull("DSA must be root folder", bDsa.parentId)
+
+        val bPractical = synced.first { it.name == "Practical" }
+        assertEquals("Practical parentId must match DSA id", bDsa.id, bPractical.parentId)
+
+        val bTheory = synced.first { it.name == "Theory" }
+        assertEquals("Theory parentId must match DSA id", bDsa.id, bTheory.parentId)
+    }
+
+    @Test
+    fun testDeleteFromCloudTombstoneDeletesNoteOnOtherDeviceAndNeverResurrects() = runBlocking {
+        val userId = "alice_cloud_delete_sync_test"
+
+        // Device A: Alice creates a note
+        GraphiteRepository.setActiveUser(userId)
+        val note = GraphiteRepository.createNotebook("Operating Systems")
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+
+        // Device A syncs with Supabase
+        val syncManagerA = createSyncManagerForUser(userId)
+        assertTrue(syncManagerA.syncNotes().isSuccess)
+
+        // Device B: syncs and receives the note
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        val syncManagerB = createSyncManagerForUser(userId)
+        assertTrue(syncManagerB.syncNotes().isSuccess)
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+        assertEquals("Operating Systems", GraphiteRepository.notebooks.value[0].title)
+
+        // Device A: deletes note from cloud & device
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        // Device A deletes from cloud via deleteNoteFromCloud
+        val delResult = syncManagerA.deleteNoteFromCloud(note.id)
+        assertTrue("deleteNoteFromCloud must succeed", delResult.isSuccess)
+        GraphiteRepository.permanentlyDeleteNotebook(note.id)
+        assertEquals(0, GraphiteRepository.notebooks.value.size)
+
+        // Device B: simulates having the note locally before sync
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        GraphiteRepository.importNotesFromJson("{\"notes\":[{\"id\":\"${note.id}\",\"title\":\"Operating Systems\",\"isDeleted\":false,\"updatedAtMillis\":${note.updatedAtMillis}}]}", userId = userId)
+        assertEquals(1, GraphiteRepository.notebooks.value.size)
+
+        // Device B re-syncs with cloud
+        val resultBSync = syncManagerB.syncNotes()
+        assertTrue("Device B sync must succeed", resultBSync.isSuccess)
+
+        // On re-sync, the note must be deleted from Device B too!
+        assertEquals("Deleted note from cloud must be removed from Device B on re-sync", 0, GraphiteRepository.notebooks.value.size)
+
+        // Verify Device B did not re-upload the deleted note back to cloud
+        // Verify by syncing Device A again
+        GraphiteRepository.clearAllDataForTesting()
+        GraphiteRepository.setActiveUser(userId)
+        val resultASync2 = syncManagerA.syncNotes()
+        assertTrue(resultASync2.isSuccess)
+        assertEquals("Note must never resurrect on Device A", 0, GraphiteRepository.notebooks.value.size)
     }
 }
