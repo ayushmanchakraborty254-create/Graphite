@@ -1,8 +1,8 @@
 {
-  "versionCode": 93,
+  "versionCode": 95,
   "versionName": "1.0.0",
-  "commitSha": "85a0e97",
-  "commitMessage": "feat(noteshelf): tablet landscape scrolling, direct folder imports, fast PDF/image imports, multi-file drag-drop, and subfolder dropdowns",
-  "buildDate": "2026-11-13 10:25 UTC",
+  "commitSha": "54ae83a",
+  "commitMessage": "chore: update commitSha in version.json",
+  "buildDate": "2026-11-13 10:34 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
