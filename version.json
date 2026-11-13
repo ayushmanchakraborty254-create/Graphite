@@ -1,8 +1,8 @@
 {
-  "versionCode": 90,
+  "versionCode": 92,
   "versionName": "1.0.0",
-  "commitSha": "2140a97",
-  "commitMessage": "fix(sync): ensure deterministic UUID folder registry note and cross-device sync",
-  "buildDate": "2026-11-11 13:59 UTC",
+  "commitSha": "0812b24",
+  "commitMessage": "fix(noteshelf): display subfolders inside parent folders and enforce tombstone deletion sync",
+  "buildDate": "2026-11-13 02:34 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
