@@ -1,8 +1,8 @@
 {
-  "versionCode": 92,
+  "versionCode": 93,
   "versionName": "1.0.0",
-  "commitSha": "0812b24",
-  "commitMessage": "fix(noteshelf): display subfolders inside parent folders and enforce tombstone deletion sync",
-  "buildDate": "2026-11-13 02:34 UTC",
+  "commitSha": "HEAD",
+  "commitMessage": "feat(noteshelf): tablet landscape scrolling, direct folder imports, fast PDF/image imports, multi-file drag-drop, and subfolder dropdowns",
+  "buildDate": "2026-11-13 10:25 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }

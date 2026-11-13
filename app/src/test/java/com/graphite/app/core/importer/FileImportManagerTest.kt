@@ -392,6 +392,57 @@ class FileImportManagerTest {
         val error = result as ImportResult.Error
         assertTrue("Error message must mention only PDF supported", error.message.contains("Only PDF"))
     }
+
+    @Test
+    fun testImportImageToNotesPreservesFormatAndSetsHasPhotos() = runBlocking {
+        val importManager = FileImportManager(
+            graphiteRepository = GraphiteRepository,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val mockContext = Application()
+        val fakeImageBytes = byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4E.toByte(), 0x47.toByte(), 0x0D.toByte(), 0x0A.toByte(), 0x1A.toByte(), 0x0A.toByte())
+
+        val result = importManager.importFromBytes(
+            context = mockContext,
+            displayName = "LectureNotesScan.png",
+            mimeType = "image/png",
+            bytes = fakeImageBytes,
+            target = ImportDestination.NOTES,
+            folderId = "folder_math"
+        )
+
+        assertTrue("Result must be SuccessNotebook", result is ImportResult.SuccessNotebook)
+        val notebook = (result as ImportResult.SuccessNotebook).notebook
+        assertEquals("LectureNotesScan", notebook.title)
+        assertEquals("folder_math", notebook.folderId)
+        assertTrue("hasPhotos must be true for image notes", notebook.hasPhotos)
+        assertEquals(1, notebook.pageCount)
+        assertEquals("image/png", notebook.mimeType)
+    }
+
+    @Test
+    fun testImportDocumentWithTargetFolderPlacesNoteInFolder() = runBlocking {
+        val importManager = FileImportManager(
+            graphiteRepository = GraphiteRepository,
+            ioDispatcher = Dispatchers.Unconfined
+        )
+        val mockContext = Application()
+        val pdfBytes = "%PDF-1.4 sample content %%EOF".toByteArray(Charsets.ISO_8859_1)
+
+        val result = importManager.importFromBytes(
+            context = mockContext,
+            displayName = "DSA_Assignment.pdf",
+            mimeType = "application/pdf",
+            bytes = pdfBytes,
+            target = ImportDestination.NOTES,
+            folderId = "dsa_subfolder_practical"
+        )
+
+        assertTrue("Result must be SuccessNotebook", result is ImportResult.SuccessNotebook)
+        val notebook = (result as ImportResult.SuccessNotebook).notebook
+        assertEquals("DSA_Assignment", notebook.title)
+        assertEquals("dsa_subfolder_practical", notebook.folderId)
+    }
 }
 
 

@@ -690,6 +690,39 @@ fun CanvasEditorScreen(
 
                             renderer.close()
                             pfd.close()
+                        } else if (ext in listOf("png", "jpg", "jpeg", "webp", "gif", "bmp") || (notebook?.mimeType?.startsWith("image/") == true)) {
+                            val boundsOptions = android.graphics.BitmapFactory.Options().apply {
+                                inJustDecodeBounds = true
+                            }
+                            android.graphics.BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
+                            val origW = boundsOptions.outWidth.coerceAtLeast(1)
+                            val origH = boundsOptions.outHeight.coerceAtLeast(1)
+
+                            var inSampleSize = 1
+                            val maxDim = 3000
+                            while ((origW / inSampleSize) > maxDim || (origH / inSampleSize) > maxDim) {
+                                inSampleSize *= 2
+                            }
+
+                            val decodeOptions = android.graphics.BitmapFactory.Options().apply {
+                                this.inSampleSize = inSampleSize
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
+                            }
+                            val bmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+                            if (bmp != null) {
+                                val ar = bmp.height.toFloat() / bmp.width.toFloat().coerceAtLeast(1f)
+                                val thumbW = 160
+                                val thumbH = ((thumbW.toFloat() / bmp.width) * bmp.height).toInt().coerceIn(180, 240)
+                                val thumbBmp = Bitmap.createScaledBitmap(bmp, thumbW, thumbH, true)
+
+                                withContext(Dispatchers.Main) {
+                                    pdfPageCount = 1
+                                    totalPages = maxOf(totalPages, 1)
+                                    pdfBitmaps[0] = bmp
+                                    pdfAspectRatio = ar
+                                    pageThumbnails[0] = thumbBmp
+                                }
+                            }
                         } else {
                             val bytes = file.readBytes()
                             val parsed = DocumentContentParser.parse(bytes, file.name, notebook.mimeType)

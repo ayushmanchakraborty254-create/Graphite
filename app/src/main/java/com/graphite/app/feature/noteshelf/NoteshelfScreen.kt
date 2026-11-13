@@ -27,6 +27,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -200,6 +201,21 @@ fun NoteshelfScreen(
     var totalDragDistance by remember { mutableFloatStateOf(0f) }
     var hoveredFolderId by remember { mutableStateOf<String?>(null) }
     val folderBoundsMap = remember { mutableMapOf<String, Rect>() }
+    var expandedFolderIds by remember { mutableStateOf(setOf<String>()) }
+
+    // Auto-expand folder dropdown when hovered during drag-and-drop
+    LaunchedEffect(hoveredFolderId, isDraggingNote) {
+        if (isDraggingNote && hoveredFolderId != null) {
+            val targetId = hoveredFolderId!!
+            val hasSubfolders = folders.any { it.parentId == targetId }
+            if (hasSubfolders && targetId !in expandedFolderIds) {
+                kotlinx.coroutines.delay(350L)
+                if (isDraggingNote && hoveredFolderId == targetId) {
+                    expandedFolderIds = expandedFolderIds + targetId
+                }
+            }
+        }
+    }
 
     // Folder upload state
     var uploadingFolderInfo by remember { mutableStateOf<Pair<FolderItem, Triple<Int, Int, String>?>?>(null) }
@@ -225,9 +241,10 @@ fun NoteshelfScreen(
         if (uris.isNotEmpty()) {
             isImportingFile = true
             scope.launch {
+                val currentFolderId = folders.find { it.id == selectedCategory }?.id ?: "unfiled"
                 if (uris.size == 1) {
                     importProgressText = "Reading and validating document from tablet storage..."
-                    val result = fileImportManager.importToNotes(context, uris[0])
+                    val result = fileImportManager.importToNotes(context, uris[0], folderId = currentFolderId)
                     isImportingFile = false
                     when (result) {
                         is ImportResult.SuccessNotebook -> {
@@ -248,7 +265,7 @@ fun NoteshelfScreen(
                     for ((index, uri) in uris.withIndex()) {
                         importProgressText = "Importing document ${index + 1} of $total..."
                         try {
-                            when (fileImportManager.importToNotes(context, uri)) {
+                            when (fileImportManager.importToNotes(context, uri, folderId = currentFolderId)) {
                                 is ImportResult.SuccessNotebook, is ImportResult.SuccessBook -> {
                                     successCount++
                                 }
@@ -265,6 +282,59 @@ fun NoteshelfScreen(
                         failCount == 0 -> "Successfully imported all $successCount notes."
                         successCount > 0 -> "Imported $successCount notes ($failCount failed)."
                         else -> "Failed to import selected documents."
+                    }
+                }
+            }
+        }
+    }
+
+    val imageImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            isImportingFile = true
+            scope.launch {
+                val currentFolderId = folders.find { it.id == selectedCategory }?.id ?: "unfiled"
+                if (uris.size == 1) {
+                    importProgressText = "Reading image note..."
+                    val result = fileImportManager.importToNotes(context, uris[0], folderId = currentFolderId)
+                    isImportingFile = false
+                    when (result) {
+                        is ImportResult.SuccessNotebook -> {
+                            importStatusMessage = result.message
+                            onOpenNotebook(result.notebook.id)
+                        }
+                        is ImportResult.SuccessBook -> {
+                            importStatusMessage = "Imported \"${result.book.title}\""
+                        }
+                        is ImportResult.Error -> {
+                            importStatusMessage = result.message
+                        }
+                    }
+                } else {
+                    var successCount = 0
+                    var failCount = 0
+                    val total = uris.size
+                    for ((index, uri) in uris.withIndex()) {
+                        importProgressText = "Importing image ${index + 1} of $total..."
+                        try {
+                            when (fileImportManager.importToNotes(context, uri, folderId = currentFolderId)) {
+                                is ImportResult.SuccessNotebook, is ImportResult.SuccessBook -> {
+                                    successCount++
+                                }
+                                is ImportResult.Error -> {
+                                    failCount++
+                                }
+                            }
+                        } catch (_: Exception) {
+                            failCount++
+                        }
+                    }
+                    isImportingFile = false
+                    importStatusMessage = when {
+                        failCount == 0 -> "Successfully imported all $successCount image notes."
+                        successCount > 0 -> "Imported $successCount images ($failCount failed)."
+                        else -> "Failed to import selected images."
                     }
                 }
             }
@@ -430,13 +500,16 @@ fun NoteshelfScreen(
     }
 
     val sidebarContent: @Composable () -> Unit = {
+        val sidebarScrollState = rememberScrollState()
         Column(
             modifier = Modifier
                 .width(if (isTablet) 240.dp else 280.dp)
                 .fillMaxHeight()
                 .background(if (isTablet) Color(0xFF0F0F0F) else Color(0xFF141416))
                 .border(width = 0.5.dp, color = GraphiteOutline)
+                .verticalScroll(sidebarScrollState)
                 .padding(horizontal = 14.dp, vertical = 16.dp)
+                .padding(bottom = 80.dp)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
@@ -566,12 +639,39 @@ fun NoteshelfScreen(
                     rootFolders.forEach { folder ->
                         val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
                         val subfolders = folders.filter { it.parentId == folder.id }
+                        val isExpanded = folder.id in expandedFolderIds
                         val folderColor = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
 
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { coords ->
+                                    folderBoundsMap[folder.id] = coords.boundsInRoot()
+                                },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (subfolders.isNotEmpty()) {
+                                IconButton(
+                                    onClick = {
+                                        expandedFolderIds = if (isExpanded) {
+                                            expandedFolderIds - folder.id
+                                        } else {
+                                            expandedFolderIds + folder.id
+                                        }
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                                        contentDescription = if (isExpanded) "Collapse Subfolders" else "Expand Subfolders",
+                                        tint = Color.LightGray,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            } else {
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+
                             Box(modifier = Modifier.weight(1f)) {
                                 SidebarItem(
                                     title = folder.name,
@@ -614,41 +714,46 @@ fun NoteshelfScreen(
                             }
                         }
 
-                        // Render subfolders indented
-                        subfolders.forEach { subfolder ->
-                            val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
-                            val subColor = subfolder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(modifier = Modifier.weight(1f)) {
-                                    SidebarItem(
-                                        title = subfolder.name,
-                                        icon = Icons.Default.FolderOpen,
-                                        iconSize = 22.dp,
-                                        iconTint = subColor,
-                                        count = subNoteCount,
-                                        isSelected = selectedCategory == subfolder.id,
-                                        onLongClick = { folderForOptionsDialog = subfolder },
-                                        onClick = {
-                                            selectedCategory = subfolder.id
-                                            if (!isTablet) sidebarVisible = false
-                                        }
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { folderForOptionsDialog = subfolder },
-                                    modifier = Modifier.size(24.dp)
+                        // Render subfolders indented when expanded
+                        if (isExpanded) {
+                            subfolders.forEach { subfolder ->
+                                val subNoteCount = notebooks.count { it.folderId == subfolder.id && !it.isDeleted }
+                                val subColor = subfolder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54F)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 22.dp)
+                                        .onGloballyPositioned { coords ->
+                                            folderBoundsMap[subfolder.id] = coords.boundsInRoot()
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.MoreVert,
-                                        contentDescription = "Subfolder Settings",
-                                        tint = Color.Gray,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        SidebarItem(
+                                            title = subfolder.name,
+                                            icon = Icons.Default.FolderOpen,
+                                            iconSize = 22.dp,
+                                            iconTint = subColor,
+                                            count = subNoteCount,
+                                            isSelected = selectedCategory == subfolder.id,
+                                            onLongClick = { folderForOptionsDialog = subfolder },
+                                            onClick = {
+                                                selectedCategory = subfolder.id
+                                                if (!isTablet) sidebarVisible = false
+                                            }
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { folderForOptionsDialog = subfolder },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MoreVert,
+                                            contentDescription = "Subfolder Settings",
+                                            tint = Color.Gray,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1531,6 +1636,9 @@ fun NoteshelfScreen(
                                 onDragStart = { rootPos ->
                                     isDraggingNote = true
                                     draggedNotebook = notebook
+                                    if (notebook.id !in selectedNotebookIds) {
+                                        selectedNotebookIds = setOf(notebook.id)
+                                    }
                                     dragTouchPositionInRoot = rootPos
                                     totalDragDistance = 0f
                                 },
@@ -1632,6 +1740,9 @@ fun NoteshelfScreen(
                                 onDragStart = { rootPos ->
                                     isDraggingNote = true
                                     draggedNotebook = notebook
+                                    if (notebook.id !in selectedNotebookIds) {
+                                        selectedNotebookIds = setOf(notebook.id)
+                                    }
                                     dragTouchPositionInRoot = rootPos
                                     totalDragDistance = 0f
                                 },
@@ -1724,8 +1835,15 @@ fun NoteshelfScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val isPdf = note.mimeType?.contains("pdf") == true || note.filePath?.endsWith(".pdf") == true
+                        val isImage = note.hasPhotos || note.mimeType?.startsWith("image/") == true ||
+                            note.filePath?.let { p -> listOf(".png", ".jpg", ".jpeg", ".webp").any { p.endsWith(it, true) } } == true
+                        val icon = when {
+                            isPdf -> Icons.Default.PictureAsPdf
+                            isImage -> Icons.Default.Image
+                            else -> Icons.Default.Description
+                        }
                         Icon(
-                            imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description,
+                            imageVector = icon,
                             contentDescription = null,
                             tint = if (hoveredFolderId != null) GraphiteOrange else Color.White,
                             modifier = Modifier.size(22.dp)
@@ -1742,7 +1860,7 @@ fun NoteshelfScreen(
                         }
                     }
                     Text(
-                        text = note.title,
+                        text = if (count > 1) "${note.title} + ${count - 1} more" else note.title,
                         color = Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -1750,7 +1868,12 @@ fun NoteshelfScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = if (hoveredFolderId != null) "Drop to move inside" else "Drag over folder to drop",
+                        text = if (hoveredFolderId != null) {
+                            val fName = folders.find { it.id == hoveredFolderId }?.name
+                            if (fName != null) "Drop into \"$fName\"" else "Drop to move inside"
+                        } else {
+                            if (count > 1) "Drag $count notes over folder" else "Drag over folder to drop"
+                        },
                         color = if (hoveredFolderId != null) GraphiteOrange else Color.LightGray,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Medium
@@ -2116,6 +2239,7 @@ fun NoteshelfScreen(
                                         "application/pdf",
                                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                        "image/*",
                                         "application/json",
                                         "*/*"
                                     )
@@ -2129,6 +2253,32 @@ fun NoteshelfScreen(
                         Column {
                             Text("Import Documents", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             Text("Import single or multiple PDF, Word (.docx), PPTX or files", color = Color.Gray, fontSize = 11.sp)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                showCreationOptionsSheet = false
+                                imageImportLauncher.launch(
+                                    arrayOf(
+                                        "image/*",
+                                        "image/png",
+                                        "image/jpeg",
+                                        "image/webp"
+                                    )
+                                )
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Image, contentDescription = null, tint = Color(0xFF81C784), modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column {
+                            Text("Import Images", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Import pictures, handwritten scans or image notes", color = Color.Gray, fontSize = 11.sp)
                         }
                     }
 

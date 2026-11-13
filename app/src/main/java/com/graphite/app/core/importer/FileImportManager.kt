@@ -71,13 +71,14 @@ class FileImportManager(
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
-     * Strictly imports a document (PDF or .graphite) into Noteshelf (notebooks).
+     * Strictly imports a document (PDF, Image, or .graphite) into Noteshelf (notebooks).
      * NEVER adds to Bookshelf or Recents.
      */
     suspend fun importToNotes(
         context: Context,
-        uri: Uri
-    ): ImportResult = importFromUri(context, uri, target = ImportDestination.NOTES)
+        uri: Uri,
+        folderId: String = "unfiled"
+    ): ImportResult = importFromUri(context, uri, target = ImportDestination.NOTES, folderId = folderId)
 
     /**
      * Strictly imports a document (PDF) into Bookshelf (books).
@@ -94,7 +95,8 @@ class FileImportManager(
     suspend fun importFromUri(
         context: Context,
         uri: Uri,
-        target: ImportDestination = ImportDestination.AUTO
+        target: ImportDestination = ImportDestination.AUTO,
+        folderId: String = "unfiled"
     ): ImportResult = withContext(ioDispatcher) {
         try {
             // Persist URI read permission if supported by the provider
@@ -142,7 +144,8 @@ class FileImportManager(
                 displayName = displayName,
                 mimeType = mimeType,
                 bytes = bytes,
-                target = target
+                target = target,
+                folderId = folderId
             )
         } catch (e: Exception) {
             ImportResult.Error("Failed to import file: ${e.message ?: "Unknown error"}")
@@ -158,22 +161,33 @@ class FileImportManager(
         displayName: String,
         mimeType: String?,
         bytes: ByteArray,
-        target: ImportDestination = ImportDestination.AUTO
+        target: ImportDestination = ImportDestination.AUTO,
+        folderId: String = "unfiled"
     ): ImportResult = withContext(ioDispatcher) {
         val isPdfByMime = mimeType?.equals("application/pdf", ignoreCase = true) == true
         val isPdfByExtension = displayName.endsWith(".pdf", ignoreCase = true)
         val isPdfByHeader = isPdfHeader(bytes)
         val isPdf = isPdfByMime || isPdfByExtension || isPdfByHeader
+        val isImage = mimeType?.startsWith("image/") == true ||
+                displayName.substringAfterLast('.', "").lowercase() in listOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
 
         when (target) {
             ImportDestination.NOTES -> {
                 // Strictly importing into Noteshelf
-                val noteResult = tryImportGraphiteNote(displayName, bytes)
+                val noteResult = tryImportGraphiteNote(displayName, bytes, folderId)
                 if (noteResult != null) {
                     return@withContext noteResult
                 }
-                // Import any document (PDF, DOCX, PPTX, XLSX, etc.) into notes with format intact
-                return@withContext importDocumentAsNotebook(context, displayName, mimeType, bytes, isPdf)
+                // Import any document (PDF, Image, DOCX, PPTX, XLSX, etc.) into notes with format intact
+                return@withContext importDocumentAsNotebook(
+                    context = context,
+                    displayName = displayName,
+                    mimeType = mimeType,
+                    bytes = bytes,
+                    isPdf = isPdf,
+                    isImage = isImage,
+                    folderId = folderId
+                )
             }
 
             ImportDestination.BOOKSHELF -> {
@@ -188,13 +202,21 @@ class FileImportManager(
                 if (isPdf) {
                     return@withContext importDocumentToBookshelf(context, displayName, mimeType, bytes, true)
                 }
-                val noteResult = tryImportGraphiteNote(displayName, bytes)
+                val noteResult = tryImportGraphiteNote(displayName, bytes, folderId)
                 if (noteResult != null) {
                     return@withContext noteResult
                 }
                 val ext = displayName.substringAfterLast('.', "").lowercase()
-                if (ext in listOf("docx", "doc", "pptx", "ppt", "xlsx", "xls", "rtf", "csv")) {
-                    return@withContext importDocumentAsNotebook(context, displayName, mimeType, bytes, false)
+                if (isImage || ext in listOf("docx", "doc", "pptx", "ppt", "xlsx", "xls", "rtf", "csv")) {
+                    return@withContext importDocumentAsNotebook(
+                        context = context,
+                        displayName = displayName,
+                        mimeType = mimeType,
+                        bytes = bytes,
+                        isPdf = false,
+                        isImage = isImage,
+                        folderId = folderId
+                    )
                 }
                 ImportResult.Error(
                     "Unsupported file format: \"$displayName\". Graphite supports PDF documents (.pdf) in Bookshelf, and office documents (.docx, .pptx, .xlsx) in Noteshelf."
@@ -204,7 +226,7 @@ class FileImportManager(
     }
 
     /**
-     * Imports a document (PDF, DOCX, PPTX, XLSX, etc.) as a Note in Noteshelf (notebooks),
+     * Imports a document (PDF, DOCX, PPTX, XLSX, Image, etc.) as a Note in Noteshelf (notebooks),
      * keeping the original file format intact in app storage and avoiding adding it to Bookshelf or Recents.
      */
     private suspend fun importDocumentAsNotebook(
@@ -212,7 +234,9 @@ class FileImportManager(
         displayName: String,
         mimeType: String?,
         bytes: ByteArray,
-        isPdf: Boolean
+        isPdf: Boolean,
+        isImage: Boolean = false,
+        folderId: String = "unfiled"
     ): ImportResult {
         if (isPdf && !isPdfHeader(bytes)) {
             return ImportResult.Error("Invalid or corrupted PDF file: missing \"%PDF-\" signature header.")
@@ -227,21 +251,44 @@ class FileImportManager(
             targetFile.writeBytes(bytes)
 
             val resolvedMimeType = mimeType ?: resolveMimeType(displayName)
-            val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
-            val pageCount = parsed.pageOrSlideCount
+            val pageCount = if (isPdf) {
+                var count = 1
+                try {
+                    val pfd = ParcelFileDescriptor.open(targetFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                    val renderer = PdfRenderer(pfd)
+                    count = renderer.pageCount
+                    renderer.close()
+                    pfd.close()
+                } catch (_: Throwable) {
+                    try {
+                        val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
+                        count = parsed.pageOrSlideCount
+                    } catch (_: Throwable) {}
+                }
+                count
+            } else if (isImage) {
+                1
+            } else {
+                val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
+                parsed.pageOrSlideCount
+            }
 
             val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateNoteTitle(rawTitle)
 
             val previewLines = when {
                 isPdf -> emptyList() // PDFs render natively via PdfRenderer; do not inject title/page count overlays
+                isImage -> emptyList()
                 ext.lowercase() in listOf("docx", "doc") -> {
+                    val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
                     listOf(displayName, "DOCX • $pageCount pages") + (if (parsed.paragraphs.isNotEmpty()) parsed.paragraphs.take(15) else emptyList())
                 }
                 ext.lowercase() in listOf("pptx", "ppt") -> {
+                    val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
                     listOf(displayName, "PPTX • $pageCount slides") + (if (parsed.slides.isNotEmpty()) parsed.slides.take(15).map { "Slide ${it.slideNumber}: ${it.title}" } else emptyList())
                 }
                 else -> {
+                    val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
                     listOf(displayName, "${ext.uppercase()} • $pageCount pages") + (if (parsed.paragraphs.isNotEmpty()) parsed.paragraphs.take(15) else emptyList())
                 }
             }
@@ -249,6 +296,7 @@ class FileImportManager(
             val importedNote = NotebookItem(
                 id = UUID.randomUUID().toString(),
                 title = disambiguatedTitle,
+                folderId = folderId,
                 paperStyle = PaperStyle.RULED,
                 previewLines = previewLines,
                 initialStrokes = emptyList(),
@@ -257,21 +305,32 @@ class FileImportManager(
                 updatedAtMillis = System.currentTimeMillis(),
                 filePath = targetFile.absolutePath,
                 mimeType = resolvedMimeType,
-                originalFileName = displayName
+                originalFileName = displayName,
+                hasPhotos = isImage
             )
 
             val savedNote = graphiteRepository.addImportedNotebook(importedNote)
 
             var syncedToCloud = false
             if (supabaseAuthManager?.isAuthenticated() == true && supabaseSyncManager != null) {
-                val syncResult = supabaseSyncManager.syncNotes()
-                syncedToCloud = syncResult.isSuccess
+                try {
+                    supabaseSyncManager.triggerAutoSync(debounceMs = 1000L)
+                    syncedToCloud = true
+                } catch (_: Exception) {
+                    // Fallback
+                }
+            }
+
+            val message = when {
+                isPdf -> "Imported PDF \"${savedNote.title}\" ($pageCount pages)"
+                isImage -> "Imported Image \"${savedNote.title}\""
+                else -> "Imported document \"${savedNote.title}\" ($pageCount pages)"
             }
 
             return ImportResult.SuccessNotebook(
                 notebook = savedNote,
                 syncedToCloud = syncedToCloud,
-                message = if (isPdf) "Imported PDF \"${savedNote.title}\" ($pageCount pages)" else "Imported document \"${savedNote.title}\" ($pageCount pages)"
+                message = message
             )
         } catch (e: Exception) {
             if (targetFile.exists()) targetFile.delete()
@@ -341,6 +400,11 @@ class FileImportManager(
         val ext = fileName.substringAfterLast('.', "").lowercase()
         return when (ext) {
             "pdf" -> "application/pdf"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "bmp" -> "image/bmp"
             "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             "doc" -> "application/msword"
             "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -360,7 +424,8 @@ class FileImportManager(
      */
     private suspend fun tryImportGraphiteNote(
         displayName: String,
-        bytes: ByteArray
+        bytes: ByteArray,
+        folderId: String = "unfiled"
     ): ImportResult? {
         val text = try {
             bytes.toString(Charsets.UTF_8).trim()
@@ -384,9 +449,16 @@ class FileImportManager(
                 displayName.removeSuffix(".graphite").removeSuffix(".json")
             }
 
+            val targetFolder = if (payload.folderId.isNotBlank() && payload.folderId != "unfiled") {
+                payload.folderId
+            } else {
+                folderId
+            }
+
             val importedNote = NotebookItem(
                 id = UUID.randomUUID().toString(),
                 title = baseTitle,
+                folderId = targetFolder,
                 paperStyle = paperStyle,
                 previewLines = payload.previewLines.ifEmpty { listOf("Imported Note") },
                 initialStrokes = strokes,
