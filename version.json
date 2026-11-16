@@ -1,8 +1,8 @@
 {
   "versionCode": 97,
   "versionName": "1.0.0",
-  "commitSha": "b8a33ce",
+  "commitSha": "0cda16e",
   "commitMessage": "fix: image import thumbnails and zoomed-in sideways panning",
-  "buildDate": "2026-11-16 04:22 UTC",
+  "buildDate": "2026-11-16 04:26 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
