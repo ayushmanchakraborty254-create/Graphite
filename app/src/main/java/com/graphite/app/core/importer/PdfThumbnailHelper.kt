@@ -2,6 +2,7 @@ package com.graphite.app.core.importer
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
@@ -115,6 +116,122 @@ fun PdfPageThumbnail(
         Image(
             bitmap = currentBmp.asImageBitmap(),
             contentDescription = "PDF Page Thumbnail",
+            contentScale = contentScale,
+            modifier = modifier.fillMaxSize()
+        )
+    } else {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color(0xFF2A2A2A))
+        )
+    }
+}
+
+/**
+ * Thread-safe, high-performance in-memory cache and loader for Image note thumbnails.
+ * Eliminates repeated disk I/O and BitmapFactory decoding during list/grid scrolling.
+ */
+object ImageThumbnailHelper {
+    // 60-entry LRU cache in RAM (~30-40 MB max for thumbnail-size bitmaps)
+    private val memoryCache = object : LruCache<String, Bitmap>(60) {
+        override fun sizeOf(key: String, bitmap: Bitmap): Int {
+            return (bitmap.byteCount / 1024).coerceAtLeast(1)
+        }
+    }
+
+    fun getFromCache(key: String): Bitmap? = synchronized(memoryCache) {
+        memoryCache.get(key)
+    }
+
+    fun putInCache(key: String, bitmap: Bitmap) = synchronized(memoryCache) {
+        memoryCache.put(key, bitmap)
+    }
+
+    suspend fun getOrDecodeThumbnail(
+        context: Context,
+        filePath: String,
+        targetWidth: Int = 300
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        val cached = getFromCache(filePath)
+        if (cached != null && !cached.isRecycled) {
+            return@withContext cached
+        }
+
+        try {
+            val boundsOptions = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            if (filePath.startsWith("content://")) {
+                context.contentResolver.openInputStream(Uri.parse(filePath))?.use {
+                    BitmapFactory.decodeStream(it, null, boundsOptions)
+                }
+            } else {
+                val f = File(filePath)
+                if (!f.exists() || !f.canRead()) return@withContext null
+                BitmapFactory.decodeFile(f.absolutePath, boundsOptions)
+            }
+
+            val origW = boundsOptions.outWidth.coerceAtLeast(1)
+            val origH = boundsOptions.outHeight.coerceAtLeast(1)
+            var inSampleSize = 1
+            val maxBound = targetWidth.coerceIn(120, 720) * 2
+            while ((origW / inSampleSize) > maxBound || (origH / inSampleSize) > maxBound) {
+                inSampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+
+            val decoded = if (filePath.startsWith("content://")) {
+                context.contentResolver.openInputStream(Uri.parse(filePath))?.use {
+                    BitmapFactory.decodeStream(it, null, decodeOptions)
+                }
+            } else {
+                BitmapFactory.decodeFile(filePath, decodeOptions)
+            }
+
+            if (decoded != null) {
+                putInCache(filePath, decoded)
+                return@withContext decoded
+            }
+        } catch (_: Exception) {}
+        null
+    }
+}
+
+/**
+ * High-performance Compose component to render the thumbnail of an image note.
+ * Renders instantly from memory cache if available, preventing scroll hitching.
+ */
+@Composable
+fun ImagePageThumbnail(
+    filePath: String,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+    targetWidth: Int = 300
+) {
+    val context = LocalContext.current
+    var bitmap by remember(filePath) {
+        mutableStateOf(ImageThumbnailHelper.getFromCache(filePath))
+    }
+
+    LaunchedEffect(filePath) {
+        if (bitmap == null || bitmap?.isRecycled == true) {
+            val decoded = ImageThumbnailHelper.getOrDecodeThumbnail(context, filePath, targetWidth)
+            if (decoded != null) {
+                bitmap = decoded
+            }
+        }
+    }
+
+    val currentBmp = bitmap
+    if (currentBmp != null && !currentBmp.isRecycled) {
+        Image(
+            bitmap = currentBmp.asImageBitmap(),
+            contentDescription = "Image Note Thumbnail",
             contentScale = contentScale,
             modifier = modifier.fillMaxSize()
         )

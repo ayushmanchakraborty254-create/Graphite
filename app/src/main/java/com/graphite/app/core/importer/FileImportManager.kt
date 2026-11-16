@@ -12,6 +12,7 @@ import com.graphite.app.core.supabase.SupabaseAuthManager
 import com.graphite.app.core.supabase.SupabaseSyncManager
 import com.graphite.app.data.model.Book
 import com.graphite.app.data.model.BookCoverType
+import com.graphite.app.data.model.NotebookCover
 import com.graphite.app.data.model.NotebookItem
 import com.graphite.app.feature.workspace.model.PaperStyle
 import com.graphite.app.data.repository.GraphiteRepository
@@ -306,7 +307,8 @@ class FileImportManager(
                 filePath = targetFile.absolutePath,
                 mimeType = resolvedMimeType,
                 originalFileName = displayName,
-                hasPhotos = isImage
+                hasPhotos = isImage,
+                cover = if (isImage || isPdf) NotebookCover(category = "NONE") else NotebookCover()
             )
 
             val savedNote = graphiteRepository.addImportedNotebook(importedNote)

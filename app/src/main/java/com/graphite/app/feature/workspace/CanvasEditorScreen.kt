@@ -857,7 +857,11 @@ fun CanvasEditorScreen(
         val scaledPageWidth = basePageWidth * zoomScale
         val scaledPageHeight = basePageHeight * zoomScale
         val maxPanX = with(density) {
-            ((scaledPageWidth - screenWidth).toPx() / 2f).coerceAtLeast(0f)
+            if (zoomScale <= 1.0f) 0f
+            else {
+                val overflow = ((scaledPageWidth - screenWidth).toPx() / 2f).coerceAtLeast(0f)
+                maxOf(80.dp.toPx(), overflow + 80.dp.toPx())
+            }
         }
 
         Box(
@@ -924,18 +928,18 @@ fun CanvasEditorScreen(
                                         if (newZoom <= 1.0f) panX = 0f
 
                                         // Pan horizontally only when zoomed in
-                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.15f) {
+                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.05f) {
                                             panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
                                         }
-                                    } else if (!isPinching && interactionMode == EditorInteractionMode.HAND_MODE) {
-                                        // Deliberate 2-finger vertical scroll in HAND_MODE (only when NOT pinching)
+                                    } else if (!isPinching) {
+                                        // Deliberate 2-finger vertical scroll & horizontal pan in both HAND_MODE and PEN_MODE (only when NOT pinching)
                                         if (kotlin.math.abs(dy) > 0.5f) {
                                             listState.dispatchRawDelta(-dy)
                                             val dt = (now - lastTime).coerceIn(1L, 100L)
                                             val instantV = (-dy / dt.toFloat()) * 1000f
                                             scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
                                         }
-                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.15f) {
+                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.05f) {
                                             panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
                                         }
                                     }
@@ -948,21 +952,27 @@ fun CanvasEditorScreen(
                                 // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
                             } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE && !isPinching) {
-                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically (in HAND_MODE, 1 finger draws smoothly)
+                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically and pans sideways when zoomed in
                                 val curPos = pressed[0].position
                                 val now = System.currentTimeMillis()
 
                                 if (lastCenter != null) {
                                     val dy = curPos.y - lastCenter.y
-                                    totalDragY += kotlin.math.abs(dy)
+                                    val dx = curPos.x - lastCenter.x
+                                    totalDragY += kotlin.math.abs(dy) + kotlin.math.abs(dx)
                                     if (totalDragY > 1.5f) {
                                         isDragging1Finger = true
                                     }
-                                    if (isDragging1Finger && kotlin.math.abs(dy) > 0.05f) {
-                                        listState.dispatchRawDelta(-dy)
-                                        val dt = (now - lastTime).coerceIn(1L, 100L)
-                                        val instantV = (-dy / dt.toFloat()) * 1000f
-                                        scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
+                                    if (isDragging1Finger) {
+                                        if (kotlin.math.abs(dy) > 0.05f) {
+                                            listState.dispatchRawDelta(-dy)
+                                            val dt = (now - lastTime).coerceIn(1L, 100L)
+                                            val instantV = (-dy / dt.toFloat()) * 1000f
+                                            scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
+                                        }
+                                        if (zoomScale > 1.0f && kotlin.math.abs(dx) > 0.05f) {
+                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                        }
                                     }
                                 }
 

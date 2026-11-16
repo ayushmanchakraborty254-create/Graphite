@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.graphite.app.data.model.NotebookCover
 import com.graphite.app.core.importer.PdfPageThumbnail
+import com.graphite.app.core.importer.ImagePageThumbnail
 import com.graphite.app.core.sharing.FileSharingHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -2673,6 +2674,16 @@ private fun PdfThumbnailImage(filePath: String, modifier: Modifier = Modifier) {
     )
 }
 
+@Composable
+private fun ImageThumbnailView(filePath: String, modifier: Modifier = Modifier) {
+    ImagePageThumbnail(
+        filePath = filePath,
+        modifier = modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+        targetWidth = 280
+    )
+}
+
 private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
     val base = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54FL)
     return base to Color(0x77000000)
@@ -3250,6 +3261,11 @@ private fun NotebookThumbnailCard(
     val cardPosRef = remember { object { var x = 0f; var y = 0f } }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
+    val isImage = notebook.hasPhotos ||
+            notebook.mimeType?.startsWith("image/") == true ||
+            notebook.filePath?.let { p ->
+                listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp").any { p.endsWith(it, ignoreCase = true) }
+            } == true
     val isDoc = notebook.filePath?.endsWith(".docx", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pptx", ignoreCase = true) == true
     val isKeepText = notebook.mimeType == "text/keep" ||
@@ -3291,7 +3307,7 @@ private fun NotebookThumbnailCard(
                 .height(170.dp)
                 .shadow(4.dp, RoundedCornerShape(6.dp)),
             colors = CardDefaults.cardColors(
-                containerColor = if (isPdf) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
+                containerColor = if (isPdf || isImage) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
             ),
             shape = RoundedCornerShape(6.dp)
         ) {
@@ -3354,6 +3370,24 @@ private fun NotebookThumbnailCard(
                                 color = Color.LightGray,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                } else if (isImage) {
+                    if (!notebook.filePath.isNullOrEmpty() && (File(notebook.filePath).exists() || notebook.filePath.startsWith("content://"))) {
+                        ImageThumbnailView(notebook.filePath)
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF211515)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = "Image Note",
+                                tint = GraphiteOrange,
+                                modifier = Modifier.size(44.dp)
                             )
                         }
                     }
@@ -3825,6 +3859,11 @@ private fun NotebookListRow(
     var rowBoundsInRoot by remember { mutableStateOf(Rect.Zero) }
     val isPdf = notebook.mimeType?.contains("pdf", ignoreCase = true) == true ||
             notebook.filePath?.endsWith(".pdf", ignoreCase = true) == true
+    val isImage = notebook.hasPhotos ||
+            notebook.mimeType?.startsWith("image/") == true ||
+            notebook.filePath?.let { p ->
+                listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp").any { p.endsWith(it, ignoreCase = true) }
+            } == true
     val isKeepText = notebook.mimeType == "text/keep" ||
             notebook.mimeType?.startsWith("text/") == true ||
             notebook.title.startsWith("Quick Note", ignoreCase = true) ||
@@ -3874,7 +3913,7 @@ private fun NotebookListRow(
                 .height(60.dp)
                 .shadow(2.dp, RoundedCornerShape(4.dp)),
             colors = CardDefaults.cardColors(
-                containerColor = if (isPdf) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
+                containerColor = if (isPdf || isImage) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)
             ),
             shape = RoundedCornerShape(4.dp)
         ) {
@@ -3885,6 +3924,14 @@ private fun NotebookListRow(
                     } else {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFEF5350), modifier = Modifier.size(22.dp))
+                        }
+                    }
+                } else if (isImage) {
+                    if (!notebook.filePath.isNullOrEmpty() && (File(notebook.filePath).exists() || notebook.filePath.startsWith("content://"))) {
+                        ImageThumbnailView(notebook.filePath)
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Image, contentDescription = null, tint = Color(0xFF81C784), modifier = Modifier.size(22.dp))
                         }
                     }
                 } else if (notebook.mimeType == "application/x-graphite-voice") {

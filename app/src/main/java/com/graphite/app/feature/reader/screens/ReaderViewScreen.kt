@@ -16,6 +16,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -614,8 +615,8 @@ private fun PdfDocumentViewer(
                     val newZoom = (zoomScale * zoom).coerceIn(1f, 4f)
                     zoomScale = newZoom
                     if (newZoom > 1.02f) {
-                        val maxPanX = (size.width * (newZoom - 1f)) / 2f
-                        val maxPanY = (size.height * (newZoom - 1f)) / 2f
+                        val maxPanX = ((size.width * (newZoom - 1f)) / 2f) + 60f
+                        val maxPanY = ((size.height * (newZoom - 1f)) / 2f) + 60f
                         panOffset = Offset(
                             (panOffset.x + pan.x).coerceIn(-maxPanX, maxPanX),
                             (panOffset.y + pan.y).coerceIn(-maxPanY, maxPanY)
@@ -679,6 +680,17 @@ private fun PdfDocumentViewer(
                             totalDragX = 0f
                         }
                     )
+                } else {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        onUserInteraction()
+                        val maxPanX = ((size.width * (zoomScale - 1f)) / 2f) + 60f
+                        val maxPanY = ((size.height * (zoomScale - 1f)) / 2f) + 60f
+                        panOffset = Offset(
+                            (panOffset.x + dragAmount.x).coerceIn(-maxPanX, maxPanX),
+                            (panOffset.y + dragAmount.y).coerceIn(-maxPanY, maxPanY)
+                        )
+                    }
                 }
             },
         contentAlignment = Alignment.Center
