@@ -1,8 +1,8 @@
 {
   "versionCode": 99,
   "versionName": "1.0.0",
-  "commitSha": "9d565f5",
+  "commitSha": "0b1ee7c",
   "commitMessage": "fix: dynamic sideways panning and simultaneous zoom/scroll across all modes",
-  "buildDate": "2026-11-17 03:35 UTC",
+  "buildDate": "2026-11-17 03:40 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
