@@ -856,25 +856,20 @@ fun CanvasEditorScreen(
         val canonicalScale = (basePageWidth.value / 720f).coerceIn(0.50f, 1.25f)
         val scaledPageWidth = basePageWidth * zoomScale
         val scaledPageHeight = basePageHeight * zoomScale
-        val maxPanX = with(density) {
-            if (zoomScale <= 1.0f) 0f
-            else {
-                val overflow = ((scaledPageWidth - screenWidth).toPx() / 2f).coerceAtLeast(0f)
-                maxOf(80.dp.toPx(), overflow + 80.dp.toPx())
-            }
-        }
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(interactionMode, isReadOnlyMode, selectedStudioTool, selectedImageId) {
                     var activeFlingJob: Job? = null
+                    var activeHorizontalFlingJob: Job? = null
                     awaitEachGesture {
                         var lastCenter: Offset? = null
                         var lastDist: Float? = null
                         var scrollVelocityY = 0f
+                        var scrollVelocityX = 0f
                         var lastTime = 0L
-                        var totalDragY = 0f
+                        var totalDragDistance = 0f
                         var isDragging1Finger = false
                         var isPinching = false
 
@@ -885,6 +880,8 @@ fun CanvasEditorScreen(
                             if (pressed.isNotEmpty()) {
                                 activeFlingJob?.cancel()
                                 activeFlingJob = null
+                                activeHorizontalFlingJob?.cancel()
+                                activeHorizontalFlingJob = null
                             }
 
                             // If a hardware stylus or eraser is on screen, NEVER intercept or scroll!
@@ -894,18 +891,19 @@ fun CanvasEditorScreen(
 
                             val isTextTool = selectedStudioTool == StudioTool.TEXT
                             val isImageActive = selectedImageId != null
-                            if (hasStylus || isReadOnlyMode || isTextTool || isImageActive) {
-                                // Stylus is active, read-only active, text tool active, or image is selected: NEVER scroll from this detector!
+                            if (hasStylus || isTextTool || isImageActive) {
+                                // Stylus is active, text tool active, or image is selected: yield to child tools
                                 lastCenter = null
                                 lastDist = null
                                 scrollVelocityY = 0f
+                                scrollVelocityX = 0f
                                 isDragging1Finger = false
                                 isPinching = false
-                                totalDragY = 0f
+                                totalDragDistance = 0f
                             } else if (pressed.size >= 2) {
-                                // 2 OR MORE FINGERS:
+                                // 2 OR MORE FINGERS: fluid pinch-to-zoom + 2D pan/scroll across ALL modes!
                                 isDragging1Finger = false
-                                totalDragY = 0f
+                                totalDragDistance = 0f
                                 val p0 = pressed[0].position
                                 val p1 = pressed[1].position
                                 val curCenter = (p0 + p1) / 2f
@@ -918,30 +916,35 @@ fun CanvasEditorScreen(
                                     val dy = curCenter.y - lastCenter.y
                                     val dx = curCenter.x - lastCenter.x
 
-                                    if (distDelta > 1.2f || isPinching) {
-                                        // Active pinch-to-zoom: fluid continuous scaling without stepped jumps
+                                    if (distDelta > 1.5f || isPinching) {
+                                        // Active pinch-to-zoom: fluid continuous scaling
                                         isPinching = true
-                                        scrollVelocityY = 0f // Zero fling momentum to prevent sudden scroll jumps on release
                                         val oldZoom = zoomScale
                                         val newZoom = (oldZoom * factor).coerceIn(0.25f, 4.0f)
                                         zoomScale = newZoom
-                                        if (newZoom <= 1.0f) panX = 0f
+                                        if (newZoom <= 1.01f) panX = 0f
+                                    }
 
-                                        // Pan horizontally only when zoomed in
-                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.05f) {
-                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                    // Simultaneous 2-finger vertical scroll
+                                    if (kotlin.math.abs(dy) > 0.3f) {
+                                        listState.dispatchRawDelta(-dy)
+                                        val dt = (now - lastTime).coerceIn(1L, 100L)
+                                        val instantV = (-dy / dt.toFloat()) * 1000f
+                                        scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
+                                    }
+
+                                    // Simultaneous 2-finger horizontal pan when zoomed in
+                                    if (zoomScale > 1.01f && kotlin.math.abs(dx) > 0.05f) {
+                                        val currentMaxPan = with(density) {
+                                            val currentScaledW = (basePageWidth * zoomScale).toPx()
+                                            val screenW = screenWidth.toPx()
+                                            val overflow = ((currentScaledW - screenW) / 2f).coerceAtLeast(0f)
+                                            overflow + maxOf(180.dp.toPx(), screenW * 0.45f)
                                         }
-                                    } else if (!isPinching) {
-                                        // Deliberate 2-finger vertical scroll & horizontal pan in both HAND_MODE and PEN_MODE (only when NOT pinching)
-                                        if (kotlin.math.abs(dy) > 0.5f) {
-                                            listState.dispatchRawDelta(-dy)
-                                            val dt = (now - lastTime).coerceIn(1L, 100L)
-                                            val instantV = (-dy / dt.toFloat()) * 1000f
-                                            scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
-                                        }
-                                        if (zoomScale > 1f && kotlin.math.abs(dx) > 0.05f) {
-                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
-                                        }
+                                        panX = (panX + dx).coerceIn(-currentMaxPan, currentMaxPan)
+                                        val dt = (now - lastTime).coerceIn(1L, 100L)
+                                        val instantVx = (dx / dt.toFloat()) * 1000f
+                                        scrollVelocityX = scrollVelocityX * 0.65f + instantVx * 0.35f
                                     }
                                 }
 
@@ -951,16 +954,16 @@ fun CanvasEditorScreen(
 
                                 // Consume touch events so child canvases don't receive two-finger pinch/scroll events
                                 pressed.forEach { it.consume() }
-                            } else if (pressed.size == 1 && interactionMode == EditorInteractionMode.PEN_MODE && !isPinching) {
-                                // 1 FINGER IN PEN_MODE: smoothly scrolls the pages vertically and pans sideways when zoomed in
+                            } else if (pressed.size == 1 && (interactionMode == EditorInteractionMode.PEN_MODE || isReadOnlyMode) && !isPinching) {
+                                // 1 FINGER IN PEN_MODE or READ-ONLY: smoothly scrolls vertically and pans sideways when zoomed in
                                 val curPos = pressed[0].position
                                 val now = System.currentTimeMillis()
 
                                 if (lastCenter != null) {
                                     val dy = curPos.y - lastCenter.y
                                     val dx = curPos.x - lastCenter.x
-                                    totalDragY += kotlin.math.abs(dy) + kotlin.math.abs(dx)
-                                    if (totalDragY > 1.5f) {
+                                    totalDragDistance += kotlin.math.abs(dy) + kotlin.math.abs(dx)
+                                    if (totalDragDistance > 1.5f) {
                                         isDragging1Finger = true
                                     }
                                     if (isDragging1Finger) {
@@ -970,8 +973,17 @@ fun CanvasEditorScreen(
                                             val instantV = (-dy / dt.toFloat()) * 1000f
                                             scrollVelocityY = scrollVelocityY * 0.65f + instantV * 0.35f
                                         }
-                                        if (zoomScale > 1.0f && kotlin.math.abs(dx) > 0.05f) {
-                                            panX = (panX + dx).coerceIn(-maxPanX, maxPanX)
+                                        if (zoomScale > 1.01f && kotlin.math.abs(dx) > 0.05f) {
+                                            val currentMaxPan = with(density) {
+                                                val currentScaledW = (basePageWidth * zoomScale).toPx()
+                                                val screenW = screenWidth.toPx()
+                                                val overflow = ((currentScaledW - screenW) / 2f).coerceAtLeast(0f)
+                                                overflow + maxOf(180.dp.toPx(), screenW * 0.45f)
+                                            }
+                                            panX = (panX + dx).coerceIn(-currentMaxPan, currentMaxPan)
+                                            val dt = (now - lastTime).coerceIn(1L, 100L)
+                                            val instantVx = (dx / dt.toFloat()) * 1000f
+                                            scrollVelocityX = scrollVelocityX * 0.65f + instantVx * 0.35f
                                         }
                                     }
                                 }
@@ -985,37 +997,65 @@ fun CanvasEditorScreen(
                                     pressed[0].consume()
                                 }
                             } else {
-                                // Fingers lifted: natural physics-based fling momentum only when NOT zooming
-                                val shouldFling = !isPinching && (
-                                    (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
-                                    (interactionMode == EditorInteractionMode.PEN_MODE && isDragging1Finger)
-                                )
+                                // Fingers lifted: natural physics-based fling momentum in both Y and X directions
+                                val shouldFling = (interactionMode == EditorInteractionMode.HAND_MODE && scrollVelocityY != 0f) ||
+                                    ((interactionMode == EditorInteractionMode.PEN_MODE || isReadOnlyMode) && isDragging1Finger)
+
                                 if (shouldFling && kotlin.math.abs(scrollVelocityY) > 50f) {
-                                    val initialVel = scrollVelocityY.coerceIn(-15000f, 15000f)
+                                    val initialVelY = scrollVelocityY.coerceIn(-15000f, 15000f)
                                     activeFlingJob = scope.launch {
-                                        var consumed = 0f
-                                        val anim = androidx.compose.animation.core.Animatable(0f)
+                                        var consumedY = 0f
+                                        val animY = androidx.compose.animation.core.Animatable(0f)
                                         try {
-                                            anim.animateDecay(
-                                                initialVelocity = initialVel,
+                                            animY.animateDecay(
+                                                initialVelocity = initialVelY,
                                                 animationSpec = androidx.compose.animation.core.exponentialDecay(
                                                     frictionMultiplier = 0.75f,
                                                     absVelocityThreshold = 0.5f
                                                 )
                                             ) {
-                                                val step = value - consumed
-                                                listState.dispatchRawDelta(step)
-                                                consumed = value
+                                                val stepY = value - consumedY
+                                                listState.dispatchRawDelta(stepY)
+                                                consumedY = value
                                             }
                                         } catch (_: Exception) {}
                                     }
                                 }
+
+                                if (shouldFling && zoomScale > 1.01f && kotlin.math.abs(scrollVelocityX) > 50f) {
+                                    val initialVelX = scrollVelocityX.coerceIn(-12000f, 12000f)
+                                    activeHorizontalFlingJob = scope.launch {
+                                        var consumedX = 0f
+                                        val animX = androidx.compose.animation.core.Animatable(0f)
+                                        try {
+                                            animX.animateDecay(
+                                                initialVelocity = initialVelX,
+                                                animationSpec = androidx.compose.animation.core.exponentialDecay(
+                                                    frictionMultiplier = 0.80f,
+                                                    absVelocityThreshold = 0.5f
+                                                )
+                                            ) {
+                                                val stepX = value - consumedX
+                                                val currentMaxPan = with(density) {
+                                                    val currentScaledW = (basePageWidth * zoomScale).toPx()
+                                                    val screenW = screenWidth.toPx()
+                                                    val overflow = ((currentScaledW - screenW) / 2f).coerceAtLeast(0f)
+                                                    overflow + maxOf(180.dp.toPx(), screenW * 0.45f)
+                                                }
+                                                panX = (panX + stepX).coerceIn(-currentMaxPan, currentMaxPan)
+                                                consumedX = value
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                }
+
                                 scrollVelocityY = 0f
+                                scrollVelocityX = 0f
                                 lastCenter = null
                                 lastDist = null
                                 isDragging1Finger = false
                                 isPinching = false
-                                totalDragY = 0f
+                                totalDragDistance = 0f
                             }
                         } while (pressed.isNotEmpty())
                     }
@@ -1023,7 +1063,7 @@ fun CanvasEditorScreen(
         ) {
             LazyColumn(
                 state = listState,
-                userScrollEnabled = isReadOnlyMode,
+                userScrollEnabled = false,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(top = 58.dp, bottom = 16.dp),
@@ -1034,14 +1074,16 @@ fun CanvasEditorScreen(
                 items(count = totalPages, key = { it }) { pageIdx ->
                     // Centering wrapper row to guarantee page sheet remains centered across full width
                     Box(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentWidth(align = Alignment.CenterHorizontally, unbounded = true),
                         contentAlignment = Alignment.Center
                     ) {
                         // Outer layout boundary holding the scaled footprint in LazyColumn
                         Box(
                             modifier = Modifier
                                 .offset { IntOffset(panX.roundToInt(), 0) }
-                                .width(scaledPageWidth)
+                                .requiredWidth(scaledPageWidth)
                                 .height(scaledPageHeight),
                             contentAlignment = Alignment.Center
                         ) {
