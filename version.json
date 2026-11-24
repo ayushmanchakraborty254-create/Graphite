@@ -1,8 +1,8 @@
 {
-  "versionCode": 100,
+  "versionCode": 101,
   "versionName": "1.0.0",
-  "commitSha": "HEAD",
-  "commitMessage": "feat: folder drag-and-drop, multi-select, clean card redesign, duplicate import fix, stroke saving, and fast sync",
-  "buildDate": "2026-11-24 05:57 UTC",
+  "commitSha": "b3206d1",
+  "commitMessage": "feat: folder drag-and-drop, multi-folder selection, folder card redesign, duplicate file prevention, stroke persistence, fast cloud sync, and smaller PDF thumbnails",
+  "buildDate": "2026-11-24 06:15 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
