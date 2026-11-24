@@ -14,6 +14,7 @@ import com.graphite.app.data.model.NotebookCover
 import com.graphite.app.core.importer.PdfPageThumbnail
 import com.graphite.app.core.importer.ImagePageThumbnail
 import com.graphite.app.core.sharing.FileSharingHelper
+import com.graphite.app.core.sharing.ShareOptionsDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -163,6 +164,9 @@ fun NoteshelfScreen(
     var showMoveFolderDialogForNote by remember { mutableStateOf<NotebookItem?>(null) }
     var showMoveMultiFolderDialog by remember { mutableStateOf(false) }
     var showCreationOptionsSheet by remember { mutableStateOf(false) }
+    var showShareOptionsDialog by remember { mutableStateOf(false) }
+    var noteToShare by remember { mutableStateOf<NotebookItem?>(null) }
+    var notesToShare by remember { mutableStateOf<List<NotebookItem>>(emptyList()) }
 
     var pendingUnlockNote by remember { mutableStateOf<NotebookItem?>(null) }
     var noteToChangePassword by remember { mutableStateOf<NotebookItem?>(null) }
@@ -962,7 +966,9 @@ fun NoteshelfScreen(
                                 onClick = {
                                     val toShare = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
                                     if (toShare.isNotEmpty()) {
-                                        FileSharingHelper.shareNotebooks(context, toShare)
+                                        notesToShare = toShare
+                                        noteToShare = if (toShare.size == 1) toShare.first() else null
+                                        showShareOptionsDialog = true
                                     }
                                 }
                             ) {
@@ -1751,6 +1757,11 @@ fun NoteshelfScreen(
                                 onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
                                 onPermanentlyDelete = { notesToDelete = listOf(notebook) },
                                 onDelete = { notesToDelete = listOf(notebook) },
+                                onShare = {
+                                    noteToShare = notebook
+                                    notesToShare = emptyList()
+                                    showShareOptionsDialog = true
+                                },
                                 onUploadToDrive = {
                                     selectedNotebookForUpload = notebook
                                     if (!driveManager.hasDrivePermission(context)) {
@@ -1902,6 +1913,11 @@ fun NoteshelfScreen(
                                 onRestore = { GraphiteRepository.restoreNotebook(notebook.id) },
                                 onPermanentlyDelete = { notesToDelete = listOf(notebook) },
                                 onDelete = { notesToDelete = listOf(notebook) },
+                                onShare = {
+                                    noteToShare = notebook
+                                    notesToShare = emptyList()
+                                    showShareOptionsDialog = true
+                                },
                                 onUploadToDrive = {
                                     selectedNotebookForUpload = notebook
                                     if (!driveManager.hasDrivePermission(context)) {
@@ -2527,6 +2543,40 @@ fun NoteshelfScreen(
                 }
             },
             containerColor = Color(0xFF222222)
+        )
+    }
+
+    if (showShareOptionsDialog && (noteToShare != null || notesToShare.isNotEmpty())) {
+        val title = noteToShare?.title ?: if (notesToShare.size == 1) notesToShare.first().title else ""
+        val count = if (notesToShare.isNotEmpty()) notesToShare.size else 1
+        ShareOptionsDialog(
+            title = title,
+            itemCount = count,
+            onDismiss = {
+                showShareOptionsDialog = false
+                noteToShare = null
+                notesToShare = emptyList()
+            },
+            onShareWithEdits = {
+                if (notesToShare.isNotEmpty()) {
+                    FileSharingHelper.shareNotebooks(context, notesToShare, includeEdits = true)
+                } else if (noteToShare != null) {
+                    FileSharingHelper.shareNotebook(context, noteToShare!!, includeEdits = true)
+                }
+                showShareOptionsDialog = false
+                noteToShare = null
+                notesToShare = emptyList()
+            },
+            onShareWithoutEdits = {
+                if (notesToShare.isNotEmpty()) {
+                    FileSharingHelper.shareNotebooks(context, notesToShare, includeEdits = false)
+                } else if (noteToShare != null) {
+                    FileSharingHelper.shareNotebook(context, noteToShare!!, includeEdits = false)
+                }
+                showShareOptionsDialog = false
+                noteToShare = null
+                notesToShare = emptyList()
+            }
         )
     }
 
@@ -3479,6 +3529,7 @@ private fun NotebookThumbnailCard(
     onPermanentlyDelete: () -> Unit,
     onDelete: () -> Unit,
     onUploadToDrive: () -> Unit,
+    onShare: (() -> Unit)? = null,
     onOpenSplitScreen: (() -> Unit)? = null,
     onSetPassword: (() -> Unit)? = null,
     onDragStart: ((Offset) -> Unit)? = null,
@@ -3980,7 +4031,7 @@ private fun NotebookThumbnailCard(
                         leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange) },
                         onClick = {
                             menuExpanded = false
-                            FileSharingHelper.shareNotebook(context, notebook)
+                            onShare?.invoke() ?: FileSharingHelper.shareNotebook(context, notebook)
                         }
                     )
                     HorizontalDivider(color = Color(0xFF333333))
@@ -4081,6 +4132,7 @@ private fun NotebookListRow(
     onPermanentlyDelete: () -> Unit,
     onDelete: () -> Unit,
     onUploadToDrive: () -> Unit,
+    onShare: (() -> Unit)? = null,
     onDragStart: ((Offset) -> Unit)? = null,
     onDrag: ((Offset) -> Unit)? = null,
     onDragEnd: (() -> Unit)? = null,
@@ -4356,7 +4408,7 @@ private fun NotebookListRow(
                     leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = GraphiteOrange) },
                     onClick = {
                         menuExpanded = false
-                        FileSharingHelper.shareNotebook(context, notebook)
+                        onShare?.invoke() ?: FileSharingHelper.shareNotebook(context, notebook)
                     }
                 )
                 HorizontalDivider(color = Color(0xFF333333))

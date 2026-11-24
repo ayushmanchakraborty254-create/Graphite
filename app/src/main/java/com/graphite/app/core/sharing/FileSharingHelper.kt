@@ -134,25 +134,25 @@ object FileSharingHelper {
 
     /**
      * Shares a single Notebook or imported PDF from the Notes tab.
-     * If the note is an imported PDF, the original PDF is shared directly.
-     * If it's a handwritten Graphite notebook, it is exported to standard PDF and shared.
+     * When [includeEdits] is false, the clean original file is shared directly.
+     * When [includeEdits] is true, the document is exported with all annotations/markings/stickers.
      */
-    fun shareNotebook(context: Context, notebook: NotebookItem) {
+    fun shareNotebook(context: Context, notebook: NotebookItem, includeEdits: Boolean = true) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val uri: Uri = if (!notebook.filePath.isNullOrBlank()) {
+                val uri: Uri = if (!includeEdits && !notebook.filePath.isNullOrBlank()) {
                     val file = File(notebook.filePath)
                     if (file.exists() && file.length() > 0) {
                         getFileUri(context, file, notebook.title)
                     } else {
-                        generateNotePdfUri(context, notebook)
+                        generateNotePdfUri(context, notebook, includeEdits = false)
                     }
                 } else {
-                    generateNotePdfUri(context, notebook)
+                    generateNotePdfUri(context, notebook, includeEdits = includeEdits)
                 }
 
                 withContext(Dispatchers.Main) {
-                    val mime = if (!notebook.mimeType.isNullOrBlank()) notebook.mimeType else "application/pdf"
+                    val mime = if (!includeEdits && !notebook.mimeType.isNullOrBlank()) notebook.mimeType else "application/pdf"
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = mime
                         putExtra(Intent.EXTRA_STREAM, uri)
@@ -176,10 +176,10 @@ object FileSharingHelper {
     /**
      * Shares multiple Notebooks or PDFs from the Notes tab.
      */
-    fun shareNotebooks(context: Context, notebooks: List<NotebookItem>) {
+    fun shareNotebooks(context: Context, notebooks: List<NotebookItem>, includeEdits: Boolean = true) {
         if (notebooks.isEmpty()) return
         if (notebooks.size == 1) {
-            shareNotebook(context, notebooks.first())
+            shareNotebook(context, notebooks.first(), includeEdits = includeEdits)
             return
         }
 
@@ -188,15 +188,15 @@ object FileSharingHelper {
                 val uris = ArrayList<Uri>()
                 for (notebook in notebooks) {
                     try {
-                        val uri = if (!notebook.filePath.isNullOrBlank()) {
+                        val uri = if (!includeEdits && !notebook.filePath.isNullOrBlank()) {
                             val file = File(notebook.filePath)
                             if (file.exists() && file.length() > 0) {
                                 getFileUri(context, file, notebook.title)
                             } else {
-                                generateNotePdfUri(context, notebook)
+                                generateNotePdfUri(context, notebook, includeEdits = false)
                             }
                         } else {
-                            generateNotePdfUri(context, notebook)
+                            generateNotePdfUri(context, notebook, includeEdits = includeEdits)
                         }
                         uris.add(uri)
                     } catch (_: Exception) {}
@@ -226,11 +226,11 @@ object FileSharingHelper {
         }
     }
 
-    private fun generateNotePdfUri(context: Context, notebook: NotebookItem): Uri {
+    private fun generateNotePdfUri(context: Context, notebook: NotebookItem, includeEdits: Boolean = true): Uri {
         val shareDir = File(context.cacheDir, "shared_notes").apply { mkdirs() }
         val safeName = sanitizeFileName(notebook.title)
         val pdfFile = File(shareDir, "$safeName.pdf")
-        val pdfBytes = NotePdfGenerator.generatePdf(notebook)
+        val pdfBytes = NotePdfGenerator.generatePdf(notebook, includeEdits = includeEdits)
         pdfFile.writeBytes(pdfBytes)
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
     }

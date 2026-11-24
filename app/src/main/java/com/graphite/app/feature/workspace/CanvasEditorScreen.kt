@@ -3,6 +3,8 @@ package com.graphite.app.feature.workspace
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import com.graphite.app.core.sharing.FileSharingHelper
+import com.graphite.app.core.sharing.ShareOptionsDialog
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -251,6 +253,8 @@ fun CanvasEditorScreen(
     var showStylusDialog by remember { mutableStateOf(false) }
     var showZoomBox by remember { mutableStateOf(false) }
     var showCoverPicker by remember { mutableStateOf(false) }
+    var showShareOptionsDialog by remember { mutableStateOf(false) }
+    var noteToShareWithLiveState by remember { mutableStateOf<NotebookItem?>(null) }
 
     // Zoom & Pan state
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
@@ -3920,9 +3924,16 @@ fun CanvasEditorScreen(
                     ) {
                         MenuClickableRowWithIcon(Icons.Default.Share, "Share", hasChevron = true) {
                             showDocumentMenu = false
-                            val currentNote = notebook ?: GraphiteRepository.getNotebook(notebookId)
-                            if (currentNote != null) {
-                                com.graphite.app.core.sharing.FileSharingHelper.shareNotebook(context, currentNote)
+                            val baseNote = notebook ?: GraphiteRepository.getNotebook(notebookId)
+                            if (baseNote != null) {
+                                val serializedBoxes = localTextBoxes.map { it.serialize() }
+                                val serializedImages = localImages.map { it.serialize() }
+                                val liveNote = baseNote.copy(
+                                    initialStrokes = uiState.strokes,
+                                    previewLines = serializedBoxes + serializedImages
+                                )
+                                noteToShareWithLiveState = liveNote
+                                showShareOptionsDialog = true
                             } else {
                                 Toast.makeText(context, "Document not ready for sharing", Toast.LENGTH_SHORT).show()
                             }
@@ -4389,6 +4400,28 @@ fun CanvasEditorScreen(
         // ==========================================
         // 9. SUB-DIALOGS (Template, Rename, GoTo, etc.)
         // ==========================================
+        if (showShareOptionsDialog && noteToShareWithLiveState != null) {
+            val liveNote = noteToShareWithLiveState!!
+            ShareOptionsDialog(
+                title = liveNote.title,
+                itemCount = 1,
+                onDismiss = {
+                    showShareOptionsDialog = false
+                    noteToShareWithLiveState = null
+                },
+                onShareWithEdits = {
+                    FileSharingHelper.shareNotebook(context, liveNote, includeEdits = true)
+                    showShareOptionsDialog = false
+                    noteToShareWithLiveState = null
+                },
+                onShareWithoutEdits = {
+                    FileSharingHelper.shareNotebook(context, liveNote, includeEdits = false)
+                    showShareOptionsDialog = false
+                    noteToShareWithLiveState = null
+                }
+            )
+        }
+
         if (showTemplateDialog) {
             AlertDialog(
                 onDismissRequest = { showTemplateDialog = false },
