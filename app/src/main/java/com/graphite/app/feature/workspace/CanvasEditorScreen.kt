@@ -3920,12 +3920,12 @@ fun CanvasEditorScreen(
                     ) {
                         MenuClickableRowWithIcon(Icons.Default.Share, "Share", hasChevron = true) {
                             showDocumentMenu = false
-                            val sendIntent = Intent().apply {
-                                action = Intent.ACTION_SEND
-                                putExtra(Intent.EXTRA_TEXT, "${notebook?.title ?: "Note"}\n\n${notebook?.previewLines?.joinToString("\n") ?: ""}")
-                                type = "text/plain"
+                            val currentNote = notebook ?: GraphiteRepository.getNotebook(notebookId)
+                            if (currentNote != null) {
+                                com.graphite.app.core.sharing.FileSharingHelper.shareNotebook(context, currentNote)
+                            } else {
+                                Toast.makeText(context, "Document not ready for sharing", Toast.LENGTH_SHORT).show()
                             }
-                            context.startActivity(Intent.createChooser(sendIntent, "Share Document"))
                         }
                         MenuClickableRowWithIcon(Icons.Default.MenuBook, "Go To Page", subtitle = "${currentPageIndex + 1} of $totalPages") {
                             showDocumentMenu = false

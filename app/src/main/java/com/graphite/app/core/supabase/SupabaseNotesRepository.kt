@@ -392,7 +392,7 @@ class SupabaseNotesRepository(
                 )
             }
 
-            val chunks = dtoList.chunked(4)
+            val chunks = dtoList.chunked(50)
             for (chunk in chunks) {
                 val payload = json.encodeToString(chunk)
                 executeWithRetry { token ->
@@ -478,6 +478,44 @@ class SupabaseNotesRepository(
                 }
             }
 
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteNotes(notebookIds: List<String>): Result<Unit> = withContext(ioDispatcher) {
+        if (notebookIds.isEmpty()) return@withContext Result.success(Unit)
+        try {
+            val session = getAuthenticatedSession()
+            val userId = authManager.currentUserId ?: session.user.id
+            val now = System.currentTimeMillis()
+            val tombstones = notebookIds.map { id ->
+                SupabaseNotebookDto(
+                    id = id,
+                    userId = userId,
+                    title = "Deleted",
+                    isDeleted = true,
+                    updatedAtMillis = now,
+                    updatedAt = "Deleted"
+                )
+            }
+            val payload = json.encodeToString(tombstones)
+            executeWithRetry { token ->
+                Request.Builder()
+                    .url("$baseUrl/rest/v1/notebooks?on_conflict=id")
+                    .header("apikey", publishableKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .header("Prefer", "resolution=merge-duplicates,return=minimal")
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+            }.use { response ->
+                if (!response.isSuccessful && response.code != 404) {
+                    val body = response.body?.string() ?: ""
+                    android.util.Log.e("SupabaseNotesRepository", "HTTP ${response.code} upserting delete tombstones: $body")
+                }
+            }
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

@@ -1,8 +1,8 @@
 {
-  "versionCode": 99,
+  "versionCode": 100,
   "versionName": "1.0.0",
-  "commitSha": "0b1ee7c",
-  "commitMessage": "fix: dynamic sideways panning and simultaneous zoom/scroll across all modes",
-  "buildDate": "2026-11-17 03:40 UTC",
+  "commitSha": "HEAD",
+  "commitMessage": "feat: folder drag-and-drop, multi-select, clean card redesign, duplicate import fix, stroke saving, and fast sync",
+  "buildDate": "2026-11-24 05:57 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }

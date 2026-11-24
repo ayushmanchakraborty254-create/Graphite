@@ -21,17 +21,13 @@ object FileSharingHelper {
     }
 
     private fun getFileUri(context: Context, file: File, displayName: String? = null): Uri {
-        return try {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        } catch (_: Exception) {
-            // If the file path is not covered by FileProvider roots, copy to cache/shared_temp
-            val tempDir = File(context.cacheDir, "shared_temp").apply { mkdirs() }
-            val ext = file.extension.ifBlank { "pdf" }
-            val safeName = sanitizeFileName(displayName ?: file.nameWithoutExtension)
-            val destFile = File(tempDir, "$safeName.$ext")
-            file.copyTo(destFile, overwrite = true)
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", destFile)
-        }
+        val tempDir = File(context.cacheDir, "shared_temp").apply { mkdirs() }
+        val ext = file.extension.ifBlank { "pdf" }
+        val rawName = displayName ?: file.nameWithoutExtension.replace(Regex("^[0-9a-fA-F\\-]{36}_"), "")
+        val safeName = sanitizeFileName(rawName)
+        val destFile = File(tempDir, "$safeName.$ext")
+        file.copyTo(destFile, overwrite = true)
+        return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", destFile)
     }
 
     /**

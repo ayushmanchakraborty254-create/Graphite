@@ -197,6 +197,8 @@ fun NoteshelfScreen(
     // Drag and Drop state
     var isDraggingNote by remember { mutableStateOf(false) }
     var draggedNotebook by remember { mutableStateOf<NotebookItem?>(null) }
+    var isDraggingFolder by remember { mutableStateOf(false) }
+    var draggedFolder by remember { mutableStateOf<FolderItem?>(null) }
     var duplicateWarningDialogInfo by remember { mutableStateOf<DuplicateFileWarningInfo?>(null) }
     var dragTouchPositionInRoot by remember { mutableStateOf(Offset.Zero) }
     var totalDragDistance by remember { mutableFloatStateOf(0f) }
@@ -205,13 +207,13 @@ fun NoteshelfScreen(
     var expandedFolderIds by remember { mutableStateOf(setOf<String>()) }
 
     // Auto-expand folder dropdown when hovered during drag-and-drop
-    LaunchedEffect(hoveredFolderId, isDraggingNote) {
-        if (isDraggingNote && hoveredFolderId != null) {
+    LaunchedEffect(hoveredFolderId, isDraggingNote, isDraggingFolder) {
+        if ((isDraggingNote || isDraggingFolder) && hoveredFolderId != null) {
             val targetId = hoveredFolderId!!
             val hasSubfolders = folders.any { it.parentId == targetId }
             if (hasSubfolders && targetId !in expandedFolderIds) {
                 kotlinx.coroutines.delay(350L)
-                if (isDraggingNote && hoveredFolderId == targetId) {
+                if ((isDraggingNote || isDraggingFolder) && hoveredFolderId == targetId) {
                     expandedFolderIds = expandedFolderIds + targetId
                 }
             }
@@ -222,16 +224,38 @@ fun NoteshelfScreen(
     var uploadingFolderInfo by remember { mutableStateOf<Pair<FolderItem, Triple<Int, Int, String>?>?>(null) }
     var isUploadingFolder by remember { mutableStateOf(false) }
 
-    // Note Selection & Deletion state
+    // Selection & Deletion state
     var selectedNotebookIds by remember { mutableStateOf(setOf<String>()) }
+    var selectedFolderIds by remember { mutableStateOf(setOf<String>()) }
     var notesToDelete by remember { mutableStateOf<List<NotebookItem>?>(null) }
     var isDeletingNotesCloud by remember { mutableStateOf(false) }
+
+    val isSelectionMode = selectedNotebookIds.isNotEmpty() || selectedFolderIds.isNotEmpty()
+    val toggleFolderSelection: (String) -> Unit = { id ->
+        selectedFolderIds = if (id in selectedFolderIds) selectedFolderIds - id else selectedFolderIds + id
+    }
+
+    val isDescendantOf: (String, String) -> Boolean = { candidateChildId, ancestorId ->
+        var curr = folders.find { it.id == candidateChildId }
+        var result = false
+        while (curr != null && curr.parentId != null) {
+            if (curr.parentId == ancestorId) {
+                result = true
+                break
+            }
+            curr = folders.find { it.id == curr?.parentId }
+        }
+        result
+    }
 
     LaunchedEffect(googleUser?.email, isGuestMode) {
         selectedCategory = "All Notes"
         selectedNotebookIds = emptySet()
+        selectedFolderIds = emptySet()
         isDraggingNote = false
         draggedNotebook = null
+        isDraggingFolder = false
+        draggedFolder = null
         hoveredFolderId = null
         duplicateWarningDialogInfo = null
     }
@@ -437,6 +461,30 @@ fun NoteshelfScreen(
         }
     }
 
+    val handleDropFolderOnFolder: (String) -> Unit = { targetFolderId ->
+        val target = folders.find { it.id == targetFolderId }
+        val f = draggedFolder
+        if (target != null && f != null) {
+            val toMove = if (f.id in selectedFolderIds && selectedFolderIds.size > 1) {
+                selectedFolderIds
+            } else {
+                setOf(f.id)
+            }
+            val validToMove = toMove.filter { fId ->
+                fId != targetFolderId && !isDescendantOf(targetFolderId, fId)
+            }
+            if (validToMove.isNotEmpty()) {
+                validToMove.forEach { fId ->
+                    GraphiteRepository.updateFolder(folderId = fId, newParentId = targetFolderId)
+                }
+                val msg = if (validToMove.size == 1) "Moved \"${f.name}\" to ${target.name}"
+                          else "Moved ${validToMove.size} folders to ${target.name}"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
+            selectedFolderIds = emptySet()
+        }
+    }
+
     // Filter notes according to category and search query
     val allNotesWithDeleted = GraphiteRepository.getAllNotesIncludingDeleted()
     val baseNotes = if (selectedCategory == "Trash") {
@@ -482,6 +530,24 @@ fun NoteshelfScreen(
             else -> searchFiltered
         }
     }
+
+    val activeFolder = folders.find { it.id == selectedCategory }
+    val isInsideFolder = activeFolder != null
+    val subfoldersInsideCurrentFolder = if (isInsideFolder && activeFolder != null) {
+        folders.filter { it.parentId == activeFolder.id }
+    } else emptyList()
+
+    val foldersToShow = if (hasActiveSession && showFoldersOnNotesScreen && searchQuery.isBlank()) {
+        if (isInsideFolder && activeFolder != null) {
+            subfoldersInsideCurrentFolder
+        } else if (selectedCategory == "Starred") {
+            folders.filter { it.isStarred }
+        } else if (selectedCategory == "All Notes") {
+            folders.filter { it.parentId == null }
+        } else emptyList()
+    } else emptyList()
+
+    val hasFoldersToShow = foldersToShow.isNotEmpty()
 
     val moveNoteInCustomOrder: (String, Int) -> Unit = { noteId, delta ->
         val allIds = sortedNotebooks.map { it.id }
@@ -809,7 +875,8 @@ fun NoteshelfScreen(
                     .fillMaxHeight()
                     .padding(horizontal = if (isTablet) 18.dp else 14.dp, vertical = 12.dp)
             ) {
-            if (selectedNotebookIds.isNotEmpty()) {
+            val totalSelected = selectedNotebookIds.size + selectedFolderIds.size
+            if (totalSelected > 0) {
                 // Contextual Selection Action Bar with Delete (Bin) icon
                 Row(
                     modifier = Modifier
@@ -819,7 +886,10 @@ fun NoteshelfScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { selectedNotebookIds = emptySet() }) {
+                        IconButton(onClick = {
+                            selectedNotebookIds = emptySet()
+                            selectedFolderIds = emptySet()
+                        }) {
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Cancel Selection",
@@ -828,7 +898,7 @@ fun NoteshelfScreen(
                         }
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "${selectedNotebookIds.size} Selected",
+                            text = "$totalSelected Selected",
                             color = Color.White,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold
@@ -836,7 +906,7 @@ fun NoteshelfScreen(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (selectedNotebookIds.size == 2 && onOpenSplitScreen != null) {
+                        if (selectedNotebookIds.size == 2 && selectedFolderIds.isEmpty() && onOpenSplitScreen != null) {
                             Button(
                                 onClick = {
                                     showMultiSelectSplitDialog = true
@@ -853,11 +923,20 @@ fun NoteshelfScreen(
                         }
 
                         val allFilteredIds = sortedNotebooks.map { it.id }.toSet()
-                        val allSelected = selectedNotebookIds.size == allFilteredIds.size && allFilteredIds.isNotEmpty()
+                        val allFilteredFolderIds = foldersToShow.map { it.id }.toSet()
+                        val allSelected = (allFilteredIds.isNotEmpty() || allFilteredFolderIds.isNotEmpty()) &&
+                            selectedNotebookIds.size == allFilteredIds.size &&
+                            selectedFolderIds.size == allFilteredFolderIds.size
 
                         IconButton(
                             onClick = {
-                                selectedNotebookIds = if (allSelected) emptySet() else allFilteredIds
+                                if (allSelected) {
+                                    selectedNotebookIds = emptySet()
+                                    selectedFolderIds = emptySet()
+                                } else {
+                                    selectedNotebookIds = allFilteredIds
+                                    selectedFolderIds = allFilteredFolderIds
+                                }
                             }
                         ) {
                             Icon(
@@ -878,33 +957,41 @@ fun NoteshelfScreen(
                             )
                         }
 
-                        IconButton(
-                            onClick = {
-                                val toShare = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
-                                if (toShare.isNotEmpty()) {
-                                    FileSharingHelper.shareNotebooks(context, toShare)
+                        if (selectedNotebookIds.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    val toShare = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
+                                    if (toShare.isNotEmpty()) {
+                                        FileSharingHelper.shareNotebooks(context, toShare)
+                                    }
                                 }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share Selected Notes",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
                             }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Share,
-                                contentDescription = "Share Selected Notes",
-                                tint = Color.White,
-                                modifier = Modifier.size(22.dp)
-                            )
                         }
 
                         IconButton(
                             onClick = {
+                                if (selectedFolderIds.isNotEmpty()) {
+                                    selectedFolderIds.forEach { GraphiteRepository.deleteFolder(it) }
+                                }
                                 val toDelete = allNotesWithDeleted.filter { it.id in selectedNotebookIds }
                                 if (toDelete.isNotEmpty()) {
                                     notesToDelete = toDelete
+                                } else if (selectedFolderIds.isNotEmpty()) {
+                                    Toast.makeText(context, "Deleted ${selectedFolderIds.size} folders", Toast.LENGTH_SHORT).show()
                                 }
+                                selectedFolderIds = emptySet()
                             }
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Delete,
-                                contentDescription = "Delete Selected Notes",
+                                contentDescription = "Delete Selected Items",
                                 tint = Color(0xFFFF5252),
                                 modifier = Modifier.size(24.dp)
                             )
@@ -1331,7 +1418,6 @@ fun NoteshelfScreen(
                     }
                 )
             } else {
-                val isSelectionMode = selectedNotebookIds.isNotEmpty()
                 val toggleNoteSelection = { noteId: String ->
                     selectedNotebookIds = if (noteId in selectedNotebookIds) {
                         selectedNotebookIds - noteId
@@ -1339,24 +1425,6 @@ fun NoteshelfScreen(
                         selectedNotebookIds + noteId
                     }
                 }
-
-                val activeFolder = folders.find { it.id == selectedCategory }
-                val isInsideFolder = activeFolder != null
-                val subfoldersInsideCurrentFolder = if (isInsideFolder && activeFolder != null) {
-                    folders.filter { it.parentId == activeFolder.id }
-                } else emptyList()
-
-                val foldersToShow = if (hasActiveSession && showFoldersOnNotesScreen && searchQuery.isBlank()) {
-                    if (isInsideFolder && activeFolder != null) {
-                        subfoldersInsideCurrentFolder
-                    } else if (selectedCategory == "Starred") {
-                        folders.filter { it.isStarred }
-                    } else if (selectedCategory == "All Notes") {
-                        folders.filter { it.parentId == null }
-                    } else emptyList()
-                } else emptyList()
-
-                val hasFoldersToShow = foldersToShow.isNotEmpty()
 
                 // Filter / Category Chips Row matching Image 1
                 if (selectedCategory != "Trash") {
@@ -1603,8 +1671,14 @@ fun NoteshelfScreen(
                                     folder = folder,
                                     noteCount = noteCount,
                                     isHoveredForDrop = (hoveredFolderId == folder.id),
-                                    onClick = { selectedCategory = folder.id },
-                                    onLongClick = { folderForOptionsDialog = folder },
+                                    onClick = {
+                                        if (isSelectionMode) {
+                                            toggleFolderSelection(folder.id)
+                                        } else {
+                                            selectedCategory = folder.id
+                                        }
+                                    },
+                                    onLongClick = { toggleFolderSelection(folder.id) },
                                     onUploadFolder = { handleUploadWholeFolder(folder) },
                                     onOpenOptions = { folderForOptionsDialog = folder },
                                     onDeleteFolder = {
@@ -1693,7 +1767,7 @@ fun NoteshelfScreen(
                     }
                 } else {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 135.dp),
+                        columns = GridCells.Adaptive(minSize = 112.dp),
                         modifier = Modifier.fillMaxSize(),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -1702,12 +1776,59 @@ fun NoteshelfScreen(
                         if (hasFoldersToShow) {
                             items(foldersToShow, key = { "folder_${it.id}" }) { folder ->
                                 val noteCount = notebooks.count { it.folderId == folder.id && !it.isDeleted }
+                                val isFolderSelected = folder.id in selectedFolderIds
                                 FolderThumbnailCard(
                                     folder = folder,
                                     noteCount = noteCount,
+                                    isSelected = isFolderSelected,
+                                    isSelectionMode = isSelectionMode,
                                     isHoveredForDrop = (hoveredFolderId == folder.id),
-                                    onClick = { selectedCategory = folder.id },
-                                    onLongClick = { folderForOptionsDialog = folder },
+                                    onClick = {
+                                        if (isSelectionMode) {
+                                            toggleFolderSelection(folder.id)
+                                        } else {
+                                            selectedCategory = folder.id
+                                        }
+                                    },
+                                    onLongClick = {
+                                        toggleFolderSelection(folder.id)
+                                    },
+                                    onDragStart = { rootPos ->
+                                        isDraggingFolder = true
+                                        draggedFolder = folder
+                                        if (folder.id !in selectedFolderIds) {
+                                            selectedFolderIds = setOf(folder.id)
+                                        }
+                                        dragTouchPositionInRoot = rootPos
+                                        totalDragDistance = 0f
+                                    },
+                                    onDrag = { dragAmount ->
+                                        dragTouchPositionInRoot += dragAmount
+                                        totalDragDistance += dragAmount.getDistance()
+                                        hoveredFolderId = folderBoundsMap.entries.firstOrNull { (fId, rect) ->
+                                            rect.contains(dragTouchPositionInRoot) &&
+                                                fId != folder.id &&
+                                                !isDescendantOf(fId, folder.id) &&
+                                                fId !in selectedFolderIds
+                                        }?.key
+                                    },
+                                    onDragEnd = {
+                                        if (hoveredFolderId != null && draggedFolder != null) {
+                                            handleDropFolderOnFolder(hoveredFolderId!!)
+                                        } else if (totalDragDistance < 15f) {
+                                            toggleFolderSelection(folder.id)
+                                        }
+                                        isDraggingFolder = false
+                                        draggedFolder = null
+                                        hoveredFolderId = null
+                                        totalDragDistance = 0f
+                                    },
+                                    onDragCancel = {
+                                        isDraggingFolder = false
+                                        draggedFolder = null
+                                        hoveredFolderId = null
+                                        totalDragDistance = 0f
+                                    },
                                     onUploadFolder = { handleUploadWholeFolder(folder) },
                                     onOpenOptions = { folderForOptionsDialog = folder },
                                     onDeleteFolder = {
@@ -1879,6 +2000,88 @@ fun NoteshelfScreen(
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Medium
                     )
+                }
+            }
+        }
+    }
+
+    // Floating Drag-and-Drop Folder Overlay
+    if (isDraggingFolder && draggedFolder != null) {
+        val f = draggedFolder!!
+        val count = if (f.id in selectedFolderIds && selectedFolderIds.size > 1) selectedFolderIds.size else 1
+        val (fColor, _) = getFolderColors(f)
+        val initialLetter = f.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(100f)
+        ) {
+            Card(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (dragTouchPositionInRoot.x - 55.dp.toPx()).toInt(),
+                            (dragTouchPositionInRoot.y - 40.dp.toPx()).toInt()
+                        )
+                    }
+                    .graphicsLayer {
+                        rotationZ = 4f
+                        scaleX = 1.05f
+                        scaleY = 1.05f
+                        alpha = 0.95f
+                    }
+                    .shadow(16.dp, ModernFolderShape),
+                colors = CardDefaults.cardColors(containerColor = fColor),
+                shape = ModernFolderShape,
+                border = BorderStroke(2.dp, if (hoveredFolderId != null) GraphiteOrange else Color.White)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(110.dp)
+                        .height(80.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initialLetter,
+                        color = Color.Black.copy(alpha = 0.38f),
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (count > 1) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(4.dp)
+                                .background(GraphiteOrange, CircleShape)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "$count",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    if (hoveredFolderId != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.45f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val fName = folders.find { it.id == hoveredFolderId }?.name
+                            Text(
+                                text = if (fName != null) "Drop into \"$fName\"" else "Drop to nest",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 4.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -2134,7 +2337,7 @@ fun NoteshelfScreen(
         )
     }
 
-    if (showMoveMultiFolderDialog && selectedNotebookIds.isNotEmpty()) {
+    if (showMoveMultiFolderDialog && (selectedNotebookIds.isNotEmpty() || selectedFolderIds.isNotEmpty())) {
         MoveNoteFolderDialog(
             folders = folders,
             currentFolderId = "",
@@ -2142,26 +2345,37 @@ fun NoteshelfScreen(
             onSelectFolder = { folderId ->
                 val target = folders.find { it.id == folderId }
                 val targetName = target?.name ?: "folder"
-                val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
-                val notesToMoveList = notebooks.filter { it.id in selectedNotebookIds }
-                val duplicate = notesToMoveList.find { n ->
-                    existingInTarget.any { existing ->
-                        existing.id != n.id && existing.title.trim().equals(n.title.trim(), ignoreCase = true)
+
+                if (selectedFolderIds.isNotEmpty()) {
+                    val validFoldersToMove = selectedFolderIds.filter { it != folderId && !isDescendantOf(folderId, it) }
+                    validFoldersToMove.forEach { fId ->
+                        GraphiteRepository.updateFolder(folderId = fId, newParentId = folderId)
                     }
                 }
-                if (duplicate != null && target != null) {
-                    duplicateWarningDialogInfo = DuplicateFileWarningInfo(
-                        targetFolder = target,
-                        duplicateTitle = duplicate.title,
-                        noteToMove = duplicate,
-                        otherNoteIdsToMove = selectedNotebookIds - duplicate.id
-                    )
-                } else {
-                    val count = selectedNotebookIds.size
-                    GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
-                    Toast.makeText(context, "Moved $count notes to $targetName", Toast.LENGTH_SHORT).show()
-                    selectedNotebookIds = emptySet()
+
+                if (selectedNotebookIds.isNotEmpty()) {
+                    val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
+                    val notesToMoveList = notebooks.filter { it.id in selectedNotebookIds }
+                    val duplicate = notesToMoveList.find { n ->
+                        existingInTarget.any { existing ->
+                            existing.id != n.id && existing.title.trim().equals(n.title.trim(), ignoreCase = true)
+                        }
+                    }
+                    if (duplicate != null && target != null) {
+                        duplicateWarningDialogInfo = DuplicateFileWarningInfo(
+                            targetFolder = target,
+                            duplicateTitle = duplicate.title,
+                            noteToMove = duplicate,
+                            otherNoteIdsToMove = selectedNotebookIds - duplicate.id
+                        )
+                    } else {
+                        GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
+                    }
                 }
+                val totalCount = selectedNotebookIds.size + selectedFolderIds.size
+                Toast.makeText(context, "Moved $totalCount items to $targetName", Toast.LENGTH_SHORT).show()
+                selectedNotebookIds = emptySet()
+                selectedFolderIds = emptySet()
                 showMoveMultiFolderDialog = false
             }
         )
@@ -2473,19 +2687,13 @@ fun NoteshelfScreen(
             onDeleteCloudAndDevice = {
                 isDeletingNotesCloud = true
                 scope.launch {
+                    try {
+                        val ids = targetNotes.map { it.id }
+                        syncManager.deleteNotesFromCloud(ids)
+                    } catch (_: Exception) {}
                     targetNotes.forEach { n ->
-                        try {
-                            syncManager.deleteNoteFromCloud(n.id)
-                        } catch (_: Exception) {}
                         GraphiteRepository.permanentlyDeleteNotebook(n.id)
                     }
-                    try {
-                        val driveManager = com.graphite.app.GraphiteApplication.instance.googleDriveManager
-                        val email = driveManager.getAuthorizedAccountEmail()
-                        if (!email.isNullOrBlank() && driveManager.hasDrivePermission(context)) {
-                            driveManager.backupNotesToDriveDirectly(context, email)
-                        }
-                    } catch (_: Exception) {}
                     isDeletingNotesCloud = false
                     selectedNotebookIds = selectedNotebookIds - targetNotes.map { it.id }.toSet()
                     notesToDelete = null
@@ -2495,6 +2703,17 @@ fun NoteshelfScreen(
                         "Deleted ${targetNotes.size} notes from device & Supabase cloud"
                     }
                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+
+                    // Background Google Drive backup so it never delays UI dismissal
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        try {
+                            val driveManager = com.graphite.app.GraphiteApplication.instance.googleDriveManager
+                            val email = driveManager.getAuthorizedAccountEmail()
+                            if (!email.isNullOrBlank() && driveManager.hasDrivePermission(context)) {
+                                driveManager.backupNotesToDriveDirectly(context, email)
+                            }
+                        } catch (_: Exception) {}
+                    }
                 }
             }
         )
@@ -2684,8 +2903,20 @@ private fun ImageThumbnailView(filePath: String, modifier: Modifier = Modifier) 
     )
 }
 
+private val FolderColorPalette = listOf(
+    Color(0xFF5B96E8), // Soft Blue
+    Color(0xFF66BB6A), // Fresh Green
+    Color(0xFFFFA726), // Warm Orange
+    Color(0xFFAB47BC), // Soft Purple
+    Color(0xFF26C6DA), // Cyan / Teal
+    Color(0xFFEC407A)  // Pink / Coral
+)
+
 private fun getFolderColors(folder: FolderItem): Pair<Color, Color> {
-    val base = folder.colorHex?.let { Color(it) } ?: Color(0xFFFFD54FL)
+    val base = folder.colorHex?.let { Color(it) } ?: run {
+        val index = kotlin.math.abs(folder.id.hashCode()) % FolderColorPalette.size
+        FolderColorPalette[index]
+    }
     return base to Color(0x77000000)
 }
 
@@ -2728,41 +2959,61 @@ private val ModernFolderShape = GenericShape { size, _ ->
 private fun FolderThumbnailCard(
     folder: FolderItem,
     noteCount: Int,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     isHoveredForDrop: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onDragStart: ((Offset) -> Unit)? = null,
+    onDrag: ((Offset) -> Unit)? = null,
+    onDragEnd: (() -> Unit)? = null,
+    onDragCancel: (() -> Unit)? = null,
     onUploadFolder: () -> Unit,
     onOpenOptions: () -> Unit,
     onDeleteFolder: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    val (folderColor, _) = remember(folder.colorHex, folder.id) {
+    val (folderColor, _) = remember(folder.colorHex, folder.name, folder.id) {
         getFolderColors(folder)
     }
+    val cardPosRef = remember { object { var x = 0f; var y = 0f } }
     val isFolderUploaded = folder.isUploadedToDrive || !folder.driveFolderId.isNullOrBlank()
+    val initialChar = folder.name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "F"
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (isHoveredForDrop) GraphiteOrange.copy(alpha = 0.25f) else Color.Transparent)
+            .background(if (isSelected) Color(0xFF2A2016) else if (isHoveredForDrop) GraphiteOrange.copy(alpha = 0.25f) else Color.Transparent)
             .then(
-                if (isHoveredForDrop) Modifier.border(2.5.dp, GraphiteOrange, RoundedCornerShape(12.dp))
+                if (isSelected) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(12.dp))
+                else if (isHoveredForDrop) Modifier.border(2.5.dp, GraphiteOrange, RoundedCornerShape(12.dp))
                 else Modifier
             )
-            .combinedClickable(
+            .onGloballyPositioned { coords ->
+                val tl = coords.boundsInRoot().topLeft
+                cardPosRef.x = tl.x
+                cardPosRef.y = tl.y
+            }
+            .notebookTapDragModifier(
+                key = "folder_${folder.id}",
                 onClick = onClick,
-                onLongClick = onLongClick
+                onLongClick = onLongClick,
+                onDragStart = onDragStart,
+                onDrag = onDrag,
+                onDragEnd = onDragEnd,
+                onDragCancel = onDragCancel,
+                getRootPosition = { Offset(cardPosRef.x, cardPosRef.y) }
             )
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Folder Visual Representation - Single whole shape with no rectangles inside
+        // Folder Visual Representation matching Image 1: compact 110x80dp with initial letter
         Box(
             modifier = Modifier
-                .width(130.dp)
-                .height(105.dp)
+                .width(110.dp)
+                .height(80.dp)
                 .graphicsLayer {
                     if (isHoveredForDrop) {
                         scaleX = 1.05f
@@ -2776,38 +3027,35 @@ private fun FolderThumbnailCard(
                     width = if (isHoveredForDrop) 2.5.dp else 1.dp,
                     color = if (isHoveredForDrop) GraphiteOrange else Color.Black.copy(alpha = 0.12f),
                     shape = ModernFolderShape
-                )
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            // Star Toggle Button in Lower-Left of Folder (borderless, no outer circle)
-            IconButton(
-                onClick = { GraphiteRepository.toggleStarFolder(folder.id) },
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 4.dp, bottom = 4.dp)
-                    .size(28.dp)
-            ) {
-                Icon(
-                    imageVector = if (folder.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
-                    contentDescription = if (folder.isStarred) "Starred" else "Star Folder",
-                    tint = if (folder.isStarred) Color(0xFFFFB300) else Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
+            // Bold Capital Initial Letter in Center
+            Text(
+                text = initialChar,
+                color = Color.Black.copy(alpha = 0.38f),
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold
+            )
 
-            // Cloud Upload Badge Icon in Top-Right Shoulder of Folder (borderless, no outer circle)
-            IconButton(
-                onClick = onUploadFolder,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 12.dp, end = 4.dp)
-                    .size(28.dp)
-            ) {
-                Icon(
-                    imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudUpload,
-                    contentDescription = if (isFolderUploaded) "Folder backed up to Drive" else "Upload Folder to Google Drive",
-                    tint = if (isFolderUploaded) Color(0xFF2E7D32) else Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
+            // Selection Checkmark Badge
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(GraphiteOrange),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Selected",
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
             }
 
             // Drop Hover Indicator Overlay
@@ -2826,13 +3074,13 @@ private fun FolderThumbnailCard(
                             imageVector = Icons.Default.MoveToInbox,
                             contentDescription = null,
                             tint = Color.White,
-                            modifier = Modifier.size(26.dp)
+                            modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "Drop Here",
                             color = Color.White,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -2923,24 +3171,6 @@ private fun FolderThumbnailCard(
                     }
                 )
             }
-        }
-
-        // Subtitle row with item count and cloud upload status
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            Icon(
-                imageVector = if (isFolderUploaded) Icons.Default.CloudDone else Icons.Default.CloudQueue,
-                contentDescription = null,
-                tint = if (isFolderUploaded) Color(0xFF4CAF50) else Color(0xFF757575),
-                modifier = Modifier.size(10.dp)
-            )
-            Text(
-                text = "$noteCount ${if (noteCount == 1) "item" else "items"} • ${if (isFolderUploaded) "Backed up" else "Local"}",
-                color = if (isFolderUploaded) Color(0xFF81C784) else Color.Gray,
-                fontSize = 10.sp
-            )
         }
     }
 }
@@ -3303,8 +3533,8 @@ private fun NotebookThumbnailCard(
         // Document Thumbnail Sheet matching Page 4
         Card(
             modifier = Modifier
-                .width(130.dp)
-                .height(170.dp)
+                .width(112.dp)
+                .height(148.dp)
                 .shadow(4.dp, RoundedCornerShape(6.dp)),
             colors = CardDefaults.cardColors(
                 containerColor = if (isPdf || isImage) Color(0xFF211515) else if (isKeepText) Color(0xFF1E1E1E) else Color(0xFFFAFAFA)

@@ -2,6 +2,7 @@ package com.graphite.app.data.repository
 
 import android.content.Context
 import com.graphite.app.core.importer.DocumentContentParser
+import com.graphite.app.core.supabase.InkSerialization
 import com.graphite.app.data.model.*
 import com.graphite.app.feature.workspace.model.InkPoint
 import com.graphite.app.feature.workspace.model.InkStroke
@@ -1454,6 +1455,9 @@ object GraphiteRepository {
             put("driveFileId", item.driveFileId)
             put("isUploadedToDrive", item.isUploadedToDrive)
             put("lastOpenedPage", item.lastOpenedPage)
+            if (item.initialStrokes.isNotEmpty()) {
+                put("strokesJson", InkSerialization.serializeStrokes(item.initialStrokes))
+            }
 
             // Cover
             val coverObj = JSONObject().apply {
@@ -1543,6 +1547,9 @@ object GraphiteRepository {
             version = json.optLong("version", 1L),
             userId = if (json.has("userId") && !json.isNull("userId")) json.getString("userId") else null,
             previewLines = preview,
+            initialStrokes = if (json.has("strokesJson") && !json.isNull("strokesJson")) {
+                InkSerialization.deserializeStrokes(json.getString("strokesJson"))
+            } else emptyList(),
             filePath = if (json.has("filePath") && !json.isNull("filePath")) json.getString("filePath") else null,
             mimeType = if (json.has("mimeType") && !json.isNull("mimeType")) json.getString("mimeType") else null,
             originalFileName = if (json.has("originalFileName") && !json.isNull("originalFileName")) json.getString("originalFileName") else null,

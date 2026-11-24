@@ -243,6 +243,26 @@ class FileImportManager(
             return ImportResult.Error("Invalid or corrupted PDF file: missing \"%PDF-\" signature header.")
         }
 
+        val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
+
+        // Prevent duplicate file creation when opening an already-imported file from WhatsApp/external apps
+        val existingNote = graphiteRepository.notebooks.value.firstOrNull {
+            !it.isDeleted && (
+                it.originalFileName.equals(displayName, ignoreCase = true) ||
+                it.title.equals(rawTitle, ignoreCase = true)
+            )
+        }
+        if (existingNote != null && !existingNote.filePath.isNullOrBlank()) {
+            val existingFile = File(existingNote.filePath)
+            if (existingFile.exists() && existingFile.length() == bytes.size.toLong()) {
+                return ImportResult.SuccessNotebook(
+                    notebook = existingNote,
+                    syncedToCloud = false,
+                    message = "Opened existing note \"${existingNote.title}\""
+                )
+            }
+        }
+
         val notesDir = File(context.filesDir, "imported_notes").apply { mkdirs() }
         val ext = displayName.substringAfterLast('.', "")
         val safeFileName = "${UUID.randomUUID()}_${displayName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}"
@@ -274,7 +294,6 @@ class FileImportManager(
                 parsed.pageOrSlideCount
             }
 
-            val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateNoteTitle(rawTitle)
 
             val previewLines = when {
@@ -358,6 +377,23 @@ class FileImportManager(
             return ImportResult.Error("Only valid PDF documents (.pdf) are supported in Bookshelf.")
         }
 
+        val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
+
+        // Prevent duplicate book creation when opening an already-imported PDF
+        val existingBook = graphiteRepository.books.value.firstOrNull {
+            it.title.equals(rawTitle, ignoreCase = true)
+        }
+        if (existingBook != null && !existingBook.filePath.isNullOrBlank()) {
+            val existingFile = File(existingBook.filePath)
+            if (existingFile.exists() && existingFile.length() == bytes.size.toLong()) {
+                return ImportResult.SuccessBook(
+                    book = existingBook,
+                    pageCount = existingBook.totalChapters,
+                    message = "Opened existing book \"${existingBook.title}\""
+                )
+            }
+        }
+
         val docsDir = File(context.filesDir, "imported_documents").apply { mkdirs() }
         val safeFileName = "${UUID.randomUUID()}_${displayName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}"
         val targetFile = File(docsDir, safeFileName)
@@ -369,7 +405,6 @@ class FileImportManager(
             val parsed = DocumentContentParser.parse(bytes, displayName, resolvedMimeType)
             val pageCount = parsed.pageOrSlideCount
 
-            val rawTitle = if (displayName.contains('.')) displayName.substringBeforeLast('.') else displayName
             val disambiguatedTitle = graphiteRepository.disambiguateBookTitle(rawTitle)
 
             val importedBook = Book(
