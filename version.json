@@ -1,8 +1,8 @@
 {
-  "versionCode": 101,
+  "versionCode": 103,
   "versionName": "1.0.0",
-  "commitSha": "HEAD",
+  "commitSha": "72e3bb7",
   "commitMessage": "feat: share options dialog with send with edits or without edits and annotated document export",
-  "buildDate": "2026-11-24 15:53 UTC",
+  "buildDate": "2026-11-24 16:02 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
