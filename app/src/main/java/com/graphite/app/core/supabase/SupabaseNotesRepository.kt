@@ -252,12 +252,25 @@ class SupabaseNotesRepository(
                     }
 
                     // Check if matching local file already exists in imported_notes
-                    if (resolvedFilePath == null && context != null && resolvedFileName != null) {
-                        val notesDir = File(context.filesDir, "imported_notes")
-                        val possibleFile = File(notesDir, "${dto.id}_${resolvedFileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}")
-                        if (possibleFile.exists()) {
-                            resolvedFilePath = possibleFile.absolutePath
-                        }
+                    if (resolvedFilePath == null && context != null) {
+                        try {
+                            val notesDir = File(context.filesDir, "imported_notes")
+                            if (notesDir.exists()) {
+                                val allFiles = notesDir.listFiles() ?: emptyArray()
+                                val origClean = resolvedFileName?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                                val titleClean = dto.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                                val candidate = allFiles.firstOrNull { f ->
+                                    f.length() > 0 && (
+                                        (origClean != null && (f.name.endsWith("_$origClean", ignoreCase = true) || f.name.equals(origClean, ignoreCase = true) || f.name.contains(origClean, ignoreCase = true))) ||
+                                        f.name.endsWith("_$titleClean.pdf", ignoreCase = true) ||
+                                        f.name.contains(titleClean, ignoreCase = true)
+                                    )
+                                }
+                                if (candidate != null) {
+                                    resolvedFilePath = candidate.absolutePath
+                                }
+                            }
+                        } catch (_: Exception) {}
                     }
 
                     val finalUpdatedAtMillis = if (dto.updatedAtMillis > 0) {

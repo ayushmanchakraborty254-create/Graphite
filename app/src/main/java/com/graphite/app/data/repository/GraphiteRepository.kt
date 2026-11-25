@@ -757,12 +757,55 @@ object GraphiteRepository {
                     localMap.remove(remote.id)
                 }
             } else if (local == null) {
-                // New note from another device
-                localMap[remote.id] = remote.copy(userId = currentUid)
+                // New note from another device - check if matching file exists in local storage
+                var initialFilePath = remote.filePath
+                if (initialFilePath == null || !File(initialFilePath).exists()) {
+                    try {
+                        val app = com.graphite.app.GraphiteApplication.instance
+                        val notesDir = File(app.filesDir, "imported_notes")
+                        if (notesDir.exists()) {
+                            val allFiles = notesDir.listFiles() ?: emptyArray()
+                            val origClean = remote.originalFileName?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                            val titleClean = remote.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                            val candidate = allFiles.firstOrNull { f ->
+                                f.length() > 0 && (
+                                    (origClean != null && (f.name.endsWith("_$origClean", ignoreCase = true) || f.name.equals(origClean, ignoreCase = true) || f.name.contains(origClean, ignoreCase = true))) ||
+                                    f.name.endsWith("_$titleClean.pdf", ignoreCase = true) ||
+                                    f.name.contains(titleClean, ignoreCase = true)
+                                )
+                            }
+                            if (candidate != null) {
+                                initialFilePath = candidate.absolutePath
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                localMap[remote.id] = remote.copy(userId = currentUid, filePath = initialFilePath)
             } else {
                 // Preserve physical document files if local file exists on disk
                 val hasLocalFile = !local.filePath.isNullOrBlank() && File(local.filePath).exists()
-                val resolvedFilePath = if (hasLocalFile) local.filePath else (remote.filePath ?: local.filePath)
+                var resolvedFilePath = if (hasLocalFile) local.filePath else (remote.filePath ?: local.filePath)
+                if (resolvedFilePath == null || !File(resolvedFilePath).exists()) {
+                    try {
+                        val app = com.graphite.app.GraphiteApplication.instance
+                        val notesDir = File(app.filesDir, "imported_notes")
+                        if (notesDir.exists()) {
+                            val allFiles = notesDir.listFiles() ?: emptyArray()
+                            val origClean = (remote.originalFileName ?: local.originalFileName)?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                            val titleClean = remote.title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                            val candidate = allFiles.firstOrNull { f ->
+                                f.length() > 0 && (
+                                    (origClean != null && (f.name.endsWith("_$origClean", ignoreCase = true) || f.name.equals(origClean, ignoreCase = true) || f.name.contains(origClean, ignoreCase = true))) ||
+                                    f.name.endsWith("_$titleClean.pdf", ignoreCase = true) ||
+                                    f.name.contains(titleClean, ignoreCase = true)
+                                )
+                            }
+                            if (candidate != null) {
+                                resolvedFilePath = candidate.absolutePath
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
                 val resolvedMimeType = if (hasLocalFile) local.mimeType else (remote.mimeType ?: local.mimeType)
                 val resolvedFileName = if (hasLocalFile) local.originalFileName else (remote.originalFileName ?: local.originalFileName)
                 val resolvedPageCount = maxOf(local.pageCount, remote.pageCount)
@@ -776,10 +819,10 @@ object GraphiteRepository {
                         originalFileName = resolvedFileName,
                         pageCount = resolvedPageCount
                     )
-                } else if (!hasLocalFile && remote.filePath != null) {
-                    // Update local file pointer if remote brought a materialized file
+                } else if (!hasLocalFile && resolvedFilePath != null) {
+                    // Update local file pointer if remote or local storage brought a materialized file
                     localMap[remote.id] = local.copy(
-                        filePath = remote.filePath,
+                        filePath = resolvedFilePath,
                         mimeType = remote.mimeType ?: local.mimeType,
                         originalFileName = remote.originalFileName ?: local.originalFileName,
                         pageCount = resolvedPageCount

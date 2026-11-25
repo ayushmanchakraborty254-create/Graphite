@@ -56,8 +56,23 @@ object PdfThumbnailHelper {
                 context.contentResolver.openFileDescriptor(Uri.parse(filePath), "r")
             } else {
                 val file = File(filePath)
-                if (file.exists() && file.canRead()) {
-                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val targetFile = if (file.exists() && file.canRead()) file else {
+                    try {
+                        val notesDir = File(context.filesDir, "imported_notes")
+                        if (notesDir.exists()) {
+                            val baseName = file.name
+                            notesDir.listFiles()?.firstOrNull { f ->
+                                f.length() > 0 && (
+                                    f.name.endsWith("_$baseName", ignoreCase = true) ||
+                                    f.name.equals(baseName, ignoreCase = true) ||
+                                    f.name.contains(baseName, ignoreCase = true)
+                                )
+                            }
+                        } else null
+                    } catch (_: Exception) { null }
+                }
+                if (targetFile != null && targetFile.exists() && targetFile.canRead()) {
+                    ParcelFileDescriptor.open(targetFile, ParcelFileDescriptor.MODE_READ_ONLY)
                 } else null
             }) ?: return@withContext null
 
@@ -123,7 +138,7 @@ fun PdfPageThumbnail(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(Color(0xFF2A2A2A))
+                .background(Color(0xFFFAFAFA))
         )
     }
 }
@@ -239,7 +254,7 @@ fun ImagePageThumbnail(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(Color(0xFF2A2A2A))
+                .background(Color(0xFFF5F5F5))
         )
     }
 }

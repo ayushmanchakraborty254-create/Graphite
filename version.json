@@ -1,8 +1,8 @@
 {
-  "versionCode": 103,
+  "versionCode": 104,
   "versionName": "1.0.0",
-  "commitSha": "72e3bb7",
-  "commitMessage": "feat: share options dialog with send with edits or without edits and annotated document export",
-  "buildDate": "2026-11-24 16:02 UTC",
+  "commitSha": "HEAD",
+  "commitMessage": "fix: mobile 2-column grid layout, auto file-path resolution for PDF thumbnails, and clean paper styling",
+  "buildDate": "2026-11-25 01:50 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
