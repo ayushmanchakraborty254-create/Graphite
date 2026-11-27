@@ -1,8 +1,8 @@
 {
   "versionCode": 109,
   "versionName": "1.0.0",
-  "commitSha": "8c912cf",
+  "commitSha": "d90f23e",
   "commitMessage": "fix: update downloader stability, prevent false update loops, atomic asset releases, and OEM installer permissions",
-  "buildDate": "2026-11-27 09:35 UTC",
+  "buildDate": "2026-11-27 09:38 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
