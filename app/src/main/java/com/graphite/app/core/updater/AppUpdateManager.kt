@@ -3,10 +3,12 @@ package com.graphite.app.core.updater
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -118,6 +120,26 @@ class AppUpdateManager(
     private val rawVersionUrl = "https://raw.githubusercontent.com/$githubRepo/main/version.json"
 
     private var downloadJob: kotlinx.coroutines.Job? = null
+
+    var pendingInstallApkFile: File? = null
+
+    fun checkPendingInstall(context: Context) {
+        val apk = pendingInstallApkFile ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (context.packageManager.canRequestPackageInstalls()) {
+                pendingInstallApkFile = null
+                installApk(context, apk)
+            }
+        } else {
+            pendingInstallApkFile = null
+            installApk(context, apk)
+        }
+    }
+
+    fun getUpdateDirectory(context: Context): File {
+        return context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(context.filesDir, "updates")
+    }
 
     /**
      * Immediately surfaces the update modal dialog for an already detected update without waiting
@@ -314,13 +336,17 @@ class AppUpdateManager(
         // Clean up old temporary update files on check
         if (context != null) {
             try {
-                val updateDir = File(context.cacheDir, "updates")
+                val updateDir = getUpdateDirectory(context)
                 if (updateDir.exists()) {
                     updateDir.listFiles()?.forEach { file ->
-                        if (System.currentTimeMillis() - file.lastModified() > 3_600_000L) {
+                        if (System.currentTimeMillis() - file.lastModified() > 3_600_000L || file.name.endsWith(".tmp")) {
                             file.delete()
                         }
                     }
+                }
+                val oldCacheDir = File(context.cacheDir, "updates")
+                if (oldCacheDir.exists()) {
+                    oldCacheDir.deleteRecursively()
                 }
             } catch (_: Exception) {}
         }
@@ -494,16 +520,33 @@ class AppUpdateManager(
                 val localVersionCode = BuildConfig.VERSION_CODE
                 val isDevBuild = localSha.isBlank() || localSha.equals("dev", ignoreCase = true)
 
+                val prefs = context?.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
+                val lastInstalledSha = prefs?.getString("last_installed_sha", "")?.trim() ?: ""
+                val lastInstalledVersionCode = prefs?.getInt("last_installed_version_code", 0) ?: 0
+                val snoozedUntil = if (releaseSha.isNotBlank()) prefs?.getLong("snoozed_until_$releaseSha", 0L) ?: 0L else 0L
+
                 var isNewer = false
-                if (resolvedInfo.versionCode > 0 && localVersionCode > 0 && resolvedInfo.versionCode > localVersionCode) {
-                    isNewer = true
-                } else if (isDevBuild && releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
-                    isNewer = true
-                } else if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true)) {
+                if (snoozedUntil > System.currentTimeMillis()) {
+                    isNewer = false
+                } else if (resolvedInfo.versionCode > 0 && localVersionCode > 0) {
+                    // VERSION CODE IS THE STRICT DEFINITIVE AUTHORITY
+                    // If remote versionCode is <= localVersionCode, it is NEVER newer
+                    if (resolvedInfo.versionCode > localVersionCode) {
+                        isNewer = lastInstalledVersionCode < resolvedInfo.versionCode
+                    } else {
+                        isNewer = false
+                    }
+                } else if (isDevBuild && releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true) && !releaseSha.equals("HEAD", ignoreCase = true)) {
+                    isNewer = !releaseSha.equals(lastInstalledSha, ignoreCase = true)
+                } else if (releaseSha.isNotBlank() && !releaseSha.equals("latest", ignoreCase = true) && !releaseSha.equals("HEAD", ignoreCase = true)) {
                     val isSameCommit = releaseSha.equals(localSha, ignoreCase = true) ||
                             (releaseSha.length >= 7 && localSha.length >= 7 &&
                                     (releaseSha.startsWith(localSha, ignoreCase = true) || localSha.startsWith(releaseSha, ignoreCase = true)))
-                    isNewer = !isSameCommit
+                    val isAlreadyInstalled = lastInstalledSha.isNotBlank() &&
+                            (releaseSha.equals(lastInstalledSha, ignoreCase = true) ||
+                                    (releaseSha.length >= 7 && lastInstalledSha.length >= 7 &&
+                                            releaseSha.startsWith(lastInstalledSha, ignoreCase = true)))
+                    isNewer = !isSameCommit && !isAlreadyInstalled
                 } else if (resolvedInfo.publishedAt.isNotBlank() && BuildConfig.BUILD_TIME_MILLIS > 0L) {
                     try {
                         val patterns = listOf(
@@ -526,7 +569,7 @@ class AppUpdateManager(
                                 }
                             } catch (_: Exception) {}
                         }
-                        if (remoteTime > BuildConfig.BUILD_TIME_MILLIS + 60_000L) {
+                        if (remoteTime > BuildConfig.BUILD_TIME_MILLIS + 120_000L) {
                             isNewer = true
                         }
                     } catch (_: Exception) {}
@@ -555,7 +598,7 @@ class AppUpdateManager(
     }
 
     /**
-     * Downloads the APK with chunked, resumable streaming into internal cache directory,
+     * Downloads the APK with chunked, resumable streaming into dedicated app downloads directory,
      * verifies package archive integrity, and launches installation.
      */
     fun downloadAndInstall(context: Context, downloadUrl: String) {
@@ -563,13 +606,43 @@ class AppUpdateManager(
         downloadJob?.cancel()
         downloadJob = null
 
-        val knownTotalBytes = _latestAvailableUpdate.value?.apkSize ?: 0L
+        val knownTotalBytes = _latestAvailableUpdate.value?.apkSize?.takeIf { it > 0L } ?: 69_000_000L
         _updateState.value = UpdateState.Downloading(0, 0L, knownTotalBytes, 0L)
 
         downloadJob = CoroutineScope(Dispatchers.IO).launch {
             try {
-                val updateDir = File(context.cacheDir, "updates").apply { mkdirs() }
-                val apkFile = File(updateDir, "Graphite-update.apk")
+                val updateDir = getUpdateDirectory(context).apply { mkdirs() }
+                val targetInfo = _latestAvailableUpdate.value
+                val tag = when {
+                    !targetInfo?.commitSha.isNullOrBlank() && !targetInfo?.commitSha.equals("HEAD", true) -> targetInfo.commitSha.take(8)
+                    (targetInfo?.versionCode ?: 0) > 0 -> "vcode-${targetInfo?.versionCode}"
+                    else -> "latest"
+                }
+
+                val finalApkFile = File(updateDir, "Graphite-update-$tag.apk")
+                val stagingFile = File(updateDir, "Graphite-update-$tag.tmp")
+
+                // Fast-path: Check if this exact release was already downloaded and has valid package integrity
+                if (finalApkFile.exists() && finalApkFile.length() > 20_000_000L) {
+                    val existingArchive = context.packageManager.getPackageArchiveInfo(finalApkFile.absolutePath, 0)
+                    if (existingArchive != null) {
+                        _updateState.value = UpdateState.ReadyToInstall(finalApkFile)
+                        showReadyToInstallNotification(context, finalApkFile)
+                        withContext(Dispatchers.Main) {
+                            installApk(context, finalApkFile)
+                        }
+                        return@launch
+                    } else {
+                        finalApkFile.delete()
+                    }
+                }
+
+                // Clean up any stale files from other versions
+                updateDir.listFiles()?.forEach { f ->
+                    if (f != finalApkFile && f != stagingFile) {
+                        try { f.delete() } catch (_: Exception) {}
+                    }
+                }
 
                 var attempts = 0
                 var success = false
@@ -580,17 +653,17 @@ class AppUpdateManager(
                 while (attempts < 3 && !success && isActive) {
                     attempts++
                     try {
-                        val existingLength = if (apkFile.exists()) apkFile.length() else 0L
+                        val existingLength = if (stagingFile.exists()) stagingFile.length() else 0L
                         val requestBuilder = Request.Builder()
                             .url(downloadUrl)
                             .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
                             .addHeader("Accept", "*/*")
 
-                        val shouldResume = existingLength > 0L && (knownTotalBytes == 0L || existingLength < knownTotalBytes)
+                        val shouldResume = existingLength > 0L && existingLength < totalExpectedBytes
                         if (shouldResume) {
                             requestBuilder.addHeader("Range", "bytes=$existingLength-")
-                        } else if (apkFile.exists()) {
-                            apkFile.delete()
+                        } else if (stagingFile.exists()) {
+                            stagingFile.delete()
                         }
 
                         val response = httpClient.newCall(requestBuilder.build()).execute()
@@ -599,8 +672,7 @@ class AppUpdateManager(
 
                         if (!isPartial && !isOk) {
                             if (response.code == 416) {
-                                // Range invalid or server file changed: delete and restart
-                                apkFile.delete()
+                                stagingFile.delete()
                                 continue
                             }
                             throw IOException("HTTP ${response.code} ${response.message}")
@@ -608,8 +680,8 @@ class AppUpdateManager(
 
                         val body = response.body ?: throw IOException("Empty response body")
                         val append = isPartial && existingLength > 0L
-                        if (!append && apkFile.exists()) {
-                            apkFile.delete()
+                        if (!append && stagingFile.exists()) {
+                            stagingFile.delete()
                         }
 
                         val startBytes = if (append) existingLength else 0L
@@ -624,54 +696,71 @@ class AppUpdateManager(
                             if (bodyLen > 0L) bodyLen else knownTotalBytes
                         }
 
-                        val inputStream = body.byteStream()
-                        val outputStream = FileOutputStream(apkFile, append)
+                        body.byteStream().use { inputStream ->
+                            FileOutputStream(stagingFile, append).use { outputStream ->
+                                val buffer = ByteArray(65536)
+                                var bytesRead: Int
+                                var lastUpdateTime = System.currentTimeMillis()
+                                var bytesSinceLastUpdate = 0L
+                                var smoothedSpeedKbps = 0L
 
-                        val buffer = ByteArray(65536)
-                        var bytesRead: Int
-                        var lastUpdateTime = System.currentTimeMillis()
-                        var bytesSinceLastUpdate = 0L
-                        var smoothedSpeedKbps = 0L
+                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                    if (!isActive) break
+                                    outputStream.write(buffer, 0, bytesRead)
+                                    totalBytesRead += bytesRead
+                                    bytesSinceLastUpdate += bytesRead
 
-                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            totalBytesRead += bytesRead
-                            bytesSinceLastUpdate += bytesRead
+                                    val now = System.currentTimeMillis()
+                                    val elapsed = now - lastUpdateTime
+                                    if (elapsed >= 250L || (totalExpectedBytes > 0L && totalBytesRead >= totalExpectedBytes)) {
+                                        val instantSpeed = if (elapsed > 0L) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
+                                        smoothedSpeedKbps = if (smoothedSpeedKbps == 0L) instantSpeed else ((smoothedSpeedKbps * 3 + instantSpeed) / 4)
+                                        lastUpdateTime = now
+                                        bytesSinceLastUpdate = 0L
 
-                            val now = System.currentTimeMillis()
-                            val elapsed = now - lastUpdateTime
-                            if (elapsed >= 250L || (totalExpectedBytes > 0L && totalBytesRead >= totalExpectedBytes)) {
-                                val instantSpeed = if (elapsed > 0L) (bytesSinceLastUpdate * 1000L) / (elapsed * 1024L) else 0L
-                                smoothedSpeedKbps = if (smoothedSpeedKbps == 0L) instantSpeed else ((smoothedSpeedKbps * 3 + instantSpeed) / 4)
-                                lastUpdateTime = now
-                                bytesSinceLastUpdate = 0L
+                                        val progress = if (totalExpectedBytes > 0L) {
+                                            ((totalBytesRead * 100L) / totalExpectedBytes).toInt().coerceIn(0, 100)
+                                        } else 0
 
-                                val progress = if (totalExpectedBytes > 0L) {
-                                    ((totalBytesRead * 100L) / totalExpectedBytes).toInt().coerceIn(0, 100)
-                                } else 0
-
-                                _updateState.value = UpdateState.Downloading(
-                                    progressPercent = progress,
-                                    bytesDownloaded = totalBytesRead,
-                                    totalBytes = totalExpectedBytes,
-                                    speedKbps = smoothedSpeedKbps
-                                )
-                                showDownloadProgressNotification(context, progress, smoothedSpeedKbps)
+                                        _updateState.value = UpdateState.Downloading(
+                                            progressPercent = progress,
+                                            bytesDownloaded = totalBytesRead,
+                                            totalBytes = totalExpectedBytes,
+                                            speedKbps = smoothedSpeedKbps
+                                        )
+                                        showDownloadProgressNotification(context, progress, smoothedSpeedKbps)
+                                    }
+                                }
+                                outputStream.flush()
                             }
                         }
 
-                        outputStream.flush()
-                        outputStream.close()
-                        inputStream.close()
+                        if (!isActive) return@launch
 
-                        if (apkFile.length() > 0L && (totalExpectedBytes == 0L || totalBytesRead >= totalExpectedBytes)) {
-                            success = true
+                        // Verification: check downloaded size and valid Android package archive before promoting
+                        if (stagingFile.exists() && stagingFile.length() > 20_000_000L) {
+                            val archiveInfo = context.packageManager.getPackageArchiveInfo(stagingFile.absolutePath, 0)
+                            if (archiveInfo != null) {
+                                if (finalApkFile.exists()) finalApkFile.delete()
+                                if (stagingFile.renameTo(finalApkFile)) {
+                                    success = true
+                                } else {
+                                    stagingFile.copyTo(finalApkFile, overwrite = true)
+                                    stagingFile.delete()
+                                    success = true
+                                }
+                            } else {
+                                stagingFile.delete()
+                                throw IOException("Package verification failed on downloaded archive")
+                            }
                         } else if (attempts < 3 && isActive) {
+                            stagingFile.delete()
                             delay(1000L * attempts)
                         }
                     } catch (e: Exception) {
                         lastException = e
                         if (!isActive) return@launch
+                        stagingFile.delete()
                         if (attempts < 3) {
                             delay(1000L * attempts)
                         }
@@ -684,18 +773,10 @@ class AppUpdateManager(
                     return@launch
                 }
 
-                // Verify downloaded APK package integrity before presenting to installer
-                val archiveInfo = context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
-                if (archiveInfo == null) {
-                    apkFile.delete()
-                    _updateState.value = UpdateState.Error("Downloaded APK package is corrupted or incomplete. Please retry.")
-                    return@launch
-                }
-
-                _updateState.value = UpdateState.ReadyToInstall(apkFile)
-                showReadyToInstallNotification(context, apkFile)
+                _updateState.value = UpdateState.ReadyToInstall(finalApkFile)
+                showReadyToInstallNotification(context, finalApkFile)
                 withContext(Dispatchers.Main) {
-                    installApk(context, apkFile)
+                    installApk(context, finalApkFile)
                 }
             } catch (e: Exception) {
                 if (e !is kotlinx.coroutines.CancellationException) {
@@ -711,8 +792,12 @@ class AppUpdateManager(
         if (context != null) {
             clearNotification(context)
             try {
-                val updateDir = File(context.cacheDir, "updates")
-                if (updateDir.exists()) updateDir.listFiles()?.forEach { it.delete() }
+                val updateDir = getUpdateDirectory(context)
+                if (updateDir.exists()) {
+                    updateDir.listFiles()?.forEach {
+                        if (it.name.endsWith(".tmp")) it.delete()
+                    }
+                }
             } catch (_: Exception) {}
         }
         dismissUpdate(context, sha)
@@ -732,8 +817,8 @@ class AppUpdateManager(
     fun installApk(context: Context, apkFile: File) {
         try {
             clearNotification(context)
-            if (!apkFile.exists() || apkFile.length() == 0L) {
-                _updateState.value = UpdateState.Error("APK file not found or empty.")
+            if (!apkFile.exists() || apkFile.length() < 20_000_000L) {
+                _updateState.value = UpdateState.Error("APK file not found or corrupted.")
                 return
             }
 
@@ -747,6 +832,7 @@ class AppUpdateManager(
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (!context.packageManager.canRequestPackageInstalls()) {
+                    pendingInstallApkFile = apkFile
                     Toast.makeText(
                         context,
                         "Please allow Graphite to install unknown apps, then return here to install",
@@ -772,6 +858,7 @@ class AppUpdateManager(
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                         Intent.FLAG_GRANT_READ_URI_PERMISSION or
                         Intent.FLAG_ACTIVITY_CLEAR_TOP
+                clipData = ClipData.newRawUri("Graphite Update", contentUri)
             }
 
             // Grant read permissions to all matched installer activities
@@ -786,33 +873,39 @@ class AppUpdateManager(
             }
 
             for (resolveInfo in resolved) {
-                context.grantUriPermission(
-                    resolveInfo.activityInfo.packageName,
-                    contentUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
+                try {
+                    context.grantUriPermission(
+                        resolveInfo.activityInfo.packageName,
+                        contentUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {}
             }
 
-            // Explicitly grant permissions to system package installers
+            // Explicitly grant permissions to system package installers across OEMs
             listOf(
                 "com.google.android.packageinstaller",
                 "com.android.packageinstaller",
-                "com.samsung.android.packageinstaller"
+                "com.samsung.android.packageinstaller",
+                "com.miui.packageinstaller",
+                "com.coloros.packageinstaller",
+                "com.oppo.market",
+                "com.vivo.appstore"
             ).forEach { pkg ->
                 try {
                     context.grantUriPermission(pkg, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 } catch (_: Exception) {}
             }
 
-            // Record this release SHA as installed so Graphite will not loop upon app restart
+            // Record this release SHA and versionCode as installed so Graphite will not loop upon app restart
             val targetSha = _latestAvailableUpdate.value?.commitSha
-            if (!targetSha.isNullOrBlank()) {
-                context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
-                    .edit()
-                    .putString("last_installed_sha", targetSha)
-                    .putLong("last_installed_time", System.currentTimeMillis())
-                    .apply()
-            }
+            val targetVersionCode = _latestAvailableUpdate.value?.versionCode ?: 0
+            context.getSharedPreferences("graphite_updater", Context.MODE_PRIVATE)
+                .edit()
+                .putString("last_installed_sha", targetSha ?: "")
+                .putInt("last_installed_version_code", targetVersionCode)
+                .putLong("last_installed_time", System.currentTimeMillis())
+                .apply()
 
             context.startActivity(installIntent)
         } catch (e: Exception) {

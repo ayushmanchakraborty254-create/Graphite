@@ -1,8 +1,8 @@
 {
-  "versionCode": 107,
+  "versionCode": 109,
   "versionName": "1.0.0",
-  "commitSha": "1c093ca",
-  "commitMessage": "feat: folder click navigation, multi-note collective drag, undo move snackbar, move back to All Notes, and notebook ink stabilization",
-  "buildDate": "2026-11-27 07:01 UTC",
+  "commitSha": "8c912cf",
+  "commitMessage": "fix: update downloader stability, prevent false update loops, atomic asset releases, and OEM installer permissions",
+  "buildDate": "2026-11-27 09:35 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }
