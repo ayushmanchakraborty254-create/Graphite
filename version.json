@@ -1,8 +1,8 @@
 {
   "versionCode": 105,
   "versionName": "1.0.0",
-  "commitSha": "83c372a",
-  "commitMessage": "fix: mobile 2-column grid layout, auto file-path resolution for PDF thumbnails, and clean paper styling",
-  "buildDate": "2026-11-25 03:13 UTC",
+  "commitSha": "HEAD",
+  "commitMessage": "feat: folder click navigation, multi-note collective drag, undo move snackbar, move back to All Notes, and notebook ink stabilization",
+  "buildDate": "2026-11-27 06:55 UTC",
   "downloadUrl": "https://github.com/ayushmanchakraborty254-create/Graphite/releases/download/latest/Graphite-v1.0.0.apk"
 }

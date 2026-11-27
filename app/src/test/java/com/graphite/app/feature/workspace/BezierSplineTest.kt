@@ -63,16 +63,16 @@ class BezierSplineTest {
     }
 
     @Test
-    fun testPressureModulatedStrokeWidth() {
+    fun testStableStrokeWidthWithoutPressureFluctuations() {
         val baseWidth = 10f
 
         val minWidth = BezierSplineInterpolator.calculateEffectiveWidth(baseWidth, 0.05f)
         val midWidth = BezierSplineInterpolator.calculateEffectiveWidth(baseWidth, 0.5f)
         val maxWidth = BezierSplineInterpolator.calculateEffectiveWidth(baseWidth, 1.0f)
 
-        // Effective width should scale monotonically with pressure
-        assertTrue("Min width ($minWidth) should be less than mid width ($midWidth)", minWidth < midWidth)
-        assertTrue("Mid width ($midWidth) should be less than max width ($maxWidth)", midWidth < maxWidth)
-        assertEquals(baseWidth * (0.4f + 0.9f * 1.0f), maxWidth, 0.001f)
+        // Effective width stays rock-solid to eliminate ink blinking and thin-fat swinging
+        assertEquals(baseWidth, minWidth, 0.001f)
+        assertEquals(baseWidth, midWidth, 0.001f)
+        assertEquals(baseWidth, maxWidth, 0.001f)
     }
 }

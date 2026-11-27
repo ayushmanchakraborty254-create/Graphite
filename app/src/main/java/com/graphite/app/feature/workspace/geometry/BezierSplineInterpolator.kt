@@ -106,11 +106,10 @@ object BezierSplineInterpolator {
     }
 
     /**
-     * Calculates the effective stroke width modulated by normalized stylus pressure.
+     * Calculates the effective stroke width. Returns uniform stable width to eliminate
+     * ink blinking on stroke finish and avoid unwanted thickness fluctuations while writing.
      */
     fun calculateEffectiveWidth(baseWidth: Float, pressure: Float): Float {
-        // Taper stroke width with pressure: 40% base width at minimum pressure, up to 130% at max pressure
-        val clampedPressure = pressure.coerceIn(0.05f, 1.0f)
-        return baseWidth * (0.4f + 0.9f * clampedPressure)
+        return baseWidth
     }
 }

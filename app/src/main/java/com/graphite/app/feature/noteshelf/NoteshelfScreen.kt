@@ -209,6 +209,10 @@ fun NoteshelfScreen(
     var hoveredFolderId by remember { mutableStateOf<String?>(null) }
     val folderBoundsMap = remember { mutableMapOf<String, Rect>() }
     var expandedFolderIds by remember { mutableStateOf(setOf<String>()) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    var allNotesBounds by remember { mutableStateOf<Rect?>(null) }
+    var backToParentBounds by remember { mutableStateOf<Rect?>(null) }
+    var isHoveredOnAllNotes by remember { mutableStateOf(false) }
 
     // Auto-expand folder dropdown when hovered during drag-and-drop
     LaunchedEffect(hoveredFolderId, isDraggingNote, isDraggingFolder) {
@@ -456,11 +460,25 @@ fun NoteshelfScreen(
                     otherNoteIdsToMove = toMove - duplicateNote.id
                 )
             } else {
+                val prevFolders = notesToMoveList.associate { it.id to it.folderId }
                 GraphiteRepository.moveNotebooksToFolder(toMove, target.id)
                 val msg = if (toMove.size == 1) "Moved \"${note.title}\" to ${target.name}"
                           else "Moved ${toMove.size} notes to ${target.name}"
-                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                 selectedNotebookIds = emptySet()
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val res = snackbarHostState.showSnackbar(
+                        message = msg,
+                        actionLabel = "Undo",
+                        duration = SnackbarDuration.Short
+                    )
+                    if (res == SnackbarResult.ActionPerformed) {
+                        prevFolders.forEach { (nId, fId) ->
+                            GraphiteRepository.moveNotebooksToFolder(setOf(nId), fId)
+                        }
+                        Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
     }
@@ -478,14 +496,96 @@ fun NoteshelfScreen(
                 fId != targetFolderId && !isDescendantOf(targetFolderId, fId)
             }
             if (validToMove.isNotEmpty()) {
+                val prevParents = validToMove.associateWith { fId -> folders.find { it.id == fId }?.parentId }
                 validToMove.forEach { fId ->
                     GraphiteRepository.updateFolder(folderId = fId, newParentId = targetFolderId)
                 }
                 val msg = if (validToMove.size == 1) "Moved \"${f.name}\" to ${target.name}"
                           else "Moved ${validToMove.size} folders to ${target.name}"
-                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                selectedFolderIds = emptySet()
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val res = snackbarHostState.showSnackbar(
+                        message = msg,
+                        actionLabel = "Undo",
+                        duration = SnackbarDuration.Short
+                    )
+                    if (res == SnackbarResult.ActionPerformed) {
+                        prevParents.forEach { (fId, pId) ->
+                            GraphiteRepository.updateFolder(folderId = fId, newParentId = pId)
+                        }
+                        Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                selectedFolderIds = emptySet()
             }
-            selectedFolderIds = emptySet()
+        }
+    }
+
+    val handleDropOnAllNotes: () -> Unit = {
+        if (isDraggingFolder && draggedFolder != null) {
+            val f = draggedFolder!!
+            val toMove = if (f.id in selectedFolderIds && selectedFolderIds.size > 1) {
+                selectedFolderIds
+            } else {
+                setOf(f.id)
+            }
+            val validToMove = toMove.filter { fId ->
+                folders.find { it.id == fId }?.parentId != null
+            }
+            if (validToMove.isNotEmpty()) {
+                val prevParents = validToMove.associateWith { fId -> folders.find { it.id == fId }?.parentId }
+                validToMove.forEach { fId ->
+                    GraphiteRepository.updateFolder(folderId = fId, newParentId = null)
+                }
+                val msg = if (validToMove.size == 1) "Moved \"${f.name}\" to All Notes"
+                          else "Moved ${validToMove.size} folders to All Notes"
+                selectedFolderIds = emptySet()
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val res = snackbarHostState.showSnackbar(
+                        message = msg,
+                        actionLabel = "Undo",
+                        duration = SnackbarDuration.Short
+                    )
+                    if (res == SnackbarResult.ActionPerformed) {
+                        prevParents.forEach { (fId, pId) ->
+                            GraphiteRepository.updateFolder(folderId = fId, newParentId = pId)
+                        }
+                        Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                selectedFolderIds = emptySet()
+            }
+        } else if (isDraggingNote && draggedNotebook != null) {
+            val note = draggedNotebook!!
+            val toMove = if (note.id in selectedNotebookIds && selectedNotebookIds.size > 1) {
+                selectedNotebookIds
+            } else {
+                setOf(note.id)
+            }
+            val notesToMoveList = notebooks.filter { it.id in toMove }
+            val prevFolders = notesToMoveList.associate { it.id to it.folderId }
+            GraphiteRepository.moveNotebooksToFolder(toMove, "unfiled")
+            val msg = if (toMove.size == 1) "Moved \"${note.title}\" to All Notes"
+                      else "Moved ${toMove.size} notes to All Notes"
+            selectedNotebookIds = emptySet()
+            scope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                val res = snackbarHostState.showSnackbar(
+                    message = msg,
+                    actionLabel = "Undo",
+                    duration = SnackbarDuration.Short
+                )
+                if (res == SnackbarResult.ActionPerformed) {
+                    prevFolders.forEach { (nId, fId) ->
+                        GraphiteRepository.moveNotebooksToFolder(setOf(nId), fId)
+                    }
+                    Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -627,6 +727,10 @@ fun NoteshelfScreen(
                 icon = Icons.Default.Home,
                 count = notebooks.count { !it.isDeleted },
                 isSelected = selectedCategory == "All Notes",
+                isHovered = isHoveredOnAllNotes,
+                modifier = Modifier.onGloballyPositioned { coords ->
+                    allNotesBounds = coords.boundsInRoot()
+                },
                 onClick = {
                     selectedCategory = "All Notes"
                     if (!isTablet) sidebarVisible = false
@@ -1445,8 +1549,14 @@ fun NoteshelfScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(bottom = 12.dp)
+                                .onGloballyPositioned { coords ->
+                                    backToParentBounds = coords.boundsInRoot()
+                                }
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF1E1E22))
+                                .background(if (isHoveredOnAllNotes) GraphiteOrange.copy(alpha = 0.3f) else Color(0xFF1E1E22))
+                                .then(
+                                    if (isHoveredOnAllNotes) Modifier.border(2.dp, GraphiteOrange, RoundedCornerShape(10.dp)) else Modifier
+                                )
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -1678,11 +1788,9 @@ fun NoteshelfScreen(
                                     noteCount = noteCount,
                                     isHoveredForDrop = (hoveredFolderId == folder.id),
                                     onClick = {
-                                        if (isSelectionMode) {
-                                            toggleFolderSelection(folder.id)
-                                        } else {
-                                            selectedCategory = folder.id
-                                        }
+                                        selectedCategory = folder.id
+                                        selectedNotebookIds = emptySet()
+                                        selectedFolderIds = emptySet()
                                     },
                                     onLongClick = { toggleFolderSelection(folder.id) },
                                     onUploadFolder = { handleUploadWholeFolder(folder) },
@@ -1726,25 +1834,34 @@ fun NoteshelfScreen(
                                 onDrag = { dragAmount ->
                                     dragTouchPositionInRoot += dragAmount
                                     totalDragDistance += dragAmount.getDistance()
-                                    hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
-                                        rect.contains(dragTouchPositionInRoot)
-                                    }?.key
+                                    val hoveredOnAllNotes = (allNotesBounds?.contains(dragTouchPositionInRoot) == true) ||
+                                        (backToParentBounds?.contains(dragTouchPositionInRoot) == true)
+                                    isHoveredOnAllNotes = hoveredOnAllNotes
+                                    if (!hoveredOnAllNotes) {
+                                        hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
+                                            rect.contains(dragTouchPositionInRoot)
+                                        }?.key
+                                    } else {
+                                        hoveredFolderId = null
+                                    }
                                 },
                                 onDragEnd = {
-                                    if (hoveredFolderId != null && draggedNotebook != null) {
+                                    if (isHoveredOnAllNotes) {
+                                        handleDropOnAllNotes()
+                                    } else if (hoveredFolderId != null && draggedNotebook != null) {
                                         handleDropOnFolder(hoveredFolderId!!)
-                                    } else if (totalDragDistance < 15f) {
-                                        toggleNoteSelection(notebook.id)
                                     }
                                     isDraggingNote = false
                                     draggedNotebook = null
                                     hoveredFolderId = null
+                                    isHoveredOnAllNotes = false
                                     totalDragDistance = 0f
                                 },
                                 onDragCancel = {
                                     isDraggingNote = false
                                     draggedNotebook = null
                                     hoveredFolderId = null
+                                    isHoveredOnAllNotes = false
                                     totalDragDistance = 0f
                                 },
                                 onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
@@ -1795,11 +1912,9 @@ fun NoteshelfScreen(
                                     isSelectionMode = isSelectionMode,
                                     isHoveredForDrop = (hoveredFolderId == folder.id),
                                     onClick = {
-                                        if (isSelectionMode) {
-                                            toggleFolderSelection(folder.id)
-                                        } else {
-                                            selectedCategory = folder.id
-                                        }
+                                        selectedCategory = folder.id
+                                        selectedNotebookIds = emptySet()
+                                        selectedFolderIds = emptySet()
                                     },
                                     onLongClick = {
                                         toggleFolderSelection(folder.id)
@@ -1816,28 +1931,37 @@ fun NoteshelfScreen(
                                     onDrag = { dragAmount ->
                                         dragTouchPositionInRoot += dragAmount
                                         totalDragDistance += dragAmount.getDistance()
-                                        hoveredFolderId = folderBoundsMap.entries.firstOrNull { (fId, rect) ->
-                                            rect.contains(dragTouchPositionInRoot) &&
-                                                fId != folder.id &&
-                                                !isDescendantOf(fId, folder.id) &&
-                                                fId !in selectedFolderIds
-                                        }?.key
+                                        val hoveredOnAllNotes = (allNotesBounds?.contains(dragTouchPositionInRoot) == true) ||
+                                            (backToParentBounds?.contains(dragTouchPositionInRoot) == true)
+                                        isHoveredOnAllNotes = hoveredOnAllNotes
+                                        if (!hoveredOnAllNotes) {
+                                            hoveredFolderId = folderBoundsMap.entries.firstOrNull { (fId, rect) ->
+                                                rect.contains(dragTouchPositionInRoot) &&
+                                                    fId != folder.id &&
+                                                    !isDescendantOf(fId, folder.id) &&
+                                                    fId !in selectedFolderIds
+                                            }?.key
+                                        } else {
+                                            hoveredFolderId = null
+                                        }
                                     },
                                     onDragEnd = {
-                                        if (hoveredFolderId != null && draggedFolder != null) {
+                                        if (isHoveredOnAllNotes) {
+                                            handleDropOnAllNotes()
+                                        } else if (hoveredFolderId != null && draggedFolder != null) {
                                             handleDropFolderOnFolder(hoveredFolderId!!)
-                                        } else if (totalDragDistance < 15f) {
-                                            toggleFolderSelection(folder.id)
                                         }
                                         isDraggingFolder = false
                                         draggedFolder = null
                                         hoveredFolderId = null
+                                        isHoveredOnAllNotes = false
                                         totalDragDistance = 0f
                                     },
                                     onDragCancel = {
                                         isDraggingFolder = false
                                         draggedFolder = null
                                         hoveredFolderId = null
+                                        isHoveredOnAllNotes = false
                                         totalDragDistance = 0f
                                     },
                                     onUploadFolder = { handleUploadWholeFolder(folder) },
@@ -1882,25 +2006,34 @@ fun NoteshelfScreen(
                                 onDrag = { dragAmount ->
                                     dragTouchPositionInRoot += dragAmount
                                     totalDragDistance += dragAmount.getDistance()
-                                    hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
-                                        rect.contains(dragTouchPositionInRoot)
-                                    }?.key
+                                    val hoveredOnAllNotes = (allNotesBounds?.contains(dragTouchPositionInRoot) == true) ||
+                                        (backToParentBounds?.contains(dragTouchPositionInRoot) == true)
+                                    isHoveredOnAllNotes = hoveredOnAllNotes
+                                    if (!hoveredOnAllNotes) {
+                                        hoveredFolderId = folderBoundsMap.entries.firstOrNull { (_, rect) ->
+                                            rect.contains(dragTouchPositionInRoot)
+                                        }?.key
+                                    } else {
+                                        hoveredFolderId = null
+                                    }
                                 },
                                 onDragEnd = {
-                                    if (hoveredFolderId != null && draggedNotebook != null) {
+                                    if (isHoveredOnAllNotes) {
+                                        handleDropOnAllNotes()
+                                    } else if (hoveredFolderId != null && draggedNotebook != null) {
                                         handleDropOnFolder(hoveredFolderId!!)
-                                    } else if (totalDragDistance < 15f) {
-                                        toggleNoteSelection(notebook.id)
                                     }
                                     isDraggingNote = false
                                     draggedNotebook = null
                                     hoveredFolderId = null
+                                    isHoveredOnAllNotes = false
                                     totalDragDistance = 0f
                                 },
                                 onDragCancel = {
                                     isDraggingNote = false
                                     draggedNotebook = null
                                     hoveredFolderId = null
+                                    isHoveredOnAllNotes = false
                                     totalDragDistance = 0f
                                 },
                                 onOpenSplitScreen = if (onOpenSplitScreen != null) { { splitScreenDocA = notebook; showSplitDocPicker = true } } else null,
@@ -1959,7 +2092,7 @@ fun NoteshelfScreen(
                     .shadow(16.dp, RoundedCornerShape(12.dp)),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF222226)),
                 shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(2.dp, if (hoveredFolderId != null) GraphiteOrange else Color(0xFF64B5F6))
+                border = BorderStroke(2.dp, if (hoveredFolderId != null || isHoveredOnAllNotes) GraphiteOrange else Color(0xFF64B5F6))
             ) {
                 Column(
                     modifier = Modifier
@@ -1976,6 +2109,7 @@ fun NoteshelfScreen(
                         val isImage = note.hasPhotos || note.mimeType?.startsWith("image/") == true ||
                             note.filePath?.let { p -> listOf(".png", ".jpg", ".jpeg", ".webp").any { p.endsWith(it, true) } } == true
                         val icon = when {
+                            isHoveredOnAllNotes -> Icons.Default.Home
                             isPdf -> Icons.Default.PictureAsPdf
                             isImage -> Icons.Default.Image
                             else -> Icons.Default.Description
@@ -1983,7 +2117,7 @@ fun NoteshelfScreen(
                         Icon(
                             imageVector = icon,
                             contentDescription = null,
-                            tint = if (hoveredFolderId != null) GraphiteOrange else Color.White,
+                            tint = if (hoveredFolderId != null || isHoveredOnAllNotes) GraphiteOrange else Color.White,
                             modifier = Modifier.size(22.dp)
                         )
                         if (count > 1) {
@@ -2006,13 +2140,15 @@ fun NoteshelfScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = if (hoveredFolderId != null) {
+                        text = if (isHoveredOnAllNotes) {
+                            if (count > 1) "Drop to move $count notes to All Notes" else "Drop to move to All Notes"
+                        } else if (hoveredFolderId != null) {
                             val fName = folders.find { it.id == hoveredFolderId }?.name
                             if (fName != null) "Drop into \"$fName\"" else "Drop to move inside"
                         } else {
-                            if (count > 1) "Drag $count notes over folder" else "Drag over folder to drop"
+                            if (count > 1) "Drag $count notes over folder or All Notes" else "Drag over folder or All Notes"
                         },
-                        color = if (hoveredFolderId != null) GraphiteOrange else Color.LightGray,
+                        color = if (hoveredFolderId != null || isHoveredOnAllNotes) GraphiteOrange else Color.LightGray,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -2049,7 +2185,7 @@ fun NoteshelfScreen(
                     .shadow(16.dp, ModernFolderShape),
                 colors = CardDefaults.cardColors(containerColor = fColor),
                 shape = ModernFolderShape,
-                border = BorderStroke(2.dp, if (hoveredFolderId != null) GraphiteOrange else Color.White)
+                border = BorderStroke(2.dp, if (hoveredFolderId != null || isHoveredOnAllNotes) GraphiteOrange else Color.White)
             ) {
                 Box(
                     modifier = Modifier
@@ -2079,16 +2215,16 @@ fun NoteshelfScreen(
                             )
                         }
                     }
-                    if (hoveredFolderId != null) {
+                    if (hoveredFolderId != null || isHoveredOnAllNotes) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .background(Color.Black.copy(alpha = 0.45f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            val fName = folders.find { it.id == hoveredFolderId }?.name
+                            val fName = if (isHoveredOnAllNotes) "All Notes" else folders.find { it.id == hoveredFolderId }?.name
                             Text(
-                                text = if (fName != null) "Drop into \"$fName\"" else "Drop to nest",
+                                text = if (isHoveredOnAllNotes) "Drop to move to All Notes" else if (fName != null) "Drop into \"$fName\"" else "Drop to nest",
                                 color = Color.White,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -2179,6 +2315,22 @@ fun NoteshelfScreen(
                 modifier = Modifier.size(28.dp)
             )
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 76.dp),
+            snackbar = { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = Color(0xFF26262B),
+                    contentColor = Color.White,
+                    actionColor = GraphiteOrange,
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+        )
     }
 
     if (showNewNotebookDialog) {
@@ -2359,18 +2511,23 @@ fun NoteshelfScreen(
             currentFolderId = "",
             onDismiss = { showMoveMultiFolderDialog = false },
             onSelectFolder = { folderId ->
+                val isAllNotes = folderId == "unfiled" || folderId.isBlank()
                 val target = folders.find { it.id == folderId }
-                val targetName = target?.name ?: "folder"
+                val targetName = if (isAllNotes) "All Notes" else target?.name ?: "folder"
 
+                val prevParents = mutableMapOf<String, String?>()
                 if (selectedFolderIds.isNotEmpty()) {
                     val validFoldersToMove = selectedFolderIds.filter { it != folderId && !isDescendantOf(folderId, it) }
                     validFoldersToMove.forEach { fId ->
-                        GraphiteRepository.updateFolder(folderId = fId, newParentId = folderId)
+                        prevParents[fId] = folders.find { it.id == fId }?.parentId
+                        GraphiteRepository.updateFolder(folderId = fId, newParentId = if (isAllNotes) null else folderId)
                     }
                 }
 
+                val prevFolders = mutableMapOf<String, String>()
                 if (selectedNotebookIds.isNotEmpty()) {
-                    val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
+                    val destFolderId = if (isAllNotes) "unfiled" else folderId
+                    val existingInTarget = notebooks.filter { it.folderId == destFolderId && !it.isDeleted }
                     val notesToMoveList = notebooks.filter { it.id in selectedNotebookIds }
                     val duplicate = notesToMoveList.find { n ->
                         existingInTarget.any { existing ->
@@ -2385,11 +2542,29 @@ fun NoteshelfScreen(
                             otherNoteIdsToMove = selectedNotebookIds - duplicate.id
                         )
                     } else {
-                        GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, folderId)
+                        notesToMoveList.forEach { prevFolders[it.id] = it.folderId }
+                        GraphiteRepository.moveNotebooksToFolder(selectedNotebookIds, destFolderId)
                     }
                 }
                 val totalCount = selectedNotebookIds.size + selectedFolderIds.size
-                Toast.makeText(context, "Moved $totalCount items to $targetName", Toast.LENGTH_SHORT).show()
+                val msg = "Moved $totalCount items to $targetName"
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val res = snackbarHostState.showSnackbar(
+                        message = msg,
+                        actionLabel = "Undo",
+                        duration = SnackbarDuration.Short
+                    )
+                    if (res == SnackbarResult.ActionPerformed) {
+                        prevParents.forEach { (fId, pId) ->
+                            GraphiteRepository.updateFolder(folderId = fId, newParentId = pId)
+                        }
+                        prevFolders.forEach { (nId, fId) ->
+                            GraphiteRepository.moveNotebooksToFolder(setOf(nId), fId)
+                        }
+                        Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                    }
+                }
                 selectedNotebookIds = emptySet()
                 selectedFolderIds = emptySet()
                 showMoveMultiFolderDialog = false
@@ -2613,9 +2788,11 @@ fun NoteshelfScreen(
             currentFolderId = note.folderId,
             onDismiss = { showMoveFolderDialogForNote = null },
             onSelectFolder = { folderId ->
+                val isAllNotes = folderId == "unfiled" || folderId.isBlank()
                 val target = folders.find { it.id == folderId }
-                val targetName = target?.name ?: "folder"
-                val existingInTarget = notebooks.filter { it.folderId == folderId && !it.isDeleted }
+                val targetName = if (isAllNotes) "All Notes" else target?.name ?: "folder"
+                val destFolderId = if (isAllNotes) "unfiled" else folderId
+                val existingInTarget = notebooks.filter { it.folderId == destFolderId && !it.isDeleted }
                 val duplicate = existingInTarget.find { existing ->
                     existing.id != note.id && existing.title.trim().equals(note.title.trim(), ignoreCase = true)
                 }
@@ -2627,8 +2804,21 @@ fun NoteshelfScreen(
                         otherNoteIdsToMove = emptySet()
                     )
                 } else {
-                    GraphiteRepository.moveNotebookToFolder(note.id, folderId)
-                    Toast.makeText(context, "Moved \"${note.title}\" to $targetName", Toast.LENGTH_SHORT).show()
+                    val prevFolderId = note.folderId
+                    GraphiteRepository.moveNotebookToFolder(note.id, destFolderId)
+                    val msg = "Moved \"${note.title}\" to $targetName"
+                    scope.launch {
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        val res = snackbarHostState.showSnackbar(
+                            message = msg,
+                            actionLabel = "Undo",
+                            duration = SnackbarDuration.Short
+                        )
+                        if (res == SnackbarResult.ActionPerformed) {
+                            GraphiteRepository.moveNotebookToFolder(note.id, prevFolderId)
+                            Toast.makeText(context, "Movement undone", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
                 showMoveFolderDialogForNote = null
             }
@@ -2833,16 +3023,21 @@ private fun SidebarItem(
     count: Int? = null,
     badgeText: String? = null,
     isSelected: Boolean = false,
+    isHovered: Boolean = false,
     iconSize: androidx.compose.ui.unit.Dp = 18.dp,
     iconTint: Color? = null,
     onLongClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(if (isSelected) GraphiteOrange else Color.Transparent)
+            .background(if (isHovered) GraphiteOrange.copy(alpha = 0.35f) else if (isSelected) GraphiteOrange else Color.Transparent)
+            .then(
+                if (isHovered) Modifier.border(1.5.dp, GraphiteOrange, RoundedCornerShape(8.dp)) else Modifier
+            )
             .then(
                 if (onLongClick != null) {
                     Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
@@ -3088,6 +3283,8 @@ private fun FolderThumbnailCard(
             }
             .notebookTapDragModifier(
                 key = "folder_${folder.id}",
+                isSelected = isSelected,
+                isSelectionMode = isSelectionMode,
                 onClick = onClick,
                 onLongClick = onLongClick,
                 onDragStart = onDragStart,
@@ -3469,6 +3666,8 @@ private fun FolderListRow(
  */
 private fun Modifier.notebookTapDragModifier(
     key: Any?,
+    isSelected: Boolean = false,
+    isSelectionMode: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDragStart: ((Offset) -> Unit)? = null,
@@ -3476,18 +3675,20 @@ private fun Modifier.notebookTapDragModifier(
     onDragEnd: (() -> Unit)? = null,
     onDragCancel: (() -> Unit)? = null,
     getRootPosition: () -> Offset = { Offset.Zero }
-): Modifier = this.pointerInput(key) {
+): Modifier = this.pointerInput(key, isSelected, isSelectionMode) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
         val startPos = down.position
         val touchSlop = viewConfiguration.touchSlop
-        val longPressTimeout = 400L
+        val longPressTimeout = 350L
 
         var isLongPressActive = false
         var isDragging = false
         val pointerId = down.id
 
-        // Phase 1: Wait for 400ms hold, tap release, or scroll movement
+        val immediateDragAllowed = isSelectionMode && isSelected && onDragStart != null
+
+        // Phase 1: Wait for 350ms hold, tap release, or scroll movement
         try {
             withTimeout(longPressTimeout) {
                 while (true) {
@@ -3495,9 +3696,9 @@ private fun Modifier.notebookTapDragModifier(
                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
 
                     if (!change.pressed) {
-                        // Lifted before 400ms -> Tap!
+                        // Lifted before timeout -> Tap!
                         val distance = (change.position - startPos).getDistance()
-                        if (distance <= touchSlop && !down.isConsumed && !change.isConsumed) {
+                        if (distance <= touchSlop) {
                             change.consume()
                             onClick()
                         }
@@ -3506,20 +3707,31 @@ private fun Modifier.notebookTapDragModifier(
 
                     val distance = (change.position - startPos).getDistance()
                     if (distance > touchSlop) {
-                        // User swiped or moved finger before 400ms -> SCROLL!
-                        // Do NOT consume pointer, yield immediately so list/grid scrolls smoothly.
-                        return@withTimeout
+                        if (immediateDragAllowed) {
+                            isLongPressActive = true
+                            isDragging = true
+                            change.consume()
+                            val rootStart = getRootPosition() + change.position
+                            onDragStart.invoke(rootStart)
+                            return@withTimeout
+                        } else {
+                            // User swiped or moved finger before timeout -> SCROLL!
+                            // Do NOT consume pointer, yield immediately so list/grid scrolls smoothly.
+                            return@withTimeout
+                        }
                     }
                 }
             }
         } catch (_: Exception) {
-            // Held stationary for 400ms! Trigger long-press immediately while finger is still held down!
+            // Held stationary for timeout!
             isLongPressActive = true
             down.consume()
-            onLongClick()
+            if (!immediateDragAllowed) {
+                onLongClick()
+            }
         }
 
-        // Phase 2: If long press triggered, handle drag-and-drop or release
+        // Phase 2: If long press triggered or drag activated, handle drag-and-drop or release
         if (isLongPressActive) {
             while (true) {
                 val event = awaitPointerEvent()
@@ -3622,6 +3834,8 @@ private fun NotebookThumbnailCard(
             }
             .notebookTapDragModifier(
                 key = notebook.id,
+                isSelected = isSelected,
+                isSelectionMode = isSelectionMode,
                 onClick = onClick,
                 onLongClick = onLongClick,
                 onDragStart = onDragStart,
@@ -4238,6 +4452,8 @@ private fun NotebookListRow(
             }
             .notebookTapDragModifier(
                 key = notebook.id,
+                isSelected = isSelected,
+                isSelectionMode = isSelectionMode,
                 onClick = onClick,
                 onLongClick = onLongClick,
                 onDragStart = onDragStart,
@@ -5800,7 +6016,23 @@ private fun MoveNoteFolderDialog(
                         onClick = { onSelectFolder("unfiled") },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("• Unfiled", color = if (currentFolderId == "unfiled") GraphiteOrange else Color.White)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Home,
+                                contentDescription = null,
+                                tint = GraphiteOrange,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "• All Notes (Main Shelf)",
+                                color = if (currentFolderId == "unfiled" || currentFolderId.isBlank()) GraphiteOrange else Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
                 items(folders) { folder ->

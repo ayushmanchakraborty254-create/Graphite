@@ -3596,7 +3596,7 @@ fun CanvasEditorScreen(
                         Spacer(modifier = Modifier.height(4.dp))
 
                         if (isPenTool) {
-                            val penPresets = listOf(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+                            val penPresets = listOf(6, 10, 15, 20, 30, 40, 50, 60, 80, 100)
                             LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier.fillMaxWidth()
